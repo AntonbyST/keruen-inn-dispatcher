@@ -202,6 +202,7 @@
   .helptext{ font-size:12px; color:var(--ink-faint); margin-top:4px; }
   .zone-legend{ display:flex; gap:14px; flex-wrap:wrap; font-size:12px; color:var(--ink-soft); }
   .zone-legend span b{ color:var(--ink); }
+  #map-canvas{ height:540px; width:100%; border-radius:var(--radius); border:1px solid var(--line); }
   ::selection{ background:var(--accent-soft); }
 
   /* ---------- auth screen ---------- */
@@ -227,22 +228,30 @@
      (Project URL и anon public key — не секретный service_role!). */
   var SUPABASE_URL = "https://wpgbkndpojjjimppxogm.supabase.co";
   var SUPABASE_ANON_KEY = "sb_publishable_WOzfGGAkM1SJiFKnhkBc2w_Nia1I0za";
+  /* Карта отелей (пункт "Карта" в меню) — нужен свой ключ Google Maps JavaScript API
+     (console.cloud.google.com -> APIs & Services -> Credentials -> Create API key,
+     затем включить "Maps JavaScript API" для проекта). Без ключа пункт "Карта"
+     покажет подсказку вместо карты — остальное приложение работает как обычно. */
+  var GOOGLE_MAPS_API_KEY = "YOUR-GOOGLE-MAPS-API-KEY";
   /* ============================================================================ */
 
   var CONFIGURED = SUPABASE_URL.indexOf("YOUR-PROJECT") === -1 && SUPABASE_ANON_KEY.indexOf("YOUR-ANON") === -1;
+  var MAPS_CONFIGURED = GOOGLE_MAPS_API_KEY.indexOf("YOUR-") === -1;
   var LIB_LOADED = typeof window.supabase !== "undefined" && !!window.supabase.createClient;
   var sb = (CONFIGURED && LIB_LOADED) ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
 
   /* ============================== CONFIG ============================== */
+  // lat/lng — координаты города (не точного адреса объекта); при необходимости
+  // поправьте на точные координаты гостиницы для более точных меток на карте.
   var HOTELS = [
-    {id:1, name:"Мерке",        zone:3, inService:true},
-    {id:2, name:"Аральск",      zone:3, inService:true},
-    {id:3, name:"Семей",        zone:2, inService:true},
-    {id:4, name:"Атырау",       zone:2, inService:true},
-    {id:5, name:"Актау",        zone:2, inService:true},
-    {id:6, name:"Каркаралинск", zone:1, inService:true},
-    {id:7, name:"Караганда",    zone:1, inService:true},
-    {id:8, name:"Кызылорда",    zone:null, inService:false}
+    {id:1, name:"Мерке",        zone:3, inService:true,  lat:42.8500, lng:73.4333},
+    {id:2, name:"Аральск",      zone:3, inService:true,  lat:46.7900, lng:61.6600},
+    {id:3, name:"Семей",        zone:2, inService:true,  lat:50.4111, lng:80.2275},
+    {id:4, name:"Атырау",       zone:2, inService:true,  lat:47.1167, lng:51.9000},
+    {id:5, name:"Актау",        zone:2, inService:true,  lat:43.6500, lng:51.1600},
+    {id:6, name:"Каркаралинск", zone:1, inService:true,  lat:49.4167, lng:75.4667},
+    {id:7, name:"Караганда",    zone:1, inService:true,  lat:49.8047, lng:73.1094},
+    {id:8, name:"Кызылорда",    zone:null, inService:false, lat:44.8479, lng:65.5093}
   ];
   var ZONE_HOURS = {1:24, 2:48, 3:72};
   var ZONE_LABEL = {1:"Зона 1 · авто", 2:"Зона 2 · авиа", 3:"Зона 3 · смешанная"};
@@ -298,7 +307,8 @@
       hotel: /отел|объект|гостиниц|hotel/i,
       description: /описан|замечан|проблем|суть|заявк/i,
       group: /групп|критич|приоритет/i,
-      created_at: /дата|созда|подач|created/i
+      created_at: /дата|созда|подач|created/i,
+      status: /статус/i
     };
     Object.keys(patterns).forEach(function(field){
       for(var i=0;i<headers.length;i++){
@@ -354,61 +364,98 @@
   function computeImportPreview(){
     var m = state.importMapping;
     var hasExt = m.external_ref!=="" && m.external_ref!=null;
-    var existingRefs = {}; state.tickets.forEach(function(t){ if(t.external_ref) existingRefs[t.external_ref]=true; });
+    // тикет целиком (не просто флаг) — нужен, чтобы при повторном импорте обновить
+    // его статус из c-lector через upsert полной строкой (частичный upsert по одной
+    // колонке ломает NOT NULL-поля в Postgres).
+    var existingRefs = {}; state.tickets.forEach(function(t){ if(t.external_ref) existingRefs[t.external_ref]=t; });
     var out = state.importRows.map(function(row){
       var get = function(field){ var idx = m[field]; return (idx!=="" && idx!=null) ? (row[Number(idx)]||"").trim() : ""; };
-      var extRef = get("external_ref"), hotelName = get("hotel"), desc = get("description"), groupRaw = get("group"), dateRaw = get("created_at");
+      var extRef = get("external_ref"), hotelName = get("hotel"), desc = get("description"), groupRaw = get("group"), dateRaw = get("created_at"), statusRaw = get("status");
       var hotel = matchHotelByName(hotelName);
-      var isDupe = hasExt && extRef && existingRefs[extRef];
+      var existingTicket = hasExt && extRef ? existingRefs[extRef] : null;
+      var isDupe = !!existingTicket;
+      var willUpdateStatus = isDupe && statusRaw && existingTicket.external_status !== statusRaw;
       var status = !desc ? "empty" : (!hotel ? "no-hotel" : (isDupe ? "dupe" : "new"));
-      return { extRef:extRef, hotelName:hotelName, hotel:hotel, description:desc, groupRaw:groupRaw, dateRaw:dateRaw, status:status };
+      return { extRef:extRef, hotelName:hotelName, hotel:hotel, description:desc, groupRaw:groupRaw, dateRaw:dateRaw, statusRaw:statusRaw, existingTicket:existingTicket, willUpdateStatus:willUpdateStatus, status:status };
     });
-    var counts = {total:out.length, "new":0, dupe:0, "no-hotel":0, empty:0};
-    out.forEach(function(r){ counts[r.status]++; });
+    var counts = {total:out.length, "new":0, dupe:0, "no-hotel":0, empty:0, statusUpdate:0};
+    out.forEach(function(r){ counts[r.status]++; if(r.willUpdateStatus) counts.statusUpdate++; });
     return {rows:out, counts:counts};
+  }
+  // Пишем «снимок» счётчиков после каждого импорта — раз загрузка из c-lector
+  // делается вручную (не каждый день), только так можно потом посчитать
+  // «закрыто с прошлой загрузки» (см. дашборд) вместо привязки к календарным 7 дням.
+  function recordImportSnapshot(){
+    sb.from("tickets").select("status,external_status").then(function(res){
+      var rows = res.data || [];
+      var closed = rows.filter(function(t){ return isClosedExternalStatus(t.external_status) || (!t.external_status && t.status==="closed"); }).length;
+      sb.from("import_snapshots").insert({ total: rows.length, closed: closed, imported_at: new Date().toISOString() }).then(function(){ reloadSnapshots(); });
+    });
   }
   function commitImport(){
     var preview = computeImportPreview();
     var toInsert = preview.rows.filter(function(r){ return r.status==="new"; });
-    if(!toInsert.length){ state.importResult = {inserted:0, failed:0, counts:preview.counts}; render(); return; }
+    var toUpdate = preview.rows.filter(function(r){ return r.willUpdateStatus; });
+    if(!toInsert.length && !toUpdate.length){ state.importResult = {inserted:0, updated:0, failed:0, counts:preview.counts}; render(); return; }
     state.importBusy = true; state.importFileError = ""; render();
     var now = new Date().toISOString();
+
     var payloads = toInsert.map(function(r){
       var g = Number(r.groupRaw); if([1,2,3].indexOf(g)===-1) g = 2;
       var createdAt = r.dateRaw && !isNaN(new Date(r.dateRaw).getTime()) ? new Date(r.dateRaw).toISOString() : now;
       return {
         hotel_id: r.hotel.id, zone: r.hotel.zone, ticket_group: g,
-        description: r.description, status:"new", created_by: myLabel()+" (импорт c-lector)", created_at: createdAt,
+        description: r.description,
+        status:"new", created_by: myLabel()+" (импорт c-lector)", created_at: createdAt,
         arrival_deadline: r.hotel.zone ? addHours(createdAt, ZONE_HOURS[r.hotel.zone]) : null,
-        external_ref: r.extRef || null, source:"c-lector", demo:false
+        external_ref: r.extRef || null, external_status: r.statusRaw || null, source:"c-lector", demo:false
       };
     });
-    // вставляем пачками (а не по одной запросу на строку одновременно) — при сотнях
-    // строк одновременный залп из стольких же отдельных запросов мог зависать без
-    // единой ошибки на экране; теперь идём по очереди небольшими партиями и всегда
-    // доходим до финального экрана, даже если часть партий не прошла.
+    // берём ПОЛНУЮ существующую строку и меняем в ней только external_status —
+    // частичный upsert (только id + external_status) упал бы на NOT NULL полях
+    // (hotel_id, description и т.п.), так как Postgres проверяет их при
+    // построении INSERT-строки ещё до перехода на ON CONFLICT DO UPDATE.
+    var updatePayloads = toUpdate.map(function(r){ return Object.assign({}, r.existingTicket, {external_status: r.statusRaw}); });
+
+    // вставляем/обновляем пачками, а не одним залпом из сотен параллельных
+    // запросов — иначе один упавший запрос топит весь Promise.all без единой
+    // ошибки на экране. Идём по очереди небольшими партиями и всегда доходим
+    // до финального экрана, даже если часть партий не прошла.
     var CHUNK = 100;
-    var chunks = [];
-    for(var i=0;i<payloads.length;i+=CHUNK){ chunks.push(payloads.slice(i,i+CHUNK)); }
-    var insertedCount = 0, failedCount = 0, lastError = "";
+    var insertChunks = []; for(var i=0;i<payloads.length;i+=CHUNK){ insertChunks.push(payloads.slice(i,i+CHUNK)); }
+    var updateChunks = []; for(var j=0;j<updatePayloads.length;j+=CHUNK){ updateChunks.push(updatePayloads.slice(j,j+CHUNK)); }
+    var insertedCount = 0, updatedCount = 0, failedCount = 0, lastError = "";
+
     function finish(){
       state.importBusy = false;
-      state.importResult = { inserted: insertedCount, failed: failedCount, lastError: lastError, counts: preview.counts };
+      state.importResult = { inserted: insertedCount, updated: updatedCount, failed: failedCount, lastError: lastError, counts: preview.counts };
       state.importHeaders = []; state.importRows = []; state.importMapping = {};
+      recordImportSnapshot();
       render();
     }
-    function next(idx){
-      if(idx>=chunks.length){ finish(); return; }
-      sb.from("tickets").insert(chunks[idx]).then(function(res){
-        if(res && res.error){ failedCount += chunks[idx].length; lastError = res.error.message || String(res.error); }
-        else { insertedCount += chunks[idx].length; }
-        next(idx+1);
+    function nextInsert(idx){
+      if(idx>=insertChunks.length){ nextUpdate(0); return; }
+      sb.from("tickets").insert(insertChunks[idx]).then(function(res){
+        if(res && res.error){ failedCount += insertChunks[idx].length; lastError = res.error.message || String(res.error); }
+        else { insertedCount += insertChunks[idx].length; }
+        nextInsert(idx+1);
       }).catch(function(err){
-        failedCount += chunks[idx].length; lastError = err && err.message ? err.message : String(err);
-        next(idx+1);
+        failedCount += insertChunks[idx].length; lastError = err && err.message ? err.message : String(err);
+        nextInsert(idx+1);
       });
     }
-    next(0);
+    function nextUpdate(idx){
+      if(idx>=updateChunks.length){ finish(); return; }
+      sb.from("tickets").upsert(updateChunks[idx]).then(function(res){
+        if(res && res.error){ failedCount += updateChunks[idx].length; lastError = res.error.message || String(res.error); }
+        else { updatedCount += updateChunks[idx].length; }
+        nextUpdate(idx+1);
+      }).catch(function(err){
+        failedCount += updateChunks[idx].length; lastError = err && err.message ? err.message : String(err);
+        nextUpdate(idx+1);
+      });
+    }
+    nextInsert(0);
   }
   function resetImport(){ state.importHeaders=[]; state.importRows=[]; state.importMapping={}; state.importResult=null; state.importFileError=""; render(); }
 
@@ -417,8 +464,8 @@
     route: parseHash(),
     session: null, me: null,           // auth session + own profile row
     authView: "signin", authEmail: "", authError: "",
-    tickets: [], profiles: [], parts: [], portfolio: null, invoices: [],
-    selectedTicketId: null, ticketNotes: [],
+    tickets: [], profiles: [], parts: [], portfolio: null, invoices: [], snapshots: [], crews: [],
+    selectedTicketId: null, ticketNotes: [], editingNoteId: null,
     loaded: false,
     importHeaders: [], importRows: [], importMapping: {}, importResult: null, importBusy: false, importFileError: ""
   };
@@ -472,12 +519,20 @@
 
   /* ============================== DATA LOAD + REALTIME ============================== */
   function subscribeAll(){
-    reloadTickets(); reloadProfiles(); reloadParts(); reloadPortfolio(); reloadInvoices();
+    reloadTickets(); reloadProfiles(); reloadParts(); reloadPortfolio(); reloadInvoices(); reloadSnapshots(); reloadCrews();
     sb.channel("tickets-rt").on("postgres_changes", {event:"*", schema:"public", table:"tickets"}, reloadTickets).subscribe();
     sb.channel("profiles-rt").on("postgres_changes", {event:"*", schema:"public", table:"profiles"}, reloadProfiles).subscribe();
     sb.channel("parts-rt").on("postgres_changes", {event:"*", schema:"public", table:"parts"}, reloadParts).subscribe();
     sb.channel("portfolio-rt").on("postgres_changes", {event:"*", schema:"public", table:"portfolio_snapshot"}, reloadPortfolio).subscribe();
     sb.channel("invoices-rt").on("postgres_changes", {event:"*", schema:"public", table:"invoices"}, reloadInvoices).subscribe();
+    sb.channel("snapshots-rt").on("postgres_changes", {event:"*", schema:"public", table:"import_snapshots"}, reloadSnapshots).subscribe();
+    sb.channel("crews-rt").on("postgres_changes", {event:"*", schema:"public", table:"crews"}, reloadCrews).subscribe();
+  }
+  function reloadCrews(){
+    sb.from("crews").select("*").order("name", {ascending:true}).then(function(res){ state.crews = res.data || []; render(); });
+  }
+  function reloadSnapshots(){
+    sb.from("import_snapshots").select("*").order("imported_at", {ascending:true}).then(function(res){ state.snapshots = res.data || []; render(); });
   }
   function reloadTickets(){
     sb.from("tickets").select("*").order("created_at", {ascending:false}).then(function(res){
@@ -501,7 +556,10 @@
   function reloadInvoices(){
     sb.from("invoices").select("*").order("uploaded_at", {ascending:false}).then(function(res){ state.invoices = res.data || []; render(); });
   }
-  function uploadInvoice(ticketId, file, supplier, amount, currency){
+  // Счёт при загрузке сразу попадает в реестр платежей — раньше это был отдельный
+  // ручной шаг ("Добавить в реестр") с полями поставщик/сумма/валюта в самой заявке;
+  // теперь эти поля заполняются прямо в разделе «Реестр платежей».
+  function uploadInvoice(ticketId, file){
     var path = ticketId + "/" + Date.now() + "_" + file.name.replace(/[^\w.\-]+/g,"_");
     return readFileAsBuffer(file).then(function(buf){
       return sb.storage.from("invoices").upload(path, buf, {contentType: file.type || "application/octet-stream"});
@@ -509,8 +567,8 @@
       if(res.error) throw res.error;
       return sb.from("invoices").insert({
         ticket_id: ticketId, file_path: path, file_name: file.name,
-        supplier: supplier||null, amount: amount?Number(amount):null, currency: currency||null,
-        uploaded_by: myLabel()
+        supplier: null, amount: null, currency: null,
+        uploaded_by: myLabel(), in_registry: true, added_to_registry_at: new Date().toISOString()
       });
     }).catch(function(err){
       alert("Не удалось загрузить счёт: " + (err&&err.message?err.message:err));
@@ -522,8 +580,49 @@
       else alert("Не удалось открыть файл.");
     });
   }
-  function addInvoiceToRegistry(id){
-    sb.from("invoices").update({in_registry:true, added_to_registry_at:new Date().toISOString()}).eq("id", id);
+  function weekRangeLabel(iso){
+    if(!iso) return "";
+    var d = new Date(iso);
+    var day = d.getDay();
+    var diffToMonday = (day===0?-6:1-day);
+    var monday = new Date(d); monday.setDate(d.getDate()+diffToMonday);
+    var sunday = new Date(monday); sunday.setDate(monday.getDate()+6);
+    function f(x){ return String(x.getDate()).padStart(2,"0")+"."+String(x.getMonth()+1).padStart(2,"0"); }
+    return f(monday)+"–"+f(sunday)+"."+sunday.getFullYear();
+  }
+  // Экспорт реестра платежей в Excel — колонки и порядок как в корпоративном
+  // «Реестре платежей» (№, Поставщик, Обоснование платежа, Валюта платежа, Сумма
+  // оплаты с НДС, Описание, Неделя платежа, Ответственный). Колонки, которых у нас
+  // физически нет (НДС, курсы RUB/KZT, статья бюджета, ERP, срок поставки — это
+  // про закупки и бюджетирование, не про заявки на устранение) — не включены;
+  // вместо этого добавлены «№ заявки (c-lector)» и «Отель» для привязки к заявке.
+  function exportRegistryExcel(){
+    if(typeof XLSX==="undefined" || !XLSX.utils){ alert("Модуль Excel не загрузился (возможно, заблокирован интернет/VPN) — обновите страницу и попробуйте снова."); return; }
+    var list = (state.invoices||[]).filter(function(iv){ return iv.in_registry; });
+    var header = ["№","№ заявки (c-lector)","Отель","Поставщик","Обоснование платежа","Валюта платежа","Сумма оплаты с НДС","Описание","Неделя платежа","Ответственный","Добавлен в реестр"];
+    var rows = list.map(function(iv, i){
+      var tk = state.tickets.find(function(x){return x.id===iv.ticket_id;});
+      var hotel = tk ? hotelById(tk.hotel_id) : null;
+      return [
+        i+1,
+        tk && tk.external_ref ? tk.external_ref : "",
+        hotel ? ("№"+hotel.id+" "+hotel.name) : "",
+        iv.supplier || "",
+        tk ? (tk.description_short||tk.description||"") : "",
+        iv.currency || "",
+        iv.amount!=null ? Number(iv.amount) : "",
+        tk ? (tk.description||"") : "",
+        weekRangeLabel(iv.added_to_registry_at),
+        iv.uploaded_by || "",
+        iv.added_to_registry_at ? fmtDateShort(iv.added_to_registry_at) : ""
+      ];
+    });
+    var aoa = [header].concat(rows);
+    var ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws["!cols"] = [{wch:4},{wch:16},{wch:18},{wch:26},{wch:30},{wch:14},{wch:18},{wch:36},{wch:20},{wch:18},{wch:16}];
+    var wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Реестр платежей");
+    XLSX.writeFile(wb, "Реестр_платежей_Keruen_Inn_"+new Date().toISOString().slice(0,10)+".xlsx");
   }
   function reloadPortfolio(){
     sb.from("portfolio_snapshot").select("*").eq("id",1).maybeSingle().then(function(res){
@@ -590,7 +689,7 @@
     if(t.status==="closed" || t.status==="rejected") return {label:"—", overdue:false, done:true};
     if(t.status==="new" || t.status==="dispatched"){
       var ms = new Date(t.arrival_deadline).getTime()-now;
-      return {label:"Прибытие к "+fmtDate(t.arrival_deadline), overdue: ms<0, soon: ms>0 && ms<4*3600*1000, ms:ms, kind:"arrival"};
+      return {label:"Прибытие к "+fmtDateShort(t.arrival_deadline), overdue: ms<0, soon: ms>0 && ms<4*3600*1000, ms:ms, kind:"arrival"};
     }
     if(t.status==="onsite"){
       var ms2 = new Date(t.resolution_deadline).getTime()-now;
@@ -599,17 +698,27 @@
     return {label:"—", overdue:false};
   }
   function isActive(t){ return t.status!=="closed" && t.status!=="rejected"; }
+  // Заявки грузятся из c-lector вручную (не каждый день), поэтому "закрыто за 7
+  // дней" не может опираться на календарные сутки внутри платформы — вместо
+  // этого берём снимок счётчиков из ЗАГРУЗКИ, ближайшей к 7 дням назад, и
+  // сравниваем с последней загрузкой (см. recordImportSnapshot).
+  function closedSinceLastWeek(){
+    var snaps = state.snapshots || [];
+    if(snaps.length<2) return null;
+    var latest = snaps[snaps.length-1];
+    var targetTime = Date.now() - 7*24*3600*1000;
+    var best = null, bestDiff = Infinity;
+    for(var i=0;i<snaps.length-1;i++){
+      var diff = Math.abs(new Date(snaps[i].imported_at).getTime() - targetTime);
+      if(diff<bestDiff){ bestDiff = diff; best = snaps[i]; }
+    }
+    if(!best) return null;
+    return { delta: latest.closed-best.closed, fromDate: best.imported_at, toDate: latest.imported_at };
+  }
 
   /* ============================== MUTATIONS ============================== */
-  function createTicket(data){
-    var hotel = hotelById(data.hotelId);
-    var now = new Date().toISOString();
-    return sb.from("tickets").insert({
-      hotel_id:Number(data.hotelId), zone:hotel.zone, ticket_group:Number(data.group),
-      description:data.description, status:"new", created_by: myLabel(), created_at: now,
-      arrival_deadline: hotel.zone ? addHours(now, ZONE_HOURS[hotel.zone]) : null, demo:false
-    });
-  }
+  // Заявки регистрируются только через импорт из c-lector (см. раздел "Импорт") —
+  // ручного создания заявки в платформе больше нет, так как источник один.
   function myLabel(){ return (state.me && (state.me.name||state.me.email)) || "—"; }
   function addNote(ticketId, text){
     return sb.from("ticket_notes").insert({ticket_id:ticketId, author:myLabel(), note_text:text});
@@ -658,11 +767,95 @@
   function removePart(id){ sb.from("parts").delete().eq("id",id).then(function(){}); }
   function savePortfolio(byHotel, snapshotDate){ sb.from("portfolio_snapshot").upsert({id:1, by_hotel:byHotel, snapshot_date:snapshotDate}).then(function(){}); }
 
+  // Единый обработчик для полей, которые сохраняются "на лету" (Табель, Суть,
+  // поля счёта в реестре) — раньше такие сохранения были "выстрелил и забыл"
+  // без единой обработки ошибок, из-за чего несохранённые правки (например, из-за
+  // отсутствующей колонки в БД) были не видны пользователю. Показывает короткую
+  // подпись "Сохранено…" / текст ошибки рядом с полем.
+  // Подпись храним в состоянии (fieldFeedback), а не пишем в DOM напрямую: таблицы
+  // tickets/invoices подписаны на realtime, и событие от собственного же сохранения
+  // почти сразу вызывает полный render() — прямая запись в textContent мгновенно
+  // стиралась бы этим перерисовыванием, и пользователь не успевал увидеть "Сохранено".
+  var fieldFeedback = {};
+  function feedbackHtml(id){
+    var f = fieldFeedback[id];
+    if(!f) return h`<span id="${id}" class="helptext mono"></span>`;
+    return h`<span id="${id}" class="helptext mono" style="color:${f.ok?'var(--ok)':'var(--crit)'};">${escapeHtml(f.text)}</span>`;
+  }
+  function saveWithFeedback(promise, feedbackElId){
+    return promise.then(function(res){
+      if(res && res.error){
+        if(feedbackElId){ fieldFeedback[feedbackElId] = {text:"Ошибка: "+res.error.message, ok:false}; render(); }
+        else alert("Не удалось сохранить: "+res.error.message);
+        return;
+      }
+      if(feedbackElId){
+        fieldFeedback[feedbackElId] = {text:"Сохранено", ok:true};
+        render();
+        setTimeout(function(){
+          if(fieldFeedback[feedbackElId] && fieldFeedback[feedbackElId].text==="Сохранено"){ delete fieldFeedback[feedbackElId]; render(); }
+        }, 2000);
+      }
+    }).catch(function(err){
+      var msg = err && err.message ? err.message : String(err);
+      if(feedbackElId){ fieldFeedback[feedbackElId] = {text:"Ошибка: "+msg, ok:false}; render(); }
+      else alert("Не удалось сохранить: "+msg);
+    });
+  }
+  function saveTicketField(id, patch, feedbackElId){ return saveWithFeedback(sb.from("tickets").update(patch).eq("id", id), feedbackElId); }
+  function saveInvoiceField(id, patch, feedbackElId){ return saveWithFeedback(sb.from("invoices").update(patch).eq("id", id), feedbackElId); }
+
+  /* ---- Журнал: редактирование и удаление записей ---- */
+  function updateNote(id, text){
+    return sb.from("ticket_notes").update({note_text:text, edited_at:new Date().toISOString()}).eq("id", id);
+  }
+  function deleteNote(id){
+    return sb.from("ticket_notes").delete().eq("id", id);
+  }
+
+  /* ---- Бригады: создание/переименование/участники/удаление ---- */
+  function createCrew(name){
+    if(!name || !name.trim()) return;
+    sb.from("crews").insert({name:name.trim(), members:[]}).then(function(){});
+  }
+  function renameCrew(id, name){
+    if(!name || !name.trim()) return;
+    sb.from("crews").update({name:name.trim()}).eq("id", id).then(function(){});
+  }
+  function deleteCrew(id){
+    sb.from("crews").delete().eq("id", id).then(function(){});
+  }
+  function addCrewMember(crew, name){
+    if(!name || !name.trim()) return;
+    var members = (crew.members||[]).slice();
+    if(members.indexOf(name.trim())===-1) members.push(name.trim());
+    sb.from("crews").update({members:members}).eq("id", crew.id).then(function(){});
+  }
+  function removeCrewMember(crew, name){
+    var members = (crew.members||[]).filter(function(m){ return m!==name; });
+    sb.from("crews").update({members:members}).eq("id", crew.id).then(function(){});
+  }
+
   /* ============================== RENDER HELPERS ============================== */
   function el(html){ var t=document.createElement("template"); t.innerHTML=html.trim(); return t.content.firstElementChild; }
   function h(strings){ var args=[].slice.call(arguments,1); return strings.reduce(function(acc,s,i){ return acc+s+(i<args.length?args[i]:""); },""); }
   function navItem(view, label){ var active = state.route.view===view ? "active":""; return h`<a class="nav-item ${active}" href="#/${view}"><span class="nav-dot"></span>${label}</a>`; }
   function statusPill(status){ return h`<span class="pill ${STATUS_PILL[status]}">${STATUS_LABEL[status]}</span>`; }
+  // Статус, который прислал c-lector.ru — показываем его текстом как есть (там свои
+  // формулировки), просто подбираем цвет пилюли по ключевым словам.
+  function externalStatusPill(text){
+    if(!text) return h`<span class="pill pill-neutral">—</span>`;
+    var cls = "pill-neutral";
+    if(/выполн|заверш|устранен[оы]|закрыт/i.test(text)) cls = "pill-ok";
+    else if(/отклон|отказ/i.test(text)) cls = "pill-crit";
+    else if(/работ|обраб|принят|провер|назначен/i.test(text)) cls = "pill-accent";
+    else if(/подан|нов|ожида/i.test(text)) cls = "pill-warn";
+    return h`<span class="pill ${cls}">${escapeHtml(text)}</span>`;
+  }
+  function isClosedExternalStatus(text){ return !!text && /выполн|заверш|устранен[оы]|закрыт/i.test(text); }
+  // Внутренний статус наряда-задания — второстепенная метка рядом со статусом c-lector,
+  // когда у заявки уже есть внешний статус (иначе внутренний и есть единственный статус).
+  function internalStageTag(status){ return h`<span class="pill pill-neutral" style="opacity:.65;font-weight:500;" title="Статус внутреннего наряда-задания">наряд: ${STATUS_LABEL[status]}</span>`; }
   function groupPill(g){ var cls = g===1?"pill-crit":(g===2?"pill-warn":"pill-neutral"); return h`<span class="pill ${cls}">${GROUP_LABEL[g]}</span>`; }
   function zoneBadge(zone){ return zone ? h`<span class="zone-badge">Зона ${zone}</span>` : h`<span class="zone-badge">стройка</span>`; }
   function roleLabel(r){ return ROLE_LABEL[r] || r; }
@@ -701,7 +894,7 @@
   function viewDashboard(){
     var active = state.tickets.filter(isActive);
     var overdue = active.filter(function(t){ return deadlineInfo(t).overdue; });
-    var closedWeek = state.tickets.filter(function(t){ return t.status==="closed" && t.closed_at && (Date.now()-new Date(t.closed_at).getTime())<7*24*3600*1000; });
+    var closedWeek = closedSinceLastWeek();
     var group1Active = active.filter(function(t){ return t.ticket_group===1; });
     var demoCount = state.tickets.filter(function(t){return t.demo;}).length;
     var attention = active.slice().sort(function(a,b){ var da=deadlineInfo(a), dbi=deadlineInfo(b); var ma=da.ms==null?Infinity:da.ms, mb=dbi.ms==null?Infinity:dbi.ms; return ma-mb; }).slice(0,6);
@@ -716,20 +909,20 @@
         <div class="grid-kpi">
           <div class="card kpi"><div class="kpi-label">Активных заявок</div><div class="kpi-value accent">${active.length}</div><div class="kpi-sub">внутри платформы</div></div>
           <div class="card kpi"><div class="kpi-label">Просрочено</div><div class="kpi-value ${overdue.length?'crit':''}">${overdue.length}</div><div class="kpi-sub">нарушен срок прибытия/устранения</div></div>
-          <div class="card kpi"><div class="kpi-label">Закрыто за 7 дней</div><div class="kpi-value ok">${closedWeek.length}</div><div class="kpi-sub">учтено платформой</div></div>
+          <div class="card kpi"><div class="kpi-label">Выполнено с загрузки ~7 дн. назад</div><div class="kpi-value ok">${closedWeek? ((closedWeek.delta>=0?'+':'')+closedWeek.delta) : '—'}</div><div class="kpi-sub">${closedWeek? ('с '+fmtDateShort(closedWeek.fromDate)+' по '+fmtDateShort(closedWeek.toDate)) : 'нужно ≥2 загрузок из c-lector'}</div></div>
           <div class="card kpi"><div class="kpi-label">Группа 1 в работе</div><div class="kpi-value">${group1Active.length}</div><div class="kpi-sub">критические, на контроле</div></div>
         </div>
         <div class="two-col">
           <div class="card card-pad">
             <div class="section-title">Требуют внимания</div>
-            ${attention.length===0 ? h`<div class="empty-state"><b>Нет активных заявок</b>Добавьте первую заявку из c-lector кнопкой «Новая заявка».</div>` : h`
+            ${attention.length===0 ? h`<div class="empty-state"><b>Нет активных заявок</b>Загрузите заявки в разделе «Импорт из c-lector».</div>` : h`
             <div class="table-wrap"><table><thead><tr><th>№ c-lector</th><th>Отель</th><th>Описание</th><th>Статус</th><th>Срок</th></tr></thead><tbody>
               ${attention.map(function(t){ var hotel=hotelById(t.hotel_id); var di=deadlineInfo(t);
                 return h`<tr data-open-ticket="${t.id}">
                   <td class="mono">${t.external_ref? escapeHtml(t.external_ref) : '<span class="muted">—</span>'}</td>
                   <td><span class="ttl">№${hotel.id} ${hotel.name}</span> ${zoneBadge(t.zone)}</td>
-                  <td>${escapeHtml(t.description).slice(0,54)}${t.description.length>54?"…":""}</td>
-                  <td>${statusPill(t.status)}</td>
+                  <td>${escapeHtml(t.description_short||t.description).slice(0,54)}${(t.description_short||t.description).length>54?"…":""}</td>
+                  <td>${t.external_status? externalStatusPill(t.external_status): statusPill(t.status)}</td>
                   <td style="${di.overdue?'color:var(--crit);font-weight:600;':(di.soon?'color:var(--warn);font-weight:600;':'')}">${di.label}</td>
                 </tr>`; }).join("")}
             </tbody></table></div>`}
@@ -755,11 +948,16 @@
   }
 
   function viewTickets(){
-    var f = state.filters || {status:"", zone:"", hotel:""};
+    var f = state.filters || {status:"", zone:"", hotel:"", q:""};
+    var q = normalizeForMatch(f.q||"");
     var list = state.tickets.filter(function(t){
       if(f.status && t.status!==f.status) return false;
       if(f.zone && String(t.zone)!==f.zone) return false;
       if(f.hotel && String(t.hotel_id)!==f.hotel) return false;
+      if(q){
+        var hay = normalizeForMatch((t.description||"")+" "+(t.description_short||"")+" "+(t.external_ref||""));
+        if(hay.indexOf(q)===-1) return false;
+      }
       return true;
     });
     return h`
@@ -767,6 +965,7 @@
         <select data-filter="status"><option value="">Все статусы</option>${Object.keys(STATUS_LABEL).map(function(s){return h`<option value="${s}" ${f.status===s?'selected':''}>${STATUS_LABEL[s]}</option>`;}).join("")}</select>
         <select data-filter="zone"><option value="">Все зоны</option>${[1,2,3].map(function(z){return h`<option value="${z}" ${f.zone===String(z)?'selected':''}>Зона ${z}</option>`;}).join("")}</select>
         <select data-filter="hotel"><option value="">Все отели</option>${HOTELS.filter(function(x){return x.inService;}).map(function(x){return h`<option value="${x.id}" ${f.hotel===String(x.id)?'selected':''}>№${x.id} ${x.name}</option>`;}).join("")}</select>
+        <input type="text" data-filter="q" value="${escapeHtml(f.q||"")}" placeholder="Поиск по описанию или № заявки…" style="min-width:220px;">
         <span class="muted" style="margin-left:auto;">${list.length} заявок</span>
       </div>
       <div class="card"><div class="table-wrap"><table>
@@ -776,9 +975,9 @@
             return h`<tr data-open-ticket="${t.id}">
               <td class="mono">${t.external_ref? escapeHtml(t.external_ref) : '<span class="muted">—</span>'}</td>
               <td><span class="ttl">№${hotel.id} ${hotel.name}</span> ${zoneBadge(t.zone)} ${t.demo?'<span class="demo-tag">пример</span>':''} ${t.source==='c-lector'?'<span class="source-tag">c-lector</span>':''}</td>
-              <td>${escapeHtml(t.description).slice(0,60)}${t.description.length>60?"…":""}</td>
+              <td>${escapeHtml(t.description_short||t.description).slice(0,60)}${(t.description_short||t.description).length>60?"…":""}</td>
               <td>${groupPill(t.ticket_group)}</td>
-              <td>${statusPill(t.status)}</td>
+              <td>${t.external_status? externalStatusPill(t.external_status): statusPill(t.status)}</td>
               <td>${t.assigned_to? escapeHtml(t.assigned_to) : '<span class="muted">—</span>'}</td>
               <td style="${di.overdue?'color:var(--crit);font-weight:600;':(di.soon?'color:var(--warn);font-weight:600;':'')}">${di.label}</td>
             </tr>`; }).join("")}
@@ -849,6 +1048,10 @@
       </div>`;
   }
 
+  // Столбцы на экране повторяют выгрузку в Excel (см. exportRegistryExcel) — так
+  // реестр выглядит и заполняется одинаково что на экране, что в файле. Поставщик,
+  // обоснование платежа (= краткая суть заявки), валюта и сумма редактируются
+  // прямо в таблице — счёт заносится сюда автоматически при прикреплении к заявке.
   function viewRegistry(){
     var list = (state.invoices||[]).filter(function(iv){ return iv.in_registry; });
     var totals = {};
@@ -856,30 +1059,138 @@
     return h`
       <div class="row-gap">
         <div class="card card-pad">
-          <div class="section-title">Итого по валютам</div>
-          ${Object.keys(totals).length===0 ? h`<div class="muted" style="font-size:12.5px;">Реестр пуст.</div>` : h`
-          <div class="row-gap" style="gap:10px;flex-direction:row;flex-wrap:wrap;">${Object.keys(totals).map(function(c){
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
+            <div class="section-title" style="margin:0;">Итого по валютам</div>
+            <button class="btn btn-sm" data-action="registry-export" ${list.length===0?'disabled':''}>Экспорт в Excel</button>
+          </div>
+          ${Object.keys(totals).length===0 ? h`<div class="muted" style="font-size:12.5px;margin-top:8px;">Реестр пуст.</div>` : h`
+          <div class="row-gap" style="gap:10px;flex-direction:row;flex-wrap:wrap;margin-top:8px;">${Object.keys(totals).map(function(c){
             return h`<div class="kv"><span class="k">${escapeHtml(c)}</span><span class="v mono">${totals[c].toLocaleString("ru-RU")}</span></div>`;
           }).join("")}</div>`}
+          <div class="helptext" style="margin-top:8px;">Счёт попадает сюда автоматически при прикреплении к заявке. Поставщика, обоснование платежа, валюту и сумму можно заполнить прямо в таблице ниже.</div>
         </div>
         <div class="card">
           <div class="table-wrap"><table>
-            <thead><tr><th>Заявка</th><th>Отель</th><th>Поставщик</th><th class="num">Сумма</th><th>Валюта</th><th>Файл</th><th>Добавлен</th></tr></thead>
-            <tbody>${list.length===0 ? h`<tr><td colspan="7"><div class="empty-state"><b>Реестр пуст</b>Прикрепите счета к заявкам и нажмите «Добавить в реестр».</div></td></tr>` :
-              list.map(function(iv){
+            <thead><tr><th>№</th><th>№ заявки (c-lector)</th><th>Отель</th><th>Поставщик</th><th>Обоснование платежа</th><th>Валюта платежа</th><th class="num">Сумма оплаты с НДС</th><th>Неделя платежа</th><th>Ответственный</th><th>Файл</th><th>Добавлен в реестр</th></tr></thead>
+            <tbody>${list.length===0 ? h`<tr><td colspan="11"><div class="empty-state"><b>Реестр пуст</b>Прикрепите счёт к заявке — он появится здесь автоматически.</div></td></tr>` :
+              list.map(function(iv, i){
                 var tk = state.tickets.find(function(x){return x.id===iv.ticket_id;});
                 var hotel = tk ? hotelById(tk.hotel_id) : null;
                 return h`<tr>
+                  <td class="mono muted">${i+1}</td>
                   <td class="mono">${tk && tk.external_ref ? escapeHtml(tk.external_ref) : (tk?h`<a href="#" data-open-ticket="${tk.id}">открыть</a>`:'—')}</td>
                   <td>${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
-                  <td>${iv.supplier? escapeHtml(iv.supplier) : '<span class="muted">—</span>'}</td>
-                  <td class="num mono">${iv.amount!=null? Number(iv.amount).toLocaleString("ru-RU") : '—'}</td>
-                  <td>${iv.currency? escapeHtml(iv.currency) : '—'}</td>
+                  <td><input type="text" data-registry-field="supplier" data-id="${iv.id}" value="${escapeHtml(iv.supplier||'')}" placeholder="Поставщик" style="min-width:130px;"></td>
+                  <td>${tk ? h`<input type="text" data-registry-field="description_short" data-ticket-id="${tk.id}" value="${escapeHtml(tk.description_short||'')}" placeholder="Обоснование платежа" style="min-width:170px;">` : '—'}</td>
+                  <td>
+                    <select data-registry-field="currency" data-id="${iv.id}" style="min-width:90px;">
+                      <option value="">—</option>${CURRENCIES.map(function(c){return h`<option value="${c}" ${iv.currency===c?'selected':''}>${c}</option>`;}).join("")}
+                    </select>
+                  </td>
+                  <td class="num"><input type="number" step="0.01" data-registry-field="amount" data-id="${iv.id}" value="${iv.amount!=null?iv.amount:''}" style="width:110px;text-align:right;"></td>
+                  <td class="mono muted">${weekRangeLabel(iv.added_to_registry_at)}</td>
+                  <td class="muted">${escapeHtml(iv.uploaded_by||'—')}</td>
                   <td><button class="btn btn-sm" data-action="invoice-open" data-path="${escapeHtml(iv.file_path)}">${escapeHtml(iv.file_name)}</button></td>
-                  <td>${iv.added_to_registry_at? fmtDateShort(iv.added_to_registry_at) : '—'}</td>
+                  <td class="mono muted">${iv.added_to_registry_at? fmtDateShort(iv.added_to_registry_at) : '—'}</td>
                 </tr>`;
               }).join("")}
             </tbody></table></div>
+        </div>
+      </div>`;
+  }
+
+  /* ============================== КАРТА (Google Maps) ============================== */
+  var mapInstance = null, mapMarkers = [];
+  function loadGoogleMaps(cb){
+    if(typeof google !== "undefined" && google.maps){ cb(); return; }
+    if(window.__gmapsLoading){ window.__gmapsCallbacks = window.__gmapsCallbacks||[]; window.__gmapsCallbacks.push(cb); return; }
+    window.__gmapsLoading = true;
+    window.__gmapsCallbacks = [cb];
+    window.__gmapsInit = function(){ (window.__gmapsCallbacks||[]).forEach(function(f){ f(); }); };
+    var s = document.createElement("script");
+    s.src = "https://maps.googleapis.com/maps/api/js?key="+encodeURIComponent(GOOGLE_MAPS_API_KEY)+"&callback=__gmapsInit";
+    s.async = true;
+    s.onerror = function(){
+      window.__gmapsLoading = false;
+      var c = document.getElementById("map-canvas");
+      if(c) c.innerHTML = '<div class="empty-state"><b>Не удалось загрузить Google Maps</b>Проверьте ключ API (GOOGLE_MAPS_API_KEY) и подключение к интернету.</div>';
+    };
+    document.head.appendChild(s);
+  }
+  // Метки на карте показывают количество активных (не закрытых/не отклонённых)
+  // заявок по каждому отелю; клик по метке — переход в список заявок этого отеля.
+  function ensureMap(){
+    if(!MAPS_CONFIGURED) return;
+    var container = document.getElementById("map-canvas");
+    if(!container) return;
+    function draw(){
+      var counts = {};
+      state.tickets.filter(isActive).forEach(function(t){ counts[t.hotel_id]=(counts[t.hotel_id]||0)+1; });
+      if(!mapInstance){
+        mapInstance = new google.maps.Map(container, { center:{lat:48.0, lng:68.0}, zoom:5 });
+      }
+      mapMarkers.forEach(function(m){ m.setMap(null); });
+      mapMarkers = [];
+      HOTELS.forEach(function(hotel){
+        if(hotel.lat==null || hotel.lng==null) return;
+        var count = counts[hotel.id]||0;
+        var marker = new google.maps.Marker({
+          position: {lat:hotel.lat, lng:hotel.lng}, map: mapInstance, label: String(count),
+          title: "№"+hotel.id+" "+hotel.name+" — открытых заявок: "+count
+        });
+        marker.addListener("click", function(){
+          state.filters = state.filters||{}; state.filters.hotel = String(hotel.id); state.filters.status=""; state.filters.zone=""; state.filters.q="";
+          location.hash = "#/tickets";
+        });
+        mapMarkers.push(marker);
+      });
+    }
+    loadGoogleMaps(draw);
+  }
+  function viewMap(){
+    if(!MAPS_CONFIGURED){
+      return h`<div class="card card-pad">
+        <div class="section-title">Карта отелей</div>
+        <p style="font-size:13px;">Чтобы увидеть карту с локациями отелей и количеством открытых заявок, впишите свой ключ Google Maps JavaScript API в переменную <code>GOOGLE_MAPS_API_KEY</code> в начале файла.</p>
+        <p style="font-size:13px;">Как получить ключ: console.cloud.google.com → APIs & Services → Credentials → Create credentials → API key, затем включить «Maps JavaScript API» для проекта.</p>
+      </div>`;
+    }
+    return h`<div class="card card-pad">
+      <div class="section-title">Карта отелей — открытые заявки</div>
+      <div id="map-canvas"></div>
+      <div class="helptext" style="margin-top:10px;">Число на метке — количество активных заявок по объекту. Нажмите на метку, чтобы перейти к списку заявок этого отеля.</div>
+    </div>`;
+  }
+
+  /* ============================== БРИГАДЫ ============================== */
+  function viewCrews(){
+    return h`
+      <div class="two-col">
+        <div class="card card-pad">
+          <div class="section-title">Бригады</div>
+          ${state.crews.length===0 ? h`<div class="empty-state"><b>Бригад пока нет</b>Создайте первую бригаду справа.</div>` : h`
+          <div class="row-gap">${state.crews.map(function(c){
+            return h`<div class="card card-pad" style="background:var(--surface-2);">
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <input type="text" data-crew-rename="${c.id}" value="${escapeHtml(c.name)}" style="flex:1;min-width:160px;font-weight:600;">
+                <button class="btn btn-sm btn-ghost btn-danger" data-action="crew-delete" data-id="${c.id}">Удалить бригаду</button>
+              </div>
+              <div class="chip-toggle" style="margin-top:10px;">
+                ${(c.members||[]).map(function(m){ return h`<label>${escapeHtml(m)} <a href="#" data-action="crew-member-remove" data-id="${c.id}" data-member="${escapeHtml(m)}" style="color:var(--crit);text-decoration:none;">✕</a></label>`; }).join("") || '<span class="muted" style="font-size:12px;">Участников пока нет.</span>'}
+              </div>
+              <form class="crew-member-form" data-id="${c.id}" style="margin-top:10px;display:flex;gap:6px;">
+                <input type="text" name="member" placeholder="Фамилия И.О." style="flex:1;min-width:140px;">
+                <button class="btn btn-sm" type="submit">Добавить</button>
+              </form>
+            </div>`;
+          }).join("")}</div>`}
+        </div>
+        <div class="card card-pad">
+          <div class="section-title">Новая бригада</div>
+          <form id="crew-form">
+            <div class="field"><label>Название бригады</label><input type="text" name="name" required placeholder="напр. Бригада №1"></div>
+            <button class="btn btn-primary" type="submit">Создать</button>
+          </form>
         </div>
       </div>`;
   }
@@ -892,8 +1203,8 @@
           <div class="section-title">Импорт завершён</div>
           <div class="import-summary">
             <div class="stat"><b>${state.importResult.inserted}</b>добавлено</div>
+            <div class="stat"><b>${state.importResult.updated||0}</b>обновлён статус</div>
             ${state.importResult.failed ? h`<div class="stat"><b style="color:var(--warn);">${state.importResult.failed}</b>не удалось сохранить</div>` : ""}
-            <div class="stat"><b>${c.dupe}</b>уже были (по номеру)</div>
             <div class="stat"><b>${c["no-hotel"]}</b>не распознан отель</div>
             <div class="stat"><b>${c.empty}</b>пустое описание</div>
           </div>
@@ -926,8 +1237,8 @@
         </div>`;
     }
     var preview = computeImportPreview();
-    var fieldLabel = {external_ref:"Внешний номер (для защиты от дублей)", hotel:"Отель", description:"Описание", group:"Группа критичности (1/2/3)", created_at:"Дата создания"};
-    var fieldOrder = ["hotel","description","external_ref","group","created_at"];
+    var fieldLabel = {external_ref:"Внешний номер (для защиты от дублей)", hotel:"Отель", description:"Описание", group:"Группа критичности (1/2/3)", created_at:"Дата создания", status:"Статус (из c-lector)"};
+    var fieldOrder = ["hotel","description","external_ref","status","group","created_at"];
     return h`
       <div class="row-gap">
         <div class="card card-pad">
@@ -944,24 +1255,32 @@
           <div class="import-summary">
             <div class="stat"><b>${preview.counts.total}</b>строк найдено</div>
             <div class="stat"><b style="color:var(--ok);">${preview.counts["new"]}</b>будет импортировано</div>
-            <div class="stat"><b style="color:var(--ink-faint);">${preview.counts.dupe}</b>уже были</div>
+            <div class="stat"><b style="color:var(--accent);">${preview.counts.statusUpdate}</b>уже есть — обновится статус</div>
+            <div class="stat"><b style="color:var(--ink-faint);">${preview.counts.dupe-preview.counts.statusUpdate}</b>уже есть, статус тот же</div>
             <div class="stat"><b style="color:var(--crit);">${preview.counts["no-hotel"]}</b>отель не распознан</div>
             <div class="stat"><b style="color:var(--ink-faint);">${preview.counts.empty}</b>без описания</div>
           </div>
+          <div class="helptext">Краткую формулировку сути заявки («Суть») можно будет вписать вручную в карточке заявки после импорта — как в столбце «Суть» отчёта: подтянется в реестр и списки автоматически.</div>
           <div class="actions-row">
-            <button class="btn btn-primary" data-action="import-commit" ${preview.counts["new"]===0||state.importBusy?'disabled':''}>${state.importBusy?'Импортирую…':'Импортировать '+preview.counts["new"]+' '+pluralRu(preview.counts["new"],'заявку','заявки','заявок')}</button>
+            <button class="btn btn-primary" data-action="import-commit" ${(preview.counts["new"]===0 && preview.counts.statusUpdate===0)||state.importBusy?'disabled':''}>${state.importBusy?'Импортирую…':(preview.counts["new"]>0 ? 'Импортировать '+preview.counts["new"]+' '+pluralRu(preview.counts["new"],'заявку','заявки','заявок')+(preview.counts.statusUpdate>0?' + обновить '+preview.counts.statusUpdate:'') : 'Обновить статус '+preview.counts.statusUpdate+' '+pluralRu(preview.counts.statusUpdate,'заявки','заявки','заявок'))}</button>
             <button class="btn" data-action="import-reset">Отмена</button>
           </div>
         </div>
         <div class="card"><div class="table-wrap"><table class="map-table">
-          <thead><tr><th>Отель</th><th>Описание</th><th>Внешний №</th><th>Статус</th></tr></thead>
+          <thead><tr><th>Отель</th><th>Описание</th><th>Внешний №</th><th>Статус c-lector</th><th>Импорт</th></tr></thead>
           <tbody>${preview.rows.slice(0,25).map(function(r){
-            var statusPillMap = {"new":'<span class="pill pill-ok">Новая</span>', dupe:'<span class="pill pill-neutral">Уже импортирована</span>', "no-hotel":'<span class="pill pill-crit">Отель не найден</span>', empty:'<span class="pill pill-neutral">Нет описания</span>'};
+            var importPillMap = {
+              "new":'<span class="pill pill-ok">Новая</span>',
+              "dupe": r.willUpdateStatus ? '<span class="pill pill-accent">Обновится статус</span>' : '<span class="pill pill-neutral">Уже импортирована</span>',
+              "no-hotel":'<span class="pill pill-crit">Отель не найден</span>',
+              "empty":'<span class="pill pill-neutral">Нет описания</span>'
+            };
             return h`<tr>
               <td>${r.hotel? ('№'+r.hotel.id+' '+escapeHtml(r.hotel.name)) : h`<span class="muted">${escapeHtml(r.hotelName)||'—'}</span>`}</td>
               <td>${escapeHtml((r.description||"").slice(0,60))}</td>
               <td class="mono muted">${escapeHtml(r.extRef||"—")}</td>
-              <td>${statusPillMap[r.status]}</td>
+              <td>${r.statusRaw? escapeHtml(r.statusRaw) : '<span class="muted">—</span>'}</td>
+              <td>${importPillMap[r.status]}</td>
             </tr>`;
           }).join("")}</tbody>
         </table></div>${preview.rows.length>25 ? h`<div class="helptext" style="padding:10px 16px;">Показаны первые 25 из ${preview.rows.length} строк.</div>`:''}</div>
@@ -990,7 +1309,7 @@
           <div class="wo-field"><div class="k">Объект</div><div class="v">№${hotel.id} ${hotel.name}${hotel.zone?(' · Зона '+hotel.zone):''}</div></div>
           <div class="wo-field"><div class="k">Категория</div><div class="v">${GROUP_LABEL[t.ticket_group]}</div></div>
           <div class="wo-field"><div class="k">Главный инженер</div><div class="v">${t.assigned_to? escapeHtml(t.assigned_to): "не назначен"}</div></div>
-          <div class="wo-field"><div class="k">Срок прибытия</div><div class="v">${t.arrival_deadline? fmtDate(t.arrival_deadline): "—"}</div></div>
+          <div class="wo-field"><div class="k">Срок прибытия</div><div class="v">${t.arrival_deadline? fmtDateShort(t.arrival_deadline): "—"}</div></div>
           <div class="wo-field"><div class="k">Дата регистрации</div><div class="v">${fmtDate(t.created_at)}</div></div>
           <div class="wo-field"><div class="k">Срок устранения</div><div class="v">${t.resolution_deadline? fmtDate(t.resolution_deadline): "определяется по прибытии"}</div></div>
         </div>
@@ -1020,12 +1339,17 @@
           <div>
             ${t.external_ref ? h`<div class="mono" style="font-weight:700;font-size:18px;color:var(--accent);">№ ${escapeHtml(t.external_ref)}</div>` : ""}
             <div style="font-weight:700;font-size:16px;${t.external_ref?'margin-top:2px;':''}">№${hotel.id} ${hotel.name} ${t.demo?'<span class="demo-tag">пример</span>':''} ${t.source==='c-lector'?'<span class="source-tag">c-lector</span>':''}</div>
-            <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;">${zoneBadge(t.zone)} ${groupPill(t.ticket_group)} ${statusPill(t.status)}</div>
+            <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;">${zoneBadge(t.zone)} ${groupPill(t.ticket_group)} ${t.external_status? externalStatusPill(t.external_status): statusPill(t.status)} ${t.external_status? internalStageTag(t.status): ''}</div>
           </div>
           <button class="btn btn-ghost panel-close" data-close-panel>✕</button>
         </div>
         <div class="panel-body">
-          <div><div class="section-title">Описание</div><div style="font-size:13.5px;">${escapeHtml(t.description)}</div></div>
+          <div><div class="section-title">Описание</div>
+            <div style="font-size:13.5px;margin-bottom:10px;">${escapeHtml(t.description)}</div>
+            <label for="desc-short-input">Суть (краткая формулировка)</label>
+            <input type="text" id="desc-short-input" data-id="${t.id}" value="${escapeHtml(t.description_short||'')}" placeholder="Например: Течь в бойлерной 2 этажа">
+            ${feedbackHtml("desc-short-feedback")}
+          </div>
           ${!di.done ? h`<div class="deadline-box ${di.overdue?'overdue':(di.soon?'soon':'')}">
             <div style="font-weight:600;">${di.label}</div>
             <div class="helptext" style="margin-top:2px;">${di.kind==='arrival'?'Срок прибытия главного инженера по зоне логистики.':'Срок устранения — 3 рабочих дня с момента прибытия.'}</div>
@@ -1058,9 +1382,10 @@
           <div>
             <div class="section-title">Карточка заявки</div>
             ${t.external_ref ? h`<div class="kv"><span class="k">Номер в c-lector</span><span class="v mono">${escapeHtml(t.external_ref)}</span></div>` : ""}
+            ${t.external_status ? h`<div class="kv"><span class="k">Статус в c-lector</span><span class="v">${externalStatusPill(t.external_status)}</span></div>` : ""}
             <div class="kv"><span class="k">Зарегистрирована</span><span class="v">${fmtDate(t.created_at)} · ${escapeHtml(t.created_by||'—')}</span></div>
             <div class="kv"><span class="k">Главный инженер</span><span class="v">${t.assigned_to? escapeHtml(t.assigned_to):'—'}</span></div>
-            <div class="kv"><span class="k">Прибыл</span><span class="v">${t.arrived_at? fmtDate(t.arrived_at):'—'}</span></div>
+            <div class="kv"><span class="k">Прибыл</span><span class="v">${t.arrived_at? fmtDateShort(t.arrived_at):'—'}</span></div>
             <div class="kv"><span class="k">Категория</span><span class="v">${t.case_type? CASE_LABEL[t.case_type]:'—'}</span></div>
             <div class="kv"><span class="k">Наряд-задание</span><span class="v mono">${workOrderNo(t)}</span></div>
           </div>
@@ -1069,6 +1394,7 @@
             <div class="actions-row">
               <input type="number" id="repair-hours-input" data-id="${t.id}" min="0" step="0.5" placeholder="Кол-во часов" value="${t.repair_hours!=null?t.repair_hours:''}" style="max-width:160px;">
               <span class="helptext">Заполняет главный инженер по факту устранения.</span>
+              ${feedbackHtml("repair-hours-feedback")}
             </div>
           </div>
           <div>
@@ -1078,22 +1404,35 @@
               return h`<div class="invoice-row" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 10px;border:1px solid var(--line);border-radius:8px;">
                 <button type="button" class="btn btn-sm" data-action="invoice-open" data-path="${escapeHtml(iv.file_path)}">${escapeHtml(iv.file_name)}</button>
                 <span class="muted" style="font-size:12.5px;">${iv.supplier?escapeHtml(iv.supplier):'—'}${iv.amount!=null?(' · '+iv.amount+' '+(iv.currency||'')):''}</span>
-                ${iv.in_registry ? h`<span class="pill pill-ok">В реестре</span>` : h`<button type="button" class="btn btn-sm" data-action="invoice-registry" data-id="${iv.id}">Добавить в реестр</button>`}
+                <span class="pill pill-ok">В реестре</span>
               </div>`;
             }).join("")}</div>`}
             <form id="invoice-form" data-id="${t.id}" style="margin-top:10px;display:flex;flex-direction:column;gap:6px;">
               <input type="file" name="file" accept="application/pdf,image/*" required>
-              <div style="display:flex;gap:6px;flex-wrap:wrap;">
-                <input type="text" name="supplier" placeholder="Поставщик" style="flex:1;min-width:120px;">
-                <input type="number" name="amount" placeholder="Сумма" step="0.01" style="max-width:120px;">
-                <select name="currency" style="max-width:100px;"><option value="">Валюта</option>${CURRENCIES.map(function(c){return h`<option value="${c}">${c}</option>`;}).join("")}</select>
-              </div>
               <button class="btn btn-sm" type="submit" style="align-self:flex-start;">Прикрепить счёт</button>
             </form>
+            <div class="helptext" style="margin-top:6px;">Счёт автоматически попадает в реестр — поставщик, сумма и валюта заполняются в разделе «Реестр платежей».</div>
           </div>
           <div>
             <div class="section-title">Журнал</div>
-            ${state.ticketNotes.slice().reverse().map(function(n){ return h`<div class="note"><div class="meta">${fmtDate(n.created_at)} · ${escapeHtml(n.author||'—')}</div>${escapeHtml(n.note_text)}</div>`; }).join("") || '<div class="muted" style="font-size:12.5px;">Записей пока нет.</div>'}
+            ${state.ticketNotes.slice().reverse().map(function(n){
+              if(state.editingNoteId===n.id){
+                return h`<form class="note-edit-form" data-note-id="${n.id}" style="display:flex;gap:6px;margin-bottom:7px;">
+                  <input type="text" name="text" value="${escapeHtml(n.note_text)}" style="flex:1;">
+                  <button class="btn btn-sm" type="submit">Сохранить</button>
+                  <button type="button" class="btn btn-sm btn-ghost" data-action="note-cancel">Отмена</button>
+                </form>`;
+              }
+              return h`<div class="note">
+                <div class="meta">${fmtDate(n.created_at)} · ${escapeHtml(n.author||'—')}${n.edited_at?h` · <span title="${escapeHtml(fmtDate(n.edited_at))}">(изменено)</span>`:''}
+                  <span style="float:right;display:inline-flex;gap:8px;">
+                    <a href="#" data-action="note-edit" data-id="${n.id}">Изменить</a>
+                    <a href="#" data-action="note-delete" data-id="${n.id}" style="color:var(--crit);">Удалить</a>
+                  </span>
+                </div>
+                ${escapeHtml(n.note_text)}
+              </div>`;
+            }).join("") || '<div class="muted" style="font-size:12.5px;">Записей пока нет.</div>'}
             <form id="note-form" data-id="${t.id}" style="margin-top:8px;display:flex;gap:8px;">
               <input type="text" name="text" placeholder="Добавить запись…" style="flex:1;">
               <button class="btn btn-sm" type="submit">+</button>
@@ -1106,30 +1445,6 @@
   /* ============================== MODALS ============================== */
   function openModal(html){ document.getElementById("overlay-root").appendChild(el(h`<div class="modal-scrim" data-close-modal>${html}</div>`)); }
   function closeModal(){ var m=document.querySelector(".modal-scrim"); if(m) m.remove(); }
-
-  function openNewTicketModal(){
-    var options = HOTELS.filter(function(x){return x.inService;}).map(function(x){return h`<option value="${x.id}">№${x.id} ${x.name} (Зона ${x.zone})</option>`;}).join("");
-    openModal(h`
-      <div class="modal" data-stop>
-        <div class="modal-head"><h2>Новая заявка</h2><button class="btn btn-ghost" data-close-modal>✕</button></div>
-        <form id="new-ticket-form">
-          <div class="modal-body">
-            <div class="field"><label>Отель</label><select name="hotelId">${options}</select></div>
-            <div class="field"><label>Группа критичности</label>
-              <select name="group"><option value="1">Группа 1 · критическая</option><option value="2" selected>Группа 2 · средняя</option><option value="3">Группа 3 · плановая</option></select>
-            </div>
-            <div class="field"><label>Описание (по данным c-lector.ru)</label><textarea name="description" required placeholder="Кратко опишите замечание из заявки"></textarea></div>
-            <div class="helptext">Срок прибытия рассчитается автоматически по зоне логистики объекта.</div>
-          </div>
-          <div class="modal-foot"><button type="button" class="btn" data-close-modal>Отмена</button><button type="submit" class="btn btn-primary">Зарегистрировать</button></div>
-        </form>
-      </div>`);
-    document.getElementById("new-ticket-form").addEventListener("submit", function(e){
-      e.preventDefault(); var fd=new FormData(e.target);
-      createTicket({hotelId:fd.get("hotelId"), group:fd.get("group"), description:fd.get("description")});
-      closeModal();
-    });
-  }
 
   function openMeModal(){
     openModal(h`
@@ -1206,22 +1521,21 @@
       app.innerHTML = h`<div class="content" style="max-width:900px;">${viewWorkOrder(state.route.id)}</div>`;
       return;
     }
-    var titleMap = {dashboard:"Дашборд", tickets:"Заявки", team:"Команда", parts:"Склад ЗИП", "import":"Импорт из c-lector", registry:"Реестр платежей"};
-    var body = state.route.view==="tickets"?viewTickets(): state.route.view==="team"?viewTeam(): state.route.view==="parts"?viewParts(): state.route.view==="import"?viewImport(): state.route.view==="registry"?viewRegistry(): viewDashboard();
+    var titleMap = {dashboard:"Дашборд", tickets:"Заявки", team:"Команда", parts:"Склад ЗИП", "import":"Импорт из c-lector", registry:"Реестр платежей", map:"Карта", crews:"Бригады"};
+    var body = state.route.view==="tickets"?viewTickets(): state.route.view==="team"?viewTeam(): state.route.view==="parts"?viewParts(): state.route.view==="import"?viewImport(): state.route.view==="registry"?viewRegistry(): state.route.view==="map"?viewMap(): state.route.view==="crews"?viewCrews(): viewDashboard();
 
     app.innerHTML = h`
       <div class="sidebar">
         <div class="brand"><div class="brand-name">Диспетчерская</div><div class="brand-sub">Keruen Inn · Служба сервиса</div></div>
-        <nav class="nav">${navItem("dashboard","Дашборд")}${navItem("tickets","Заявки")}${navItem("import","Импорт из c-lector")}${navItem("team","Команда")}${navItem("parts","Склад ЗИП")}${navItem("registry","Реестр платежей")}</nav>
+        <nav class="nav">${navItem("dashboard","Дашборд")}${navItem("tickets","Заявки")}${navItem("import","Импорт из c-lector")}${navItem("map","Карта")}${navItem("team","Команда")}${navItem("crews","Бригады")}${navItem("parts","Склад ЗИП")}${navItem("registry","Реестр платежей")}</nav>
         <div class="nav-footer">
-          <div class="zone-legend"><span><b>З1</b> 24ч</span><span><b>З2</b> 48ч</span><span><b>З3</b> 72ч</span></div>
+          <div class="zone-legend"><span>Срок прибытия: <b>Зона 1</b> — 24ч</span><span><b>Зона 2</b> — 48ч</span><span><b>Зона 3</b> — 72ч</span></div>
           <p>Заявки поступают через c-lector.ru — здесь только внутренняя диспетчеризация и наряд-задания.</p>
         </div>
       </div>
       <div class="main">
         <div class="topbar">
           <h1>${titleMap[state.route.view]||"Дашборд"}</h1>
-          <button class="btn btn-primary" data-action="new-ticket">+ Новая заявка</button>
           <div class="whoami"><div class="whoami-chip" data-action="me">
             <span class="avatar">${(state.me.name||state.me.email||"?").trim().charAt(0).toUpperCase()}</span>
             <span>${escapeHtml(state.me.name||state.me.email)}</span>
@@ -1231,6 +1545,7 @@
       </div>`;
     renderTicketPanel();
     if(state.selectedTicketId) loadNotesFor(state.selectedTicketId);
+    if(state.route.view==="map") ensureMap();
   }
 
   /* ============================== EVENTS ============================== */
@@ -1238,8 +1553,8 @@
     var t = e.target;
     if(t.closest(".nav-item")) return;
     var openTicket = t.closest("[data-open-ticket]");
-    if(openTicket){ state.selectedTicketId = openTicket.getAttribute("data-open-ticket"); renderTicketPanel(); loadNotesFor(state.selectedTicketId); return; }
-    if(t.closest("[data-close-panel]")){ state.selectedTicketId = null; renderTicketPanel(); return; }
+    if(openTicket){ state.selectedTicketId = openTicket.getAttribute("data-open-ticket"); state.editingNoteId = null; renderTicketPanel(); loadNotesFor(state.selectedTicketId); return; }
+    if(t.closest("[data-close-panel]")){ state.selectedTicketId = null; state.editingNoteId = null; renderTicketPanel(); return; }
     if(t.matches(".modal-scrim") && t.hasAttribute("data-close-modal")){ closeModal(); return; }
     if(t.hasAttribute("data-close-modal")){ closeModal(); return; }
 
@@ -1257,7 +1572,6 @@
     var actionEl = t.closest("[data-action]");
     if(actionEl){
       var action = actionEl.getAttribute("data-action"); var id = actionEl.getAttribute("data-id");
-      if(action==="new-ticket") return openNewTicketModal();
       if(action==="me") return openMeModal();
       if(action==="edit-portfolio") return openPortfolioModal();
       if(action==="clear-demo"){ if(confirm("Удалить все примеры заявок?")) clearDemo(); return; }
@@ -1274,7 +1588,17 @@
       if(action==="reject"){ var reason=prompt("Причина отклонения (необязательно):")||""; return rejectTicket(id,reason); }
       if(action==="reopen") return reopenTicket(id);
       if(action==="invoice-open") return openInvoiceFile(actionEl.getAttribute("data-path"));
-      if(action==="invoice-registry") return addInvoiceToRegistry(id);
+      if(action==="registry-export") return exportRegistryExcel();
+      if(action==="note-edit"){ e.preventDefault(); state.editingNoteId = id; renderTicketPanel(); return; }
+      if(action==="note-cancel"){ e.preventDefault(); state.editingNoteId = null; renderTicketPanel(); return; }
+      if(action==="note-delete"){ e.preventDefault(); if(confirm("Удалить запись из журнала?")) deleteNote(id); return; }
+      if(action==="crew-delete"){ if(confirm("Удалить бригаду?")) deleteCrew(id); return; }
+      if(action==="crew-member-remove"){
+        e.preventDefault();
+        var crew = state.crews.find(function(c){return c.id===id;});
+        if(crew) removeCrewMember(crew, actionEl.getAttribute("data-member"));
+        return;
+      }
       if(action==="wo-download"){
         var tk = state.tickets.find(function(x){return x.id===id;});
         var htmlDoc = "<!doctype html><html><head><meta charset='utf-8'><title>"+workOrderNo(tk)+"</title></head><body>"+document.getElementById("wo-content").outerHTML+"</body></html>";
@@ -1297,8 +1621,23 @@
     if(e.target.id==="case-select") setCaseType(e.target.getAttribute("data-id"), e.target.value);
     if(e.target.id==="repair-hours-input"){
       var rh = e.target.value===""?null:Number(e.target.value);
-      sb.from("tickets").update({repair_hours: rh}).eq("id", e.target.getAttribute("data-id"));
+      saveTicketField(e.target.getAttribute("data-id"), {repair_hours: rh}, "repair-hours-feedback");
     }
+    if(e.target.id==="desc-short-input"){
+      saveTicketField(e.target.getAttribute("data-id"), {description_short: e.target.value.trim()||null}, "desc-short-feedback");
+    }
+    if(e.target.matches("[data-registry-field]")){
+      var field = e.target.getAttribute("data-registry-field");
+      if(field==="description_short"){
+        saveTicketField(e.target.getAttribute("data-ticket-id"), {description_short: e.target.value.trim()||null});
+      } else {
+        var val = e.target.value;
+        if(field==="amount") val = val===""?null:Number(val);
+        var patch = {}; patch[field] = val || null;
+        saveInvoiceField(e.target.getAttribute("data-id"), patch);
+      }
+    }
+    if(e.target.matches("[data-crew-rename]")) renameCrew(e.target.getAttribute("data-crew-rename"), e.target.value);
     if(e.target.matches("[data-part-qty]")) updatePartQty(e.target.getAttribute("data-part-qty"), e.target.value);
     if(e.target.matches("[data-profile-role]")) updateProfile(e.target.getAttribute("data-profile-role"), {role:e.target.value});
     if(e.target.matches("[data-profile-zone]")){
@@ -1316,16 +1655,32 @@
       e.preventDefault(); var fd=new FormData(e.target); var text=(fd.get("text")||"").trim();
       if(text){ addNote(e.target.getAttribute("data-id"), text); e.target.reset(); }
     }
+    if(e.target.matches(".note-edit-form")){
+      e.preventDefault(); var fdn=new FormData(e.target); var newText=(fdn.get("text")||"").trim();
+      var noteId = e.target.getAttribute("data-note-id");
+      if(newText){ updateNote(noteId, newText).then(function(){ state.editingNoteId=null; }); }
+      else { state.editingNoteId=null; renderTicketPanel(); }
+    }
     if(e.target.id==="invoice-form"){
       e.preventDefault(); var ifd=new FormData(e.target);
       var file = ifd.get("file");
       if(!file || !file.name){ alert("Выберите файл счёта (PDF или фото)."); return; }
       var ticketId = e.target.getAttribute("data-id");
-      uploadInvoice(ticketId, file, (ifd.get("supplier")||"").trim(), ifd.get("amount"), ifd.get("currency")).then(function(){ e.target.reset(); });
+      uploadInvoice(ticketId, file).then(function(){ e.target.reset(); });
     }
     if(e.target.id==="part-form"){
       e.preventDefault(); var fd3=new FormData(e.target); if(!fd3.get("name")) return;
       addPart({name:fd3.get("name"), qty:fd3.get("qty"), unit:fd3.get("unit"), note:fd3.get("note")}); e.target.reset();
+    }
+    if(e.target.id==="crew-form"){
+      e.preventDefault(); var fdc=new FormData(e.target); var name=(fdc.get("name")||"").trim();
+      if(name){ createCrew(name); e.target.reset(); }
+    }
+    if(e.target.matches(".crew-member-form")){
+      e.preventDefault(); var fdm=new FormData(e.target); var member=(fdm.get("member")||"").trim();
+      var crewId = e.target.getAttribute("data-id");
+      var crew = state.crews.find(function(c){return c.id===crewId;});
+      if(member && crew){ addCrewMember(crew, member); e.target.reset(); }
     }
   });
 
