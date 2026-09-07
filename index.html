@@ -261,6 +261,22 @@
   var CASE_LABEL = { warranty:"Гарантийный", nonwarranty:"Негарантийный", unfounded:"Необоснованная" };
   var ROLE_LABEL = {dispatcher:"Диспетчер", specialist:"Главный инженер", head:"Руководитель", warehouse:"Склад ЗИП", finance:"Финансист"};
   var CURRENCIES = ["KZT","RUB","USD","EUR","BYN"];
+  // Полный набор колонок «Реестра платежей» — 1:1 с корпоративным файлом
+  // «Реестр платежей Мотель N.xlsm» (лист по месяцу), чтобы и таблица на
+  // экране, и выгрузка в Excel показывали ровно те же столбцы, что и раньше.
+  // Наши собственные добавленные колонки — «№ заявки (c-lector)», «Отель»,
+  // «Файл», «Добавлен в реестр» — нужны для привязки счёта к заявке и в
+  // исходном файле отсутствуют. Часть колонок (ERP/бюджет) в этом приложении
+  // не заполняется автоматически — это поля для ручного заполнения, как и в
+  // исходном Excel, где они также вписывались руками.
+  var REGISTRY_COLUMN_LABELS = ["№","№ заявки (c-lector)","Отель","Поставщик","Обоснование платежа","Валюта платежа","Сумма оплаты с НДС","НДС","Описание","Неделя платежа","RUB без НДС","Статья бюджета","ERP","Согл","Срок поставки","Ответственный","Сумма счета","ERP заказ поставщику","Сумма заказа в ERP","ERP закупка","Сумма поступления ТМЦ в ERP","Файл","Добавлен в реестр"];
+  function extraVal(iv, key){ var v = iv.extra && iv.extra[key]; return v==null ? "" : v; }
+  function saveExtraField(iv, key, val, type){
+    var extra = Object.assign({}, iv.extra||{});
+    var v = (val==null || val==="") ? null : (type==="number" ? Number(val) : val);
+    extra[key] = v;
+    saveInvoiceField(iv.id, {extra: extra});
+  }
 
   function hotelById(id){ for (var i=0;i<HOTELS.length;i++){ if (HOTELS[i].id===Number(id)) return HOTELS[i]; } return null; }
   function fmtDate(iso){ if(!iso) return "—"; var d=new Date(iso); return d.toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit",year:"numeric"})+" "+d.toLocaleTimeString("ru-RU",{hour:"2-digit",minute:"2-digit"}); }
@@ -302,13 +318,18 @@
     // порядок важен: поля с более узким/точным смыслом определяются раньше,
     // чтобы, например, столбец "Номер заявки" не перехватывался описанием
     // из-за общей подстроки "заявк" — уже занятые столбцы пропускаются.
+    // "status" обязательно проверяется раньше "description": заголовок вида
+    // "Статус заявки" тоже содержит подстроку "заявк", и если бы description
+    // (с его широким /заявк/i) шёл первым, он перехватывал бы колонку статуса
+    // всякий раз, когда она в файле стоит левее настоящего столбца с описанием —
+    // именно так статус переставал подтягиваться в «Заявки».
     var patterns = {
       external_ref: /№|номер|id|ref/i,
       hotel: /отел|объект|гостиниц|hotel/i,
-      description: /описан|замечан|проблем|суть|заявк/i,
+      status: /статус/i,
       group: /групп|критич|приоритет/i,
       created_at: /дата|созда|подач|created/i,
-      status: /статус/i
+      description: /описан|замечан|проблем|суть|заявк/i
     };
     Object.keys(patterns).forEach(function(field){
       for(var i=0;i<headers.length;i++){
@@ -556,9 +577,10 @@
   function reloadInvoices(){
     sb.from("invoices").select("*").order("uploaded_at", {ascending:false}).then(function(res){ state.invoices = res.data || []; render(); });
   }
-  // Счёт при загрузке сразу попадает в реестр платежей — раньше это был отдельный
-  // ручной шаг ("Добавить в реестр") с полями поставщик/сумма/валюта в самой заявке;
-  // теперь эти поля заполняются прямо в разделе «Реестр платежей».
+  // Счёт при загрузке сразу попадает в реестр платежей — просто как файл. Раньше
+  // здесь стояло автораспознавание поставщика/суммы/валюты через ИИ (Anthropic
+  // Claude), но эту автоматику отключили (платный API), так что все эти поля
+  // заполняются вручную прямо в разделе «Реестр платежей».
   function uploadInvoice(ticketId, file){
     var path = ticketId + "/" + Date.now() + "_" + file.name.replace(/[^\w.\-]+/g,"_");
     return readFileAsBuffer(file).then(function(buf){
@@ -568,7 +590,8 @@
       return sb.from("invoices").insert({
         ticket_id: ticketId, file_path: path, file_name: file.name,
         supplier: null, amount: null, currency: null,
-        uploaded_by: myLabel(), in_registry: true, added_to_registry_at: new Date().toISOString()
+        uploaded_by: myLabel(), in_registry: true, added_to_registry_at: new Date().toISOString(),
+        extra: { responsible: myLabel() }
       });
     }).catch(function(err){
       alert("Не удалось загрузить счёт: " + (err&&err.message?err.message:err));
@@ -590,16 +613,12 @@
     function f(x){ return String(x.getDate()).padStart(2,"0")+"."+String(x.getMonth()+1).padStart(2,"0"); }
     return f(monday)+"–"+f(sunday)+"."+sunday.getFullYear();
   }
-  // Экспорт реестра платежей в Excel — колонки и порядок как в корпоративном
-  // «Реестре платежей» (№, Поставщик, Обоснование платежа, Валюта платежа, Сумма
-  // оплаты с НДС, Описание, Неделя платежа, Ответственный). Колонки, которых у нас
-  // физически нет (НДС, курсы RUB/KZT, статья бюджета, ERP, срок поставки — это
-  // про закупки и бюджетирование, не про заявки на устранение) — не включены;
-  // вместо этого добавлены «№ заявки (c-lector)» и «Отель» для привязки к заявке.
+  // Выгрузка реестра платежей в Excel — те же 23 колонки, что и на экране
+  // (REGISTRY_COLUMN_LABELS), в том же порядке, что и в исходном корпоративном
+  // файле «Реестр платежей Мотель N.xlsm».
   function exportRegistryExcel(){
     if(typeof XLSX==="undefined" || !XLSX.utils){ alert("Модуль Excel не загрузился (возможно, заблокирован интернет/VPN) — обновите страницу и попробуйте снова."); return; }
     var list = (state.invoices||[]).filter(function(iv){ return iv.in_registry; });
-    var header = ["№","№ заявки (c-lector)","Отель","Поставщик","Обоснование платежа","Валюта платежа","Сумма оплаты с НДС","Описание","Неделя платежа","Ответственный","Добавлен в реестр"];
     var rows = list.map(function(iv, i){
       var tk = state.tickets.find(function(x){return x.id===iv.ticket_id;});
       var hotel = tk ? hotelById(tk.hotel_id) : null;
@@ -611,15 +630,27 @@
         tk ? (tk.description_short||tk.description||"") : "",
         iv.currency || "",
         iv.amount!=null ? Number(iv.amount) : "",
-        tk ? (tk.description||"") : "",
+        extraVal(iv,"nds"),
+        extraVal(iv,"description"),
         weekRangeLabel(iv.added_to_registry_at),
-        iv.uploaded_by || "",
+        extraVal(iv,"rub_no_nds"),
+        extraVal(iv,"budget_article"),
+        extraVal(iv,"erp"),
+        extraVal(iv,"approved"),
+        extraVal(iv,"delivery_term"),
+        extraVal(iv,"responsible") || iv.uploaded_by || "",
+        extraVal(iv,"invoice_amount"),
+        extraVal(iv,"erp_order_supplier"),
+        extraVal(iv,"erp_order_amount"),
+        extraVal(iv,"erp_purchase"),
+        extraVal(iv,"erp_receipt_amount"),
+        iv.file_name || "",
         iv.added_to_registry_at ? fmtDateShort(iv.added_to_registry_at) : ""
       ];
     });
-    var aoa = [header].concat(rows);
+    var aoa = [REGISTRY_COLUMN_LABELS].concat(rows);
     var ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws["!cols"] = [{wch:4},{wch:16},{wch:18},{wch:26},{wch:30},{wch:14},{wch:18},{wch:36},{wch:20},{wch:18},{wch:16}];
+    ws["!cols"] = REGISTRY_COLUMN_LABELS.map(function(){ return {wch:16}; });
     var wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Реестр платежей");
     XLSX.writeFile(wb, "Реестр_платежей_Keruen_Inn_"+new Date().toISOString().slice(0,10)+".xlsx");
@@ -1071,11 +1102,14 @@
         </div>
         <div class="card">
           <div class="table-wrap"><table>
-            <thead><tr><th>№</th><th>№ заявки (c-lector)</th><th>Отель</th><th>Поставщик</th><th>Обоснование платежа</th><th>Валюта платежа</th><th class="num">Сумма оплаты с НДС</th><th>Неделя платежа</th><th>Ответственный</th><th>Файл</th><th>Добавлен в реестр</th></tr></thead>
-            <tbody>${list.length===0 ? h`<tr><td colspan="11"><div class="empty-state"><b>Реестр пуст</b>Прикрепите счёт к заявке — он появится здесь автоматически.</div></td></tr>` :
+            <thead><tr>${REGISTRY_COLUMN_LABELS.map(function(lbl){ return h`<th>${lbl}</th>`; }).join("")}</tr></thead>
+            <tbody>${list.length===0 ? h`<tr><td colspan="${REGISTRY_COLUMN_LABELS.length}"><div class="empty-state"><b>Реестр пуст</b>Прикрепите счёт к заявке — он появится здесь автоматически.</div></td></tr>` :
               list.map(function(iv, i){
                 var tk = state.tickets.find(function(x){return x.id===iv.ticket_id;});
                 var hotel = tk ? hotelById(tk.hotel_id) : null;
+                function extraInput(key, type, ph){
+                  return h`<input type="${type}" ${type==='number'?'step="0.01"':''} data-registry-extra="${key}" data-id="${iv.id}" value="${escapeHtml(extraVal(iv,key))}" placeholder="${ph||''}" style="min-width:${type==='number'?'90px':'120px'};${type==='number'?'text-align:right;':''}">`;
+                }
                 return h`<tr>
                   <td class="mono muted">${i+1}</td>
                   <td class="mono">${tk && tk.external_ref ? escapeHtml(tk.external_ref) : (tk?h`<a href="#" data-open-ticket="${tk.id}">открыть</a>`:'—')}</td>
@@ -1088,13 +1122,26 @@
                     </select>
                   </td>
                   <td class="num"><input type="number" step="0.01" data-registry-field="amount" data-id="${iv.id}" value="${iv.amount!=null?iv.amount:''}" style="width:110px;text-align:right;"></td>
+                  <td>${extraInput("nds","text","с НДС")}</td>
+                  <td>${extraInput("description","text")}</td>
                   <td class="mono muted">${weekRangeLabel(iv.added_to_registry_at)}</td>
-                  <td class="muted">${escapeHtml(iv.uploaded_by||'—')}</td>
+                  <td class="num">${extraInput("rub_no_nds","number")}</td>
+                  <td>${extraInput("budget_article","text")}</td>
+                  <td>${extraInput("erp","text")}</td>
+                  <td>${extraInput("approved","text","✅")}</td>
+                  <td>${extraInput("delivery_term","text")}</td>
+                  <td>${extraInput("responsible","text")}</td>
+                  <td class="num">${extraInput("invoice_amount","number")}</td>
+                  <td>${extraInput("erp_order_supplier","text")}</td>
+                  <td class="num">${extraInput("erp_order_amount","number")}</td>
+                  <td>${extraInput("erp_purchase","text")}</td>
+                  <td class="num">${extraInput("erp_receipt_amount","number")}</td>
                   <td><button class="btn btn-sm" data-action="invoice-open" data-path="${escapeHtml(iv.file_path)}">${escapeHtml(iv.file_name)}</button></td>
                   <td class="mono muted">${iv.added_to_registry_at? fmtDateShort(iv.added_to_registry_at) : '—'}</td>
                 </tr>`;
               }).join("")}
             </tbody></table></div>
+          <div class="helptext" style="padding:10px 16px;">Столбцы «НДС», «Описание», «RUB без НДС», «Статья бюджета», «ERP», «Согл», «Срок поставки», «Ответственный» и ERP-колонки заполняются вручную (как и раньше в Excel) — автоматических данных из c-lector или ERP для них нет.</div>
         </div>
       </div>`;
   }
@@ -1345,9 +1392,11 @@
         </div>
         <div class="panel-body">
           <div><div class="section-title">Описание</div>
-            <div style="font-size:13.5px;margin-bottom:10px;">${escapeHtml(t.description)}</div>
+            ${t.description_short ? h`<div style="font-size:14.5px;font-weight:600;margin-bottom:6px;">${escapeHtml(t.description_short)}</div>` : ""}
+            <div style="font-size:13px;${t.description_short?'color:var(--ink-faint);':''}margin-bottom:10px;">${escapeHtml(t.description)}</div>
             <label for="desc-short-input">Суть (краткая формулировка)</label>
             <input type="text" id="desc-short-input" data-id="${t.id}" value="${escapeHtml(t.description_short||'')}" placeholder="Например: Течь в бойлерной 2 этажа">
+            <div class="helptext">Суть заполняется вручную (без ИИ) — как только вы её впишете, она станет заголовком заявки в списках и реестре вместо полного текста из c-lector.</div>
             ${feedbackHtml("desc-short-feedback")}
           </div>
           ${!di.done ? h`<div class="deadline-box ${di.overdue?'overdue':(di.soon?'soon':'')}">
@@ -1411,7 +1460,7 @@
               <input type="file" name="file" accept="application/pdf,image/*" required>
               <button class="btn btn-sm" type="submit" style="align-self:flex-start;">Прикрепить счёт</button>
             </form>
-            <div class="helptext" style="margin-top:6px;">Счёт автоматически попадает в реестр — поставщик, сумма и валюта заполняются в разделе «Реестр платежей».</div>
+            <div class="helptext" style="margin-top:6px;">Счёт автоматически попадает в реестр платежей. Поставщика, сумму и валюту впишите вручную в разделе «Реестр платежей».</div>
           </div>
           <div>
             <div class="section-title">Журнал</div>
@@ -1636,6 +1685,11 @@
         var patch = {}; patch[field] = val || null;
         saveInvoiceField(e.target.getAttribute("data-id"), patch);
       }
+    }
+    if(e.target.matches("[data-registry-extra]")){
+      var extraKey = e.target.getAttribute("data-registry-extra");
+      var iv2 = state.invoices.find(function(x){return x.id===e.target.getAttribute("data-id");});
+      if(iv2) saveExtraField(iv2, extraKey, e.target.value.trim(), e.target.type);
     }
     if(e.target.matches("[data-crew-rename]")) renameCrew(e.target.getAttribute("data-crew-rename"), e.target.value);
     if(e.target.matches("[data-part-qty]")) updatePartQty(e.target.getAttribute("data-part-qty"), e.target.value);
