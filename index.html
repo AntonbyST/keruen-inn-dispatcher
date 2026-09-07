@@ -35,7 +35,7 @@
   .mono{ font-family:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace; font-variant-numeric: tabular-nums; }
   button, select, input, textarea{ font-family:inherit; font-size:inherit; color:inherit; }
   a{ color:var(--accent); }
-  #app{ display:flex; min-height:100vh; }
+  #app{ display:flex; min-height:100vh; max-width:1440px; margin:0 auto; background:var(--surface); box-shadow:0 0 0 1px var(--line), 0 24px 60px rgba(22,35,46,.14); }
 
   /* ---------- sidebar ---------- */
   .sidebar{
@@ -250,7 +250,8 @@
   var STATUS_LABEL = { new:"Новая", dispatched:"Диспетчеризована", onsite:"На объекте / устранение", closed:"Закрыта", rejected:"Отклонена" };
   var STATUS_PILL = { new:"pill-neutral", dispatched:"pill-accent", onsite:"pill-warn", closed:"pill-ok", rejected:"pill-neutral" };
   var CASE_LABEL = { warranty:"Гарантийный", nonwarranty:"Негарантийный", unfounded:"Необоснованная" };
-  var ROLE_LABEL = {dispatcher:"Диспетчер", specialist:"Специалист", head:"Руководитель", warehouse:"Склад ЗИП", finance:"Финансист"};
+  var ROLE_LABEL = {dispatcher:"Диспетчер", specialist:"Главный инженер", head:"Руководитель", warehouse:"Склад ЗИП", finance:"Финансист"};
+  var CURRENCIES = ["KZT","RUB","USD","EUR","BYN"];
 
   function hotelById(id){ for (var i=0;i<HOTELS.length;i++){ if (HOTELS[i].id===Number(id)) return HOTELS[i]; } return null; }
   function fmtDate(iso){ if(!iso) return "—"; var d=new Date(iso); return d.toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit",year:"numeric"})+" "+d.toLocaleTimeString("ru-RU",{hour:"2-digit",minute:"2-digit"}); }
@@ -416,7 +417,7 @@
     route: parseHash(),
     session: null, me: null,           // auth session + own profile row
     authView: "signin", authEmail: "", authError: "",
-    tickets: [], profiles: [], parts: [], portfolio: null,
+    tickets: [], profiles: [], parts: [], portfolio: null, invoices: [],
     selectedTicketId: null, ticketNotes: [],
     loaded: false,
     importHeaders: [], importRows: [], importMapping: {}, importResult: null, importBusy: false, importFileError: ""
@@ -471,11 +472,12 @@
 
   /* ============================== DATA LOAD + REALTIME ============================== */
   function subscribeAll(){
-    reloadTickets(); reloadProfiles(); reloadParts(); reloadPortfolio();
+    reloadTickets(); reloadProfiles(); reloadParts(); reloadPortfolio(); reloadInvoices();
     sb.channel("tickets-rt").on("postgres_changes", {event:"*", schema:"public", table:"tickets"}, reloadTickets).subscribe();
     sb.channel("profiles-rt").on("postgres_changes", {event:"*", schema:"public", table:"profiles"}, reloadProfiles).subscribe();
     sb.channel("parts-rt").on("postgres_changes", {event:"*", schema:"public", table:"parts"}, reloadParts).subscribe();
     sb.channel("portfolio-rt").on("postgres_changes", {event:"*", schema:"public", table:"portfolio_snapshot"}, reloadPortfolio).subscribe();
+    sb.channel("invoices-rt").on("postgres_changes", {event:"*", schema:"public", table:"invoices"}, reloadInvoices).subscribe();
   }
   function reloadTickets(){
     sb.from("tickets").select("*").order("created_at", {ascending:false}).then(function(res){
@@ -495,6 +497,33 @@
   }
   function reloadParts(){
     sb.from("parts").select("*").order("name", {ascending:true}).then(function(res){ state.parts = res.data || []; render(); });
+  }
+  function reloadInvoices(){
+    sb.from("invoices").select("*").order("uploaded_at", {ascending:false}).then(function(res){ state.invoices = res.data || []; render(); });
+  }
+  function uploadInvoice(ticketId, file, supplier, amount, currency){
+    var path = ticketId + "/" + Date.now() + "_" + file.name.replace(/[^\w.\-]+/g,"_");
+    return readFileAsBuffer(file).then(function(buf){
+      return sb.storage.from("invoices").upload(path, buf, {contentType: file.type || "application/octet-stream"});
+    }).then(function(res){
+      if(res.error) throw res.error;
+      return sb.from("invoices").insert({
+        ticket_id: ticketId, file_path: path, file_name: file.name,
+        supplier: supplier||null, amount: amount?Number(amount):null, currency: currency||null,
+        uploaded_by: myLabel()
+      });
+    }).catch(function(err){
+      alert("Не удалось загрузить счёт: " + (err&&err.message?err.message:err));
+    });
+  }
+  function openInvoiceFile(path){
+    sb.storage.from("invoices").createSignedUrl(path, 3600).then(function(res){
+      if(res.data && res.data.signedUrl) window.open(res.data.signedUrl, "_blank");
+      else alert("Не удалось открыть файл.");
+    });
+  }
+  function addInvoiceToRegistry(id){
+    sb.from("invoices").update({in_registry:true, added_to_registry_at:new Date().toISOString()}).eq("id", id);
   }
   function reloadPortfolio(){
     sb.from("portfolio_snapshot").select("*").eq("id",1).maybeSingle().then(function(res){
@@ -522,9 +551,9 @@
     seeded = true;
     var now = new Date();
     var examples = [
-      { hotelId:4, group:2, description:"Течь в бойлерной, отсыревает стена коридора 2 этажа.", status:"dispatched", assignedTo:"Специалист (пример)", createdAt:new Date(now.getTime()-3*3600*1000).toISOString() },
+      { hotelId:4, group:2, description:"Течь в бойлерной, отсыревает стена коридора 2 этажа.", status:"dispatched", assignedTo:"Главный инженер (пример)", createdAt:new Date(now.getTime()-3*3600*1000).toISOString() },
       { hotelId:1, group:3, description:"Не закрывается плотно москитная сетка, номер 108.", status:"new", assignedTo:null, createdAt:new Date(now.getTime()-1*3600*1000).toISOString() },
-      { hotelId:7, group:1, description:"Ложное срабатывание пожарной сигнализации на ресепшн, возгорания нет.", status:"onsite", assignedTo:"Специалист (пример)", caseType:"warranty", createdAt:new Date(now.getTime()-30*3600*1000).toISOString() }
+      { hotelId:7, group:1, description:"Ложное срабатывание пожарной сигнализации на ресепшн, возгорания нет.", status:"onsite", assignedTo:"Главный инженер (пример)", caseType:"warranty", createdAt:new Date(now.getTime()-30*3600*1000).toISOString() }
     ];
     examples.forEach(function(ex){
       var hotel = hotelById(ex.hotelId);
@@ -587,13 +616,13 @@
   }
   function assignSpecialist(id, name){
     sb.from("tickets").update({assigned_to:name, status:"dispatched"}).eq("id",id).then(function(){
-      addNote(id, "Назначен специалист: "+name+".");
+      addNote(id, "Назначен главный инженер: "+name+".");
     });
   }
   function markArrived(id){
     var now = new Date().toISOString();
     sb.from("tickets").update({status:"onsite", arrived_at:now, resolution_deadline:addBusinessDays(now,3)}).eq("id",id).then(function(){
-      addNote(id, "Специалист прибыл на объект.");
+      addNote(id, "Главный инженер прибыл на объект.");
     });
   }
   function setCaseType(id, val){ sb.from("tickets").update({case_type:val||null}).eq("id",id); }
@@ -694,9 +723,10 @@
           <div class="card card-pad">
             <div class="section-title">Требуют внимания</div>
             ${attention.length===0 ? h`<div class="empty-state"><b>Нет активных заявок</b>Добавьте первую заявку из c-lector кнопкой «Новая заявка».</div>` : h`
-            <div class="table-wrap"><table><thead><tr><th>Отель</th><th>Описание</th><th>Статус</th><th>Срок</th></tr></thead><tbody>
+            <div class="table-wrap"><table><thead><tr><th>№ c-lector</th><th>Отель</th><th>Описание</th><th>Статус</th><th>Срок</th></tr></thead><tbody>
               ${attention.map(function(t){ var hotel=hotelById(t.hotel_id); var di=deadlineInfo(t);
                 return h`<tr data-open-ticket="${t.id}">
+                  <td class="mono">${t.external_ref? escapeHtml(t.external_ref) : '<span class="muted">—</span>'}</td>
                   <td><span class="ttl">№${hotel.id} ${hotel.name}</span> ${zoneBadge(t.zone)}</td>
                   <td>${escapeHtml(t.description).slice(0,54)}${t.description.length>54?"…":""}</td>
                   <td>${statusPill(t.status)}</td>
@@ -740,10 +770,11 @@
         <span class="muted" style="margin-left:auto;">${list.length} заявок</span>
       </div>
       <div class="card"><div class="table-wrap"><table>
-        <thead><tr><th>Отель</th><th>Описание</th><th>Группа</th><th>Статус</th><th>Специалист</th><th>Срок</th></tr></thead>
-        <tbody>${list.length===0 ? h`<tr><td colspan="6"><div class="empty-state"><b>Заявок нет</b>Добавьте заявку по данным из c-lector.ru.</div></td></tr>` :
+        <thead><tr><th>№ c-lector</th><th>Отель</th><th>Описание</th><th>Группа</th><th>Статус</th><th>Главный инженер</th><th>Срок</th></tr></thead>
+        <tbody>${list.length===0 ? h`<tr><td colspan="7"><div class="empty-state"><b>Заявок нет</b>Добавьте заявку по данным из c-lector.ru.</div></td></tr>` :
           list.map(function(t){ var hotel=hotelById(t.hotel_id); var di=deadlineInfo(t);
             return h`<tr data-open-ticket="${t.id}">
+              <td class="mono">${t.external_ref? escapeHtml(t.external_ref) : '<span class="muted">—</span>'}</td>
               <td><span class="ttl">№${hotel.id} ${hotel.name}</span> ${zoneBadge(t.zone)} ${t.demo?'<span class="demo-tag">пример</span>':''} ${t.source==='c-lector'?'<span class="source-tag">c-lector</span>':''}</td>
               <td>${escapeHtml(t.description).slice(0,60)}${t.description.length>60?"…":""}</td>
               <td>${groupPill(t.ticket_group)}</td>
@@ -814,6 +845,41 @@
             <div class="field"><label>Заметка</label><input type="text" name="note" placeholder="напр. срок поставки"></div>
             <button class="btn btn-primary" type="submit">Добавить</button>
           </form>
+        </div>
+      </div>`;
+  }
+
+  function viewRegistry(){
+    var list = (state.invoices||[]).filter(function(iv){ return iv.in_registry; });
+    var totals = {};
+    list.forEach(function(iv){ var c=iv.currency||"—"; totals[c]=(totals[c]||0)+(Number(iv.amount)||0); });
+    return h`
+      <div class="row-gap">
+        <div class="card card-pad">
+          <div class="section-title">Итого по валютам</div>
+          ${Object.keys(totals).length===0 ? h`<div class="muted" style="font-size:12.5px;">Реестр пуст.</div>` : h`
+          <div class="row-gap" style="gap:10px;flex-direction:row;flex-wrap:wrap;">${Object.keys(totals).map(function(c){
+            return h`<div class="kv"><span class="k">${escapeHtml(c)}</span><span class="v mono">${totals[c].toLocaleString("ru-RU")}</span></div>`;
+          }).join("")}</div>`}
+        </div>
+        <div class="card">
+          <div class="table-wrap"><table>
+            <thead><tr><th>Заявка</th><th>Отель</th><th>Поставщик</th><th class="num">Сумма</th><th>Валюта</th><th>Файл</th><th>Добавлен</th></tr></thead>
+            <tbody>${list.length===0 ? h`<tr><td colspan="7"><div class="empty-state"><b>Реестр пуст</b>Прикрепите счета к заявкам и нажмите «Добавить в реестр».</div></td></tr>` :
+              list.map(function(iv){
+                var tk = state.tickets.find(function(x){return x.id===iv.ticket_id;});
+                var hotel = tk ? hotelById(tk.hotel_id) : null;
+                return h`<tr>
+                  <td class="mono">${tk && tk.external_ref ? escapeHtml(tk.external_ref) : (tk?h`<a href="#" data-open-ticket="${tk.id}">открыть</a>`:'—')}</td>
+                  <td>${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
+                  <td>${iv.supplier? escapeHtml(iv.supplier) : '<span class="muted">—</span>'}</td>
+                  <td class="num mono">${iv.amount!=null? Number(iv.amount).toLocaleString("ru-RU") : '—'}</td>
+                  <td>${iv.currency? escapeHtml(iv.currency) : '—'}</td>
+                  <td><button class="btn btn-sm" data-action="invoice-open" data-path="${escapeHtml(iv.file_path)}">${escapeHtml(iv.file_name)}</button></td>
+                  <td>${iv.added_to_registry_at? fmtDateShort(iv.added_to_registry_at) : '—'}</td>
+                </tr>`;
+              }).join("")}
+            </tbody></table></div>
         </div>
       </div>`;
   }
@@ -920,9 +986,10 @@
         <div class="wo-title">Наряд-задание</div>
         <div class="wo-no">№ ${workOrderNo(t)}</div>
         <div class="wo-grid">
+          ${t.external_ref ? h`<div class="wo-field"><div class="k">№ c-lector</div><div class="v mono">${escapeHtml(t.external_ref)}</div></div>` : ""}
           <div class="wo-field"><div class="k">Объект</div><div class="v">№${hotel.id} ${hotel.name}${hotel.zone?(' · Зона '+hotel.zone):''}</div></div>
           <div class="wo-field"><div class="k">Категория</div><div class="v">${GROUP_LABEL[t.ticket_group]}</div></div>
-          <div class="wo-field"><div class="k">Специалист</div><div class="v">${t.assigned_to? escapeHtml(t.assigned_to): "не назначен"}</div></div>
+          <div class="wo-field"><div class="k">Главный инженер</div><div class="v">${t.assigned_to? escapeHtml(t.assigned_to): "не назначен"}</div></div>
           <div class="wo-field"><div class="k">Срок прибытия</div><div class="v">${t.arrival_deadline? fmtDate(t.arrival_deadline): "—"}</div></div>
           <div class="wo-field"><div class="k">Дата регистрации</div><div class="v">${fmtDate(t.created_at)}</div></div>
           <div class="wo-field"><div class="k">Срок устранения</div><div class="v">${t.resolution_deadline? fmtDate(t.resolution_deadline): "определяется по прибытии"}</div></div>
@@ -931,7 +998,7 @@
         <div class="wo-desc">${escapeHtml(t.description)}</div>
         <div class="helptext" style="margin-bottom:6px;">Основание: Регламент подачи, рассмотрения заявок и определения гарантийных случаев (Приложение №2 к Протоколу разногласий по ДС №10) и Регламент организации и работы Службы сервиса.</div>
         <div class="wo-sign">
-          <div class="sign-line">Специалист: _______________________ / ${t.assigned_to?escapeHtml(t.assigned_to):''} /</div>
+          <div class="sign-line">Главный инженер: _______________________ / ${t.assigned_to?escapeHtml(t.assigned_to):''} /</div>
           <div class="sign-line">Представитель Заказчика на объекте: _______________________ /</div>
         </div>
       </div>`;
@@ -951,7 +1018,8 @@
       <div class="panel">
         <div class="panel-head">
           <div>
-            <div style="font-weight:700;font-size:16px;">№${hotel.id} ${hotel.name} ${t.demo?'<span class="demo-tag">пример</span>':''} ${t.source==='c-lector'?'<span class="source-tag">c-lector</span>':''}</div>
+            ${t.external_ref ? h`<div class="mono" style="font-weight:700;font-size:18px;color:var(--accent);">№ ${escapeHtml(t.external_ref)}</div>` : ""}
+            <div style="font-weight:700;font-size:16px;${t.external_ref?'margin-top:2px;':''}">№${hotel.id} ${hotel.name} ${t.demo?'<span class="demo-tag">пример</span>':''} ${t.source==='c-lector'?'<span class="source-tag">c-lector</span>':''}</div>
             <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;">${zoneBadge(t.zone)} ${groupPill(t.ticket_group)} ${statusPill(t.status)}</div>
           </div>
           <button class="btn btn-ghost panel-close" data-close-panel>✕</button>
@@ -960,14 +1028,14 @@
           <div><div class="section-title">Описание</div><div style="font-size:13.5px;">${escapeHtml(t.description)}</div></div>
           ${!di.done ? h`<div class="deadline-box ${di.overdue?'overdue':(di.soon?'soon':'')}">
             <div style="font-weight:600;">${di.label}</div>
-            <div class="helptext" style="margin-top:2px;">${di.kind==='arrival'?'Срок прибытия специалиста по зоне логистики.':'Срок устранения — 3 рабочих дня с момента прибытия.'}</div>
+            <div class="helptext" style="margin-top:2px;">${di.kind==='arrival'?'Срок прибытия главного инженера по зоне логистики.':'Срок устранения — 3 рабочих дня с момента прибытия.'}</div>
             ${t.materials_wait ? h`<div class="helptext" style="margin-top:4px;">Ожидаются материалы (срок поставки: ${fmtDateShort(t.materials_eta)}).</div>` : ""}
           </div>` : ""}
           <div>
             <div class="section-title">Действия</div>
             <div class="actions-row">
               ${t.status==="new" ? h`
-                <select id="assign-select" style="max-width:220px;"><option value="">Выбрать специалиста…</option>${specialists.map(function(s){return h`<option value="${escapeHtml(s.name||s.email)}">${escapeHtml(s.name||s.email)}</option>`;}).join("")}</select>
+                <select id="assign-select" style="max-width:220px;"><option value="">Выбрать главного инженера…</option>${specialists.map(function(s){return h`<option value="${escapeHtml(s.name||s.email)}">${escapeHtml(s.name||s.email)}</option>`;}).join("")}</select>
                 <button class="btn btn-primary btn-sm" data-action="assign" data-id="${t.id}">Назначить</button>` : ""}
               ${t.status==="dispatched" ? h`<button class="btn btn-primary btn-sm" data-action="arrived" data-id="${t.id}">Отметить прибытие</button>`:""}
               ${t.status==="onsite" ? h`<button class="btn btn-sm" data-action="materials" data-id="${t.id}">Нужны материалы…</button>
@@ -989,12 +1057,39 @@
           </div>` : ""}
           <div>
             <div class="section-title">Карточка заявки</div>
+            ${t.external_ref ? h`<div class="kv"><span class="k">Номер в c-lector</span><span class="v mono">${escapeHtml(t.external_ref)}</span></div>` : ""}
             <div class="kv"><span class="k">Зарегистрирована</span><span class="v">${fmtDate(t.created_at)} · ${escapeHtml(t.created_by||'—')}</span></div>
-            <div class="kv"><span class="k">Специалист</span><span class="v">${t.assigned_to? escapeHtml(t.assigned_to):'—'}</span></div>
+            <div class="kv"><span class="k">Главный инженер</span><span class="v">${t.assigned_to? escapeHtml(t.assigned_to):'—'}</span></div>
             <div class="kv"><span class="k">Прибыл</span><span class="v">${t.arrived_at? fmtDate(t.arrived_at):'—'}</span></div>
             <div class="kv"><span class="k">Категория</span><span class="v">${t.case_type? CASE_LABEL[t.case_type]:'—'}</span></div>
             <div class="kv"><span class="k">Наряд-задание</span><span class="v mono">${workOrderNo(t)}</span></div>
-            ${t.external_ref ? h`<div class="kv"><span class="k">Номер в c-lector</span><span class="v mono">${escapeHtml(t.external_ref)}</span></div>` : ""}
+          </div>
+          <div>
+            <div class="section-title">Табель — часы на устранение</div>
+            <div class="actions-row">
+              <input type="number" id="repair-hours-input" data-id="${t.id}" min="0" step="0.5" placeholder="Кол-во часов" value="${t.repair_hours!=null?t.repair_hours:''}" style="max-width:160px;">
+              <span class="helptext">Заполняет главный инженер по факту устранения.</span>
+            </div>
+          </div>
+          <div>
+            <div class="section-title">Счета</div>
+            ${(state.invoices||[]).filter(function(iv){return iv.ticket_id===t.id;}).length===0 ? h`<div class="muted" style="font-size:12.5px;">Счетов пока нет.</div>` : h`
+            <div class="row-gap" style="gap:8px;">${(state.invoices||[]).filter(function(iv){return iv.ticket_id===t.id;}).map(function(iv){
+              return h`<div class="invoice-row" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 10px;border:1px solid var(--line);border-radius:8px;">
+                <button type="button" class="btn btn-sm" data-action="invoice-open" data-path="${escapeHtml(iv.file_path)}">${escapeHtml(iv.file_name)}</button>
+                <span class="muted" style="font-size:12.5px;">${iv.supplier?escapeHtml(iv.supplier):'—'}${iv.amount!=null?(' · '+iv.amount+' '+(iv.currency||'')):''}</span>
+                ${iv.in_registry ? h`<span class="pill pill-ok">В реестре</span>` : h`<button type="button" class="btn btn-sm" data-action="invoice-registry" data-id="${iv.id}">Добавить в реестр</button>`}
+              </div>`;
+            }).join("")}</div>`}
+            <form id="invoice-form" data-id="${t.id}" style="margin-top:10px;display:flex;flex-direction:column;gap:6px;">
+              <input type="file" name="file" accept="application/pdf,image/*" required>
+              <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                <input type="text" name="supplier" placeholder="Поставщик" style="flex:1;min-width:120px;">
+                <input type="number" name="amount" placeholder="Сумма" step="0.01" style="max-width:120px;">
+                <select name="currency" style="max-width:100px;"><option value="">Валюта</option>${CURRENCIES.map(function(c){return h`<option value="${c}">${c}</option>`;}).join("")}</select>
+              </div>
+              <button class="btn btn-sm" type="submit" style="align-self:flex-start;">Прикрепить счёт</button>
+            </form>
           </div>
           <div>
             <div class="section-title">Журнал</div>
@@ -1111,13 +1206,13 @@
       app.innerHTML = h`<div class="content" style="max-width:900px;">${viewWorkOrder(state.route.id)}</div>`;
       return;
     }
-    var titleMap = {dashboard:"Дашборд", tickets:"Заявки", team:"Команда", parts:"Склад ЗИП", "import":"Импорт из c-lector"};
-    var body = state.route.view==="tickets"?viewTickets(): state.route.view==="team"?viewTeam(): state.route.view==="parts"?viewParts(): state.route.view==="import"?viewImport(): viewDashboard();
+    var titleMap = {dashboard:"Дашборд", tickets:"Заявки", team:"Команда", parts:"Склад ЗИП", "import":"Импорт из c-lector", registry:"Реестр платежей"};
+    var body = state.route.view==="tickets"?viewTickets(): state.route.view==="team"?viewTeam(): state.route.view==="parts"?viewParts(): state.route.view==="import"?viewImport(): state.route.view==="registry"?viewRegistry(): viewDashboard();
 
     app.innerHTML = h`
       <div class="sidebar">
         <div class="brand"><div class="brand-name">Диспетчерская</div><div class="brand-sub">Keruen Inn · Служба сервиса</div></div>
-        <nav class="nav">${navItem("dashboard","Дашборд")}${navItem("tickets","Заявки")}${navItem("import","Импорт из c-lector")}${navItem("team","Команда")}${navItem("parts","Склад ЗИП")}</nav>
+        <nav class="nav">${navItem("dashboard","Дашборд")}${navItem("tickets","Заявки")}${navItem("import","Импорт из c-lector")}${navItem("team","Команда")}${navItem("parts","Склад ЗИП")}${navItem("registry","Реестр платежей")}</nav>
         <div class="nav-footer">
           <div class="zone-legend"><span><b>З1</b> 24ч</span><span><b>З2</b> 48ч</span><span><b>З3</b> 72ч</span></div>
           <p>Заявки поступают через c-lector.ru — здесь только внутренняя диспетчеризация и наряд-задания.</p>
@@ -1170,7 +1265,7 @@
       if(action==="import-reset") return resetImport();
       if(action==="assign"){
         var sel=document.getElementById("assign-select"); var name=sel&&sel.value;
-        if(!name){ alert("Выберите специалиста из списка (назначьте роль в разделе «Команда», если список пуст)."); return; }
+        if(!name){ alert("Выберите главного инженера из списка (назначьте роль в разделе «Команда», если список пуст)."); return; }
         assignSpecialist(id,name); return;
       }
       if(action==="arrived") return markArrived(id);
@@ -1178,6 +1273,8 @@
       if(action==="close") return closeTicket(id);
       if(action==="reject"){ var reason=prompt("Причина отклонения (необязательно):")||""; return rejectTicket(id,reason); }
       if(action==="reopen") return reopenTicket(id);
+      if(action==="invoice-open") return openInvoiceFile(actionEl.getAttribute("data-path"));
+      if(action==="invoice-registry") return addInvoiceToRegistry(id);
       if(action==="wo-download"){
         var tk = state.tickets.find(function(x){return x.id===id;});
         var htmlDoc = "<!doctype html><html><head><meta charset='utf-8'><title>"+workOrderNo(tk)+"</title></head><body>"+document.getElementById("wo-content").outerHTML+"</body></html>";
@@ -1198,6 +1295,10 @@
     if(e.target.id==="import-file"){ var f=e.target.files&&e.target.files[0]; if(f) loadImportFile(f); return; }
     if(e.target.matches("[data-import-map]")){ state.importMapping[e.target.getAttribute("data-import-map")]=e.target.value; render(); return; }
     if(e.target.id==="case-select") setCaseType(e.target.getAttribute("data-id"), e.target.value);
+    if(e.target.id==="repair-hours-input"){
+      var rh = e.target.value===""?null:Number(e.target.value);
+      sb.from("tickets").update({repair_hours: rh}).eq("id", e.target.getAttribute("data-id"));
+    }
     if(e.target.matches("[data-part-qty]")) updatePartQty(e.target.getAttribute("data-part-qty"), e.target.value);
     if(e.target.matches("[data-profile-role]")) updateProfile(e.target.getAttribute("data-profile-role"), {role:e.target.value});
     if(e.target.matches("[data-profile-zone]")){
@@ -1214,6 +1315,13 @@
     if(e.target.id==="note-form"){
       e.preventDefault(); var fd=new FormData(e.target); var text=(fd.get("text")||"").trim();
       if(text){ addNote(e.target.getAttribute("data-id"), text); e.target.reset(); }
+    }
+    if(e.target.id==="invoice-form"){
+      e.preventDefault(); var ifd=new FormData(e.target);
+      var file = ifd.get("file");
+      if(!file || !file.name){ alert("Выберите файл счёта (PDF или фото)."); return; }
+      var ticketId = e.target.getAttribute("data-id");
+      uploadInvoice(ticketId, file, (ifd.get("supplier")||"").trim(), ifd.get("amount"), ifd.get("currency")).then(function(){ e.target.reset(); });
     }
     if(e.target.id==="part-form"){
       e.preventDefault(); var fd3=new FormData(e.target); if(!fd3.get("name")) return;
