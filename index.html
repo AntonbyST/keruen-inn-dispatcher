@@ -1,0 +1,1231 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Диспетчерская Keruen Inn</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<style>
+  :root{
+    --bg:#EEF2F4; --surface:#FFFFFF; --surface-2:#E4EAEE; --surface-3:#DAE2E7;
+    --line:#D3DBE1; --ink:#16232E; --ink-soft:#54636F; --ink-faint:#8B99A4;
+    --accent:#0E7C90; --accent-ink:#FFFFFF; --accent-soft:#DCEFF2; --accent-line:#B9DEE4;
+    --ok:#1E8E5A; --ok-soft:#E1F3E8; --warn:#A8710F; --warn-soft:#FBEED9; --crit:#C2410C; --crit-soft:#FBE1D2;
+    --shadow:0 1px 2px rgba(22,35,46,.07),0 6px 18px rgba(22,35,46,.08);
+    --radius:10px;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0E1620; --surface:#16212B; --surface-2:#1C2833; --surface-3:#23313D;
+      --line:#2B3A46; --ink:#E7EDF1; --ink-soft:#A9B8C2; --ink-faint:#70828D;
+      --accent:#3FB5C9; --accent-ink:#062229; --accent-soft:#163239; --accent-line:#255560;
+      --ok:#4FC08C; --ok-soft:#123524; --warn:#DDAA55; --warn-soft:#3A2C14; --crit:#E17A4C; --crit-soft:#3C2216;
+      --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 24px rgba(0,0,0,.38);
+    }
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--bg); color:var(--ink);
+    font-family:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,Arial,sans-serif;
+    font-size:14px; line-height:1.5;
+  }
+  .mono{ font-family:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace; font-variant-numeric: tabular-nums; }
+  button, select, input, textarea{ font-family:inherit; font-size:inherit; color:inherit; }
+  a{ color:var(--accent); }
+  #app{ display:flex; min-height:100vh; }
+
+  /* ---------- sidebar ---------- */
+  .sidebar{
+    width:216px; flex:0 0 216px; background:var(--surface-2); border-right:1px solid var(--line);
+    display:flex; flex-direction:column; padding:20px 0; position:sticky; top:0; height:100vh;
+  }
+  .brand{ padding:0 20px 18px; border-bottom:1px solid var(--line); margin-bottom:14px; }
+  .brand-name{ font-weight:700; font-size:15px; letter-spacing:.2px; }
+  .brand-sub{ color:var(--ink-faint); font-size:11.5px; margin-top:3px; text-transform:uppercase; letter-spacing:.06em; }
+  .nav{ display:flex; flex-direction:column; gap:2px; padding:0 10px; }
+  .nav-item{
+    display:flex; align-items:center; gap:10px; padding:9px 12px; border-radius:8px; cursor:pointer;
+    color:var(--ink-soft); text-decoration:none; border-left:3px solid transparent; font-weight:500;
+  }
+  .nav-item:hover{ background:var(--surface-3); color:var(--ink); }
+  .nav-item.active{ background:var(--surface); color:var(--ink); border-left-color:var(--accent); box-shadow:var(--shadow); }
+  .nav-dot{ width:7px; height:7px; border-radius:50%; background:currentColor; opacity:.55; flex:0 0 auto; }
+  .nav-footer{ margin-top:auto; padding:14px 20px 0; border-top:1px solid var(--line); }
+  .nav-footer p{ margin:10px 0 0; font-size:11.5px; color:var(--ink-faint); line-height:1.5; }
+
+  /* ---------- main ---------- */
+  .main{ flex:1; min-width:0; display:flex; flex-direction:column; }
+  .topbar{
+    position:sticky; top:0; z-index:5; background:var(--surface); border-bottom:1px solid var(--line);
+    padding:14px 28px; display:flex; align-items:center; gap:16px;
+  }
+  .topbar h1{ font-size:18px; margin:0; font-weight:700; flex:1; min-width:0; }
+  .whoami{ display:flex; align-items:center; gap:6px; }
+  .whoami-chip{
+    display:flex; align-items:center; gap:8px; background:var(--surface-2); border:1px solid var(--line);
+    padding:6px 10px 6px 6px; border-radius:20px; cursor:pointer;
+  }
+  .avatar{
+    width:22px; height:22px; border-radius:50%; background:var(--accent); color:var(--accent-ink);
+    display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:700; flex:0 0 auto;
+  }
+  .content{ padding:24px 28px 60px; max-width:1180px; width:100%; }
+
+  /* ---------- buttons ---------- */
+  .btn{
+    display:inline-flex; align-items:center; gap:6px; border:1px solid var(--line); background:var(--surface);
+    color:var(--ink); padding:8px 14px; border-radius:8px; cursor:pointer; font-weight:600; font-size:13px;
+    white-space:nowrap;
+  }
+  .btn:hover{ border-color:var(--ink-faint); }
+  .btn-primary{ background:var(--accent); border-color:var(--accent); color:var(--accent-ink); }
+  .btn-primary:hover{ filter:brightness(1.06); }
+  .btn-ghost{ background:transparent; border-color:transparent; }
+  .btn-ghost:hover{ background:var(--surface-2); }
+  .btn-danger{ color:var(--crit); }
+  .btn-sm{ padding:5px 10px; font-size:12px; border-radius:7px; }
+  .btn-block{ width:100%; justify-content:center; }
+  .btn:disabled{ opacity:.45; cursor:not-allowed; }
+
+  /* ---------- cards / kpi ---------- */
+  .card{ background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); }
+  .card-pad{ padding:18px 20px; }
+  .section-title{ font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-faint); font-weight:600; margin:0 0 12px; }
+  .grid-kpi{ display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:14px; margin-bottom:22px; }
+  .kpi{ padding:16px 18px; }
+  .kpi-label{ font-size:11.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-faint); font-weight:600; }
+  .kpi-value{ font-size:30px; font-weight:600; margin-top:6px; }
+  .kpi-value.crit{ color:var(--crit); } .kpi-value.ok{ color:var(--ok); } .kpi-value.accent{ color:var(--accent); }
+  .kpi-sub{ font-size:12px; color:var(--ink-faint); margin-top:3px; }
+
+  .row-gap{ display:flex; flex-direction:column; gap:18px; }
+  .two-col{ display:grid; grid-template-columns:1.4fr 1fr; gap:18px; align-items:start; }
+  @media (max-width:880px){ .two-col{ grid-template-columns:1fr; } }
+
+  /* ---------- badges / pills ---------- */
+  .pill{ display:inline-flex; align-items:center; gap:5px; padding:3px 9px; border-radius:20px; font-size:11.5px; font-weight:600; white-space:nowrap; }
+  .pill-neutral{ background:var(--surface-3); color:var(--ink-soft); }
+  .pill-accent{ background:var(--accent-soft); color:var(--accent); }
+  .pill-ok{ background:var(--ok-soft); color:var(--ok); }
+  .pill-warn{ background:var(--warn-soft); color:var(--warn); }
+  .pill-crit{ background:var(--crit-soft); color:var(--crit); }
+  .zone-badge{ display:inline-flex; align-items:center; padding:2px 8px; border-radius:6px; border:1px solid var(--line); font-size:11px; font-weight:600; color:var(--ink-soft); }
+  .demo-tag{ background:var(--warn-soft); color:var(--warn); font-size:10px; padding:1px 6px; border-radius:5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; }
+  .source-tag{ background:var(--accent-soft); color:var(--accent); font-size:10px; padding:1px 6px; border-radius:5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; }
+  .map-table td, .map-table th{ vertical-align:middle; }
+  .import-summary{ display:flex; gap:18px; flex-wrap:wrap; margin:14px 0; }
+  .import-summary .stat{ font-size:13px; } .import-summary .stat b{ font-size:18px; display:block; font-family:"IBM Plex Mono",monospace; }
+  .dropzone{ border:1px dashed var(--line); border-radius:9px; padding:16px; text-align:center; color:var(--ink-faint); font-size:12.5px; }
+
+  /* ---------- table ---------- */
+  .table-wrap{ overflow-x:auto; }
+  table{ width:100%; border-collapse:collapse; font-size:13px; }
+  th{ text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-faint); font-weight:600; padding:9px 12px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  td{ padding:11px 12px; border-bottom:1px solid var(--line); vertical-align:middle; }
+  tbody tr{ cursor:pointer; }
+  tbody tr:hover{ background:var(--surface-2); }
+  td.num, th.num{ text-align:right; font-family:"IBM Plex Mono",monospace; font-variant-numeric:tabular-nums; }
+  .ttl{ font-weight:600; }
+  .muted{ color:var(--ink-faint); }
+  .empty-state{ padding:40px 20px; text-align:center; color:var(--ink-faint); }
+  .empty-state b{ color:var(--ink-soft); display:block; margin-bottom:4px; font-size:14px; }
+
+  /* ---------- forms ---------- */
+  label{ display:block; font-size:12px; font-weight:600; color:var(--ink-soft); margin-bottom:5px; }
+  input[type=text], input[type=email], input[type=number], input[type=date], select, textarea{
+    width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:7px; background:var(--surface); color:var(--ink);
+  }
+  textarea{ resize:vertical; min-height:60px; }
+  .field{ margin-bottom:14px; }
+  .field-row{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .chip-toggle{ display:inline-flex; gap:6px; flex-wrap:wrap; }
+  .chip-toggle label{ display:inline-flex; align-items:center; gap:5px; background:var(--surface-2); border:1px solid var(--line); border-radius:20px; padding:4px 10px 4px 6px; font-size:12px; font-weight:500; color:var(--ink-soft); cursor:pointer; margin:0; }
+  .chip-toggle input{ width:auto; }
+
+  /* ---------- filters ---------- */
+  .filters{ display:flex; gap:10px; flex-wrap:wrap; margin-bottom:16px; align-items:center; }
+  .filters select, .filters input[type=text]{ width:auto; min-width:140px; }
+
+  /* ---------- panel (slide-over) ---------- */
+  .scrim{ position:fixed; inset:0; background:rgba(10,16,22,.35); z-index:20; }
+  .panel{
+    position:fixed; top:0; right:0; height:100vh; width:460px; max-width:94vw; background:var(--surface);
+    box-shadow:-8px 0 30px rgba(0,0,0,.18); z-index:21; overflow-y:auto; border-left:1px solid var(--line);
+  }
+  .panel-head{ padding:18px 20px; border-bottom:1px solid var(--line); display:flex; align-items:flex-start; gap:10px; position:sticky; top:0; background:var(--surface); z-index:2;}
+  .panel-body{ padding:20px; display:flex; flex-direction:column; gap:18px; }
+  .panel-close{ margin-left:auto; }
+  .kv{ display:flex; justify-content:space-between; gap:10px; padding:7px 0; border-bottom:1px dashed var(--line); font-size:13px; }
+  .kv:last-child{ border-bottom:none; }
+  .kv .k{ color:var(--ink-faint); }
+  .kv .v{ font-weight:600; text-align:right; }
+  .deadline-box{ padding:12px 14px; border-radius:9px; border:1px solid var(--line); }
+  .deadline-box.overdue{ border-color:var(--crit); background:var(--crit-soft); }
+  .deadline-box.soon{ border-color:var(--warn); background:var(--warn-soft); }
+  .note{ padding:9px 10px; background:var(--surface-2); border-radius:8px; font-size:12.5px; margin-bottom:7px; }
+  .note .meta{ color:var(--ink-faint); font-size:11px; margin-bottom:3px; }
+  .actions-row{ display:flex; gap:8px; flex-wrap:wrap; }
+
+  /* ---------- modal ---------- */
+  .modal-scrim{ position:fixed; inset:0; background:rgba(10,16,22,.4); z-index:30; display:flex; align-items:flex-start; justify-content:center; padding:6vh 20px; overflow-y:auto; }
+  .modal{ background:var(--surface); border-radius:12px; width:640px; max-width:100%; box-shadow:var(--shadow); }
+  .modal-head{ padding:16px 20px; border-bottom:1px solid var(--line); display:flex; align-items:center; }
+  .modal-head h2{ font-size:16px; margin:0; flex:1; }
+  .modal-body{ padding:18px 20px; max-height:70vh; overflow-y:auto; }
+  .modal-foot{ padding:14px 20px; border-top:1px solid var(--line); display:flex; justify-content:flex-end; gap:8px; }
+
+  /* ---------- workorder (print) ---------- */
+  .wo-page{ max-width:760px; margin:0 auto; background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:40px 44px; box-shadow:var(--shadow); }
+  .wo-top{ display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:22px; }
+  .wo-co{ font-weight:700; font-size:14px; }
+  .wo-addr{ color:var(--ink-faint); font-size:12px; margin-top:2px; }
+  .wo-title{ font-size:22px; font-weight:700; margin:18px 0 2px; }
+  .wo-no{ color:var(--ink-faint); font-family:"IBM Plex Mono",monospace; font-size:13px; }
+  .wo-grid{ display:grid; grid-template-columns:1fr 1fr; gap:14px 26px; margin:22px 0; }
+  .wo-field .k{ font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-faint); font-weight:600; }
+  .wo-field .v{ font-size:14.5px; margin-top:3px; }
+  .wo-desc{ background:var(--surface-2); border-radius:9px; padding:14px 16px; margin:8px 0 20px; font-size:13.5px; }
+  .wo-sign{ display:grid; grid-template-columns:1fr 1fr; gap:30px; margin-top:44px; }
+  .sign-line{ border-top:1px solid var(--ink-faint); padding-top:6px; font-size:11.5px; color:var(--ink-faint); }
+  .wo-toolbar{ max-width:760px; margin:0 auto 16px; display:flex; gap:8px; justify-content:flex-end; }
+  @media print{
+    .sidebar, .topbar, .wo-toolbar, .no-print{ display:none !important; }
+    body, .content{ background:#fff; padding:0; margin:0; }
+    .wo-page{ box-shadow:none; border:none; max-width:none; }
+  }
+
+  .banner{ display:flex; align-items:center; gap:12px; padding:11px 16px; border-radius:9px; background:var(--warn-soft); color:var(--warn); font-size:13px; margin-bottom:18px; font-weight:500; }
+  .banner .btn{ margin-left:auto; }
+  .helptext{ font-size:12px; color:var(--ink-faint); margin-top:4px; }
+  .zone-legend{ display:flex; gap:14px; flex-wrap:wrap; font-size:12px; color:var(--ink-soft); }
+  .zone-legend span b{ color:var(--ink); }
+  ::selection{ background:var(--accent-soft); }
+
+  /* ---------- auth screen ---------- */
+  .auth-wrap{ min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px; }
+  .auth-card{ width:380px; max-width:100%; padding:34px 30px; }
+  .auth-logo{ font-weight:700; font-size:19px; margin-bottom:2px; }
+  .auth-sub{ color:var(--ink-faint); font-size:12.5px; margin-bottom:26px; }
+  .auth-err{ background:var(--crit-soft); color:var(--crit); border-radius:8px; padding:9px 12px; font-size:12.5px; margin-bottom:14px; }
+  .auth-ok{ background:var(--ok-soft); color:var(--ok); border-radius:8px; padding:12px 14px; font-size:13px; }
+  .configwarn{ max-width:560px; margin:60px auto; padding:24px 26px; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="overlay-root"></div>
+
+<script>
+(function(){
+  "use strict";
+
+  /* ============================== SUPABASE CONFIG ==============================
+     Заполните значениями вашего проекта: Project Settings -> API
+     (Project URL и anon public key — не секретный service_role!). */
+  var SUPABASE_URL = "https://wpgbkndpojjjimppxogm.supabase.co";
+  var SUPABASE_ANON_KEY = "sb_publishable_WOzfGGAkM1SJiFKnhkBc2w_Nia1I0za";
+  /* ============================================================================ */
+
+  var CONFIGURED = SUPABASE_URL.indexOf("YOUR-PROJECT") === -1 && SUPABASE_ANON_KEY.indexOf("YOUR-ANON") === -1;
+  var LIB_LOADED = typeof window.supabase !== "undefined" && !!window.supabase.createClient;
+  var sb = (CONFIGURED && LIB_LOADED) ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
+
+  /* ============================== CONFIG ============================== */
+  var HOTELS = [
+    {id:1, name:"Мерке",        zone:3, inService:true},
+    {id:2, name:"Аральск",      zone:3, inService:true},
+    {id:3, name:"Семей",        zone:2, inService:true},
+    {id:4, name:"Атырау",       zone:2, inService:true},
+    {id:5, name:"Актау",        zone:2, inService:true},
+    {id:6, name:"Каркаралинск", zone:1, inService:true},
+    {id:7, name:"Караганда",    zone:1, inService:true},
+    {id:8, name:"Кызылорда",    zone:null, inService:false}
+  ];
+  var ZONE_HOURS = {1:24, 2:48, 3:72};
+  var ZONE_LABEL = {1:"Зона 1 · авто", 2:"Зона 2 · авиа", 3:"Зона 3 · смешанная"};
+  var GROUP_LABEL = {1:"Группа 1 · критическая", 2:"Группа 2 · средняя", 3:"Группа 3 · плановая"};
+  var STATUS_LABEL = { new:"Новая", dispatched:"Диспетчеризована", onsite:"На объекте / устранение", closed:"Закрыта", rejected:"Отклонена" };
+  var STATUS_PILL = { new:"pill-neutral", dispatched:"pill-accent", onsite:"pill-warn", closed:"pill-ok", rejected:"pill-neutral" };
+  var CASE_LABEL = { warranty:"Гарантийный", nonwarranty:"Негарантийный", unfounded:"Необоснованная" };
+  var ROLE_LABEL = {dispatcher:"Диспетчер", specialist:"Специалист", head:"Руководитель", warehouse:"Склад ЗИП", finance:"Финансист"};
+
+  function hotelById(id){ for (var i=0;i<HOTELS.length;i++){ if (HOTELS[i].id===Number(id)) return HOTELS[i]; } return null; }
+  function fmtDate(iso){ if(!iso) return "—"; var d=new Date(iso); return d.toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit",year:"numeric"})+" "+d.toLocaleTimeString("ru-RU",{hour:"2-digit",minute:"2-digit"}); }
+  function fmtDateShort(iso){ if(!iso) return "—"; var d=new Date(iso); return d.toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit",year:"2-digit"}); }
+  function addHours(iso, h){ var d=new Date(iso); d.setHours(d.getHours()+h); return d.toISOString(); }
+  function addBusinessDays(iso, n){
+    var d = new Date(iso); var added=0;
+    while(added<n){ d.setDate(d.getDate()+1); var wd=d.getDay(); if(wd!==0 && wd!==6){ added++; } }
+    return d.toISOString();
+  }
+  function pluralRu(n, one, few, many){ n = Math.abs(n)%100; var n1=n%10; if(n>10&&n<20) return many; if(n1>1&&n1<5) return few; if(n1===1) return one; return many; }
+  function escapeHtml(s){ return String(s==null?"":s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];}); }
+  function workOrderNo(t){ var d=new Date(t.created_at||Date.now()); var ds=d.getFullYear()+String(d.getMonth()+1).padStart(2,"0")+String(d.getDate()).padStart(2,"0"); return "НЗ-"+ds+"-"+(t.id||"").replace(/-/g,"").slice(-4).toUpperCase(); }
+
+  /* ============================== ИМПОРТ ИЗ C-LECTOR ==============================
+     У c-lector.ru нет публичного API — импорт делается из данных, которые сам
+     пользователь скопировал (вставка таблицы) или выгрузил (CSV/XLSX) из c-lector. */
+  function normalizeForMatch(s){ return String(s||"").toLowerCase().replace(/[«»"'.,№#]/g,"").replace(/\s+/g," ").trim(); }
+  function matchHotelByName(name){
+    var n = normalizeForMatch(name);
+    if(!n) return null;
+    var byNum = n.match(/(?:^|\D)(\d{1,2})(?:\D|$)/); // "№4 Атырау" / "отель 4"
+    if(byNum){ var h1 = hotelById(Number(byNum[1])); if(h1 && n.indexOf(normalizeForMatch(h1.name))>-1) return h1; }
+    for(var i=0;i<HOTELS.length;i++){ var hn = normalizeForMatch(HOTELS[i].name); if(hn && (n.indexOf(hn)>-1 || hn.indexOf(n)>-1)) return HOTELS[i]; }
+    return null;
+  }
+  function parseDelimited(text){
+    var lines = String(text||"").split(/\r\n|\r|\n/).filter(function(l){ return l.trim()!==""; });
+    if(!lines.length) return {headers:[], rows:[]};
+    var delim = lines[0].indexOf("\t")>-1 ? "\t" : (lines[0].indexOf(";")>-1 && lines[0].indexOf(",")===-1 ? ";" : ",");
+    function splitLine(l){ return l.split(delim).map(function(c){ return c.replace(/^"|"$/g,"").trim(); }); }
+    var headers = splitLine(lines[0]);
+    var rows = lines.slice(1).map(splitLine);
+    return {headers:headers, rows:rows};
+  }
+  function guessMapping(headers){
+    var map = {};
+    var used = {};
+    // порядок важен: поля с более узким/точным смыслом определяются раньше,
+    // чтобы, например, столбец "Номер заявки" не перехватывался описанием
+    // из-за общей подстроки "заявк" — уже занятые столбцы пропускаются.
+    var patterns = {
+      external_ref: /№|номер|id|ref/i,
+      hotel: /отел|объект|гостиниц|hotel/i,
+      description: /описан|замечан|проблем|суть|заявк/i,
+      group: /групп|критич|приоритет/i,
+      created_at: /дата|созда|подач|created/i
+    };
+    Object.keys(patterns).forEach(function(field){
+      for(var i=0;i<headers.length;i++){
+        if(used[i]) continue;
+        if(patterns[field].test(headers[i])){ map[field]=String(i); used[i]=true; return; }
+      }
+      map[field] = "";
+    });
+    return map;
+  }
+  function setImportData(headers, rows){
+    state.importFileError = "";
+    state.importHeaders = headers; state.importRows = rows;
+    state.importMapping = guessMapping(headers);
+    state.importResult = null;
+    render();
+  }
+  function readFileAsText(file){ return new Promise(function(res,rej){ var r=new FileReader(); r.onload=function(){res(r.result);}; r.onerror=rej; r.readAsText(file, "utf-8"); }); }
+  function readFileAsBuffer(file){ return new Promise(function(res,rej){ var r=new FileReader(); r.onload=function(){res(r.result);}; r.onerror=rej; r.readAsArrayBuffer(file); }); }
+  function loadImportFile(file){
+    var ext = (file.name.split(".").pop()||"").toLowerCase();
+    state.importFileError = "";
+    if(ext==="xlsx" || ext==="xls"){
+      if(typeof XLSX==="undefined" || !XLSX.read){
+        // Библиотека для чтения Excel не загрузилась (например, заблокирована сетью/VPN) —
+        // без этой проверки страница молча ничего не делала при выборе файла.
+        state.importFileError = "Не удалось загрузить модуль для чтения Excel-файлов (возможно, заблокирован интернет/VPN). Обновите страницу и попробуйте снова, либо скопируйте таблицу из c-lector и вставьте её текстом выше.";
+        render();
+        return;
+      }
+      readFileAsBuffer(file).then(function(buf){
+        var wb = XLSX.read(buf, {type:"array"});
+        var sheet = wb.Sheets[wb.SheetNames[0]];
+        var aoa = XLSX.utils.sheet_to_json(sheet, {header:1, raw:false, defval:""});
+        aoa = aoa.filter(function(r){ return r.some(function(c){ return String(c||"").trim()!==""; }); });
+        if(!aoa.length){ state.importFileError = "Файл прочитан, но в нём не найдено ни одной строки с данными."; render(); return; }
+        setImportData(aoa[0].map(String), aoa.slice(1));
+      }).catch(function(err){
+        state.importFileError = "Не удалось прочитать файл: " + (err && err.message ? err.message : err) + ". Проверьте, что это корректный XLSX/XLS-файл, либо вставьте таблицу текстом выше.";
+        render();
+      });
+    } else {
+      readFileAsText(file).then(function(text){
+        var parsed = parseDelimited(text);
+        if(!parsed.headers.length){ state.importFileError = "Файл прочитан, но в нём не найдено ни одной строки с данными."; render(); return; }
+        setImportData(parsed.headers, parsed.rows);
+      }).catch(function(err){
+        state.importFileError = "Не удалось прочитать файл: " + (err && err.message ? err.message : err) + ".";
+        render();
+      });
+    }
+  }
+  function computeImportPreview(){
+    var m = state.importMapping;
+    var hasExt = m.external_ref!=="" && m.external_ref!=null;
+    var existingRefs = {}; state.tickets.forEach(function(t){ if(t.external_ref) existingRefs[t.external_ref]=true; });
+    var out = state.importRows.map(function(row){
+      var get = function(field){ var idx = m[field]; return (idx!=="" && idx!=null) ? (row[Number(idx)]||"").trim() : ""; };
+      var extRef = get("external_ref"), hotelName = get("hotel"), desc = get("description"), groupRaw = get("group"), dateRaw = get("created_at");
+      var hotel = matchHotelByName(hotelName);
+      var isDupe = hasExt && extRef && existingRefs[extRef];
+      var status = !desc ? "empty" : (!hotel ? "no-hotel" : (isDupe ? "dupe" : "new"));
+      return { extRef:extRef, hotelName:hotelName, hotel:hotel, description:desc, groupRaw:groupRaw, dateRaw:dateRaw, status:status };
+    });
+    var counts = {total:out.length, "new":0, dupe:0, "no-hotel":0, empty:0};
+    out.forEach(function(r){ counts[r.status]++; });
+    return {rows:out, counts:counts};
+  }
+  function commitImport(){
+    var preview = computeImportPreview();
+    var toInsert = preview.rows.filter(function(r){ return r.status==="new"; });
+    if(!toInsert.length){ state.importResult = {inserted:0, failed:0, counts:preview.counts}; render(); return; }
+    state.importBusy = true; state.importFileError = ""; render();
+    var now = new Date().toISOString();
+    var payloads = toInsert.map(function(r){
+      var g = Number(r.groupRaw); if([1,2,3].indexOf(g)===-1) g = 2;
+      var createdAt = r.dateRaw && !isNaN(new Date(r.dateRaw).getTime()) ? new Date(r.dateRaw).toISOString() : now;
+      return {
+        hotel_id: r.hotel.id, zone: r.hotel.zone, ticket_group: g,
+        description: r.description, status:"new", created_by: myLabel()+" (импорт c-lector)", created_at: createdAt,
+        arrival_deadline: r.hotel.zone ? addHours(createdAt, ZONE_HOURS[r.hotel.zone]) : null,
+        external_ref: r.extRef || null, source:"c-lector", demo:false
+      };
+    });
+    // вставляем пачками (а не по одной запросу на строку одновременно) — при сотнях
+    // строк одновременный залп из стольких же отдельных запросов мог зависать без
+    // единой ошибки на экране; теперь идём по очереди небольшими партиями и всегда
+    // доходим до финального экрана, даже если часть партий не прошла.
+    var CHUNK = 100;
+    var chunks = [];
+    for(var i=0;i<payloads.length;i+=CHUNK){ chunks.push(payloads.slice(i,i+CHUNK)); }
+    var insertedCount = 0, failedCount = 0, lastError = "";
+    function finish(){
+      state.importBusy = false;
+      state.importResult = { inserted: insertedCount, failed: failedCount, lastError: lastError, counts: preview.counts };
+      state.importHeaders = []; state.importRows = []; state.importMapping = {};
+      render();
+    }
+    function next(idx){
+      if(idx>=chunks.length){ finish(); return; }
+      sb.from("tickets").insert(chunks[idx]).then(function(res){
+        if(res && res.error){ failedCount += chunks[idx].length; lastError = res.error.message || String(res.error); }
+        else { insertedCount += chunks[idx].length; }
+        next(idx+1);
+      }).catch(function(err){
+        failedCount += chunks[idx].length; lastError = err && err.message ? err.message : String(err);
+        next(idx+1);
+      });
+    }
+    next(0);
+  }
+  function resetImport(){ state.importHeaders=[]; state.importRows=[]; state.importMapping={}; state.importResult=null; state.importFileError=""; render(); }
+
+  /* ============================== STATE ============================== */
+  var state = {
+    route: parseHash(),
+    session: null, me: null,           // auth session + own profile row
+    authView: "signin", authEmail: "", authError: "",
+    tickets: [], profiles: [], parts: [], portfolio: null,
+    selectedTicketId: null, ticketNotes: [],
+    loaded: false,
+    importHeaders: [], importRows: [], importMapping: {}, importResult: null, importBusy: false, importFileError: ""
+  };
+  var notesChannel = null;
+
+  function parseHash(){
+    var h = (location.hash||"#/dashboard").replace(/^#\/?/, "");
+    var parts = h.split("/").filter(Boolean);
+    return { view: parts[0]||"dashboard", id: parts[1]||null };
+  }
+  window.addEventListener("hashchange", function(){ state.route = parseHash(); render(); });
+
+  /* ============================== AUTH ============================== */
+  function initAuth(){
+    if(!CONFIGURED || !LIB_LOADED){ render(); return; }
+    sb.auth.onAuthStateChange(function(event, session){
+      state.session = session;
+      if(session){
+        // strip magic-link tokens from the address bar
+        if(location.hash && location.hash.indexOf("access_token")>-1){
+          history.replaceState(null, "", location.pathname+location.search+"#/dashboard");
+          state.route = parseHash();
+        }
+        loadMyProfile().then(function(){ subscribeAll(); render(); });
+      } else {
+        state.me = null; render();
+      }
+    });
+    sb.auth.getSession().then(function(res){
+      state.session = res.data.session;
+      if(state.session){ loadMyProfile().then(function(){ subscribeAll(); render(); }); }
+      else { render(); }
+    });
+  }
+
+  function loadMyProfile(){
+    return sb.from("profiles").select("*").eq("id", state.session.user.id).maybeSingle().then(function(res){
+      state.me = res.data || {id:state.session.user.id, email:state.session.user.email, name:"", role:"specialist", active:true};
+    });
+  }
+
+  function sendMagicLink(email){
+    state.authError = "";
+    return sb.auth.signInWithOtp({ email: email, options: { emailRedirectTo: window.location.origin + window.location.pathname } })
+      .then(function(res){
+        if(res.error){ state.authError = res.error.message; render(); return; }
+        state.authView = "sent"; state.authEmail = email; render();
+      });
+  }
+  function signOut(){ sb.auth.signOut(); }
+
+  /* ============================== DATA LOAD + REALTIME ============================== */
+  function subscribeAll(){
+    reloadTickets(); reloadProfiles(); reloadParts(); reloadPortfolio();
+    sb.channel("tickets-rt").on("postgres_changes", {event:"*", schema:"public", table:"tickets"}, reloadTickets).subscribe();
+    sb.channel("profiles-rt").on("postgres_changes", {event:"*", schema:"public", table:"profiles"}, reloadProfiles).subscribe();
+    sb.channel("parts-rt").on("postgres_changes", {event:"*", schema:"public", table:"parts"}, reloadParts).subscribe();
+    sb.channel("portfolio-rt").on("postgres_changes", {event:"*", schema:"public", table:"portfolio_snapshot"}, reloadPortfolio).subscribe();
+  }
+  function reloadTickets(){
+    sb.from("tickets").select("*").order("created_at", {ascending:false}).then(function(res){
+      state.tickets = res.data || [];
+      state.loaded = true;
+      maybeSeed();
+      render();
+    });
+  }
+  function reloadProfiles(){
+    sb.from("profiles").select("*").order("created_at", {ascending:true}).then(function(res){
+      state.profiles = res.data || [];
+      var mine = state.profiles.find(function(p){ return state.session && p.id===state.session.user.id; });
+      if(mine) state.me = mine;
+      render();
+    });
+  }
+  function reloadParts(){
+    sb.from("parts").select("*").order("name", {ascending:true}).then(function(res){ state.parts = res.data || []; render(); });
+  }
+  function reloadPortfolio(){
+    sb.from("portfolio_snapshot").select("*").eq("id",1).maybeSingle().then(function(res){
+      state.portfolio = res.data || null;
+      maybeSeedPortfolio();
+      render();
+    });
+  }
+  function loadNotesFor(ticketId){
+    sb.from("ticket_notes").select("*").eq("ticket_id", ticketId).order("created_at",{ascending:true}).then(function(res){
+      state.ticketNotes = res.data || [];
+      renderTicketPanel();
+    });
+    if(notesChannel) sb.removeChannel(notesChannel);
+    notesChannel = sb.channel("notes-"+ticketId).on("postgres_changes",
+      {event:"*", schema:"public", table:"ticket_notes", filter:"ticket_id=eq."+ticketId},
+      function(){ loadNotesFor(ticketId); }
+    ).subscribe();
+  }
+
+  var seeded = false;
+  function maybeSeed(){
+    if(seeded || !state.loaded) return;
+    if(state.tickets.length>0){ seeded = true; return; }
+    seeded = true;
+    var now = new Date();
+    var examples = [
+      { hotelId:4, group:2, description:"Течь в бойлерной, отсыревает стена коридора 2 этажа.", status:"dispatched", assignedTo:"Специалист (пример)", createdAt:new Date(now.getTime()-3*3600*1000).toISOString() },
+      { hotelId:1, group:3, description:"Не закрывается плотно москитная сетка, номер 108.", status:"new", assignedTo:null, createdAt:new Date(now.getTime()-1*3600*1000).toISOString() },
+      { hotelId:7, group:1, description:"Ложное срабатывание пожарной сигнализации на ресепшн, возгорания нет.", status:"onsite", assignedTo:"Специалист (пример)", caseType:"warranty", createdAt:new Date(now.getTime()-30*3600*1000).toISOString() }
+    ];
+    examples.forEach(function(ex){
+      var hotel = hotelById(ex.hotelId);
+      sb.from("tickets").insert({
+        hotel_id: ex.hotelId, zone: hotel.zone, ticket_group: ex.group, description: ex.description,
+        status: ex.status, assigned_to: ex.assignedTo||null, created_by:"Пример", created_at: ex.createdAt,
+        arrival_deadline: addHours(ex.createdAt, ZONE_HOURS[hotel.zone]),
+        arrived_at: ex.status==="onsite" ? addHours(ex.createdAt,4) : null,
+        resolution_deadline: ex.status==="onsite" ? addBusinessDays(addHours(ex.createdAt,4),3) : null,
+        case_type: ex.caseType||null, demo:true
+      }).then(function(){});
+    });
+  }
+  function maybeSeedPortfolio(){
+    if(state.portfolio) return;
+    if(state._seedingPf) return; state._seedingPf = true;
+    sb.from("portfolio_snapshot").upsert({
+      id:1, snapshot_date:"2026-09-05",
+      by_hotel: {
+        1:{total:94,submitted:0,inWork:5,overdue:1,done:87,rejected:2},
+        2:{total:149,submitted:0,inWork:10,overdue:3,done:117,rejected:22},
+        3:{total:53,submitted:0,inWork:12,overdue:10,done:29,rejected:12},
+        4:{total:85,submitted:0,inWork:33,overdue:28,done:38,rejected:14},
+        5:{total:101,submitted:0,inWork:6,overdue:2,done:50,rejected:45},
+        6:{total:5,submitted:0,inWork:0,overdue:0,done:3,rejected:2},
+        7:{total:7,submitted:1,inWork:3,overdue:1,done:2,rejected:1}
+      }
+    }).then(function(){});
+  }
+
+  /* ============================== DEADLINES ============================== */
+  function deadlineInfo(t){
+    var now = Date.now();
+    if(t.status==="closed" || t.status==="rejected") return {label:"—", overdue:false, done:true};
+    if(t.status==="new" || t.status==="dispatched"){
+      var ms = new Date(t.arrival_deadline).getTime()-now;
+      return {label:"Прибытие к "+fmtDate(t.arrival_deadline), overdue: ms<0, soon: ms>0 && ms<4*3600*1000, ms:ms, kind:"arrival"};
+    }
+    if(t.status==="onsite"){
+      var ms2 = new Date(t.resolution_deadline).getTime()-now;
+      return {label:"Устранение к "+fmtDate(t.resolution_deadline), overdue: ms2<0, soon: ms2>0 && ms2<24*3600*1000, ms:ms2, kind:"resolution"};
+    }
+    return {label:"—", overdue:false};
+  }
+  function isActive(t){ return t.status!=="closed" && t.status!=="rejected"; }
+
+  /* ============================== MUTATIONS ============================== */
+  function createTicket(data){
+    var hotel = hotelById(data.hotelId);
+    var now = new Date().toISOString();
+    return sb.from("tickets").insert({
+      hotel_id:Number(data.hotelId), zone:hotel.zone, ticket_group:Number(data.group),
+      description:data.description, status:"new", created_by: myLabel(), created_at: now,
+      arrival_deadline: hotel.zone ? addHours(now, ZONE_HOURS[hotel.zone]) : null, demo:false
+    });
+  }
+  function myLabel(){ return (state.me && (state.me.name||state.me.email)) || "—"; }
+  function addNote(ticketId, text){
+    return sb.from("ticket_notes").insert({ticket_id:ticketId, author:myLabel(), note_text:text});
+  }
+  function assignSpecialist(id, name){
+    sb.from("tickets").update({assigned_to:name, status:"dispatched"}).eq("id",id).then(function(){
+      addNote(id, "Назначен специалист: "+name+".");
+    });
+  }
+  function markArrived(id){
+    var now = new Date().toISOString();
+    sb.from("tickets").update({status:"onsite", arrived_at:now, resolution_deadline:addBusinessDays(now,3)}).eq("id",id).then(function(){
+      addNote(id, "Специалист прибыл на объект.");
+    });
+  }
+  function setCaseType(id, val){ sb.from("tickets").update({case_type:val||null}).eq("id",id); }
+  function setMaterialsEta(id, dateStr){
+    sb.from("tickets").update({materials_wait:true, materials_eta:dateStr, resolution_deadline:new Date(dateStr).toISOString()}).eq("id",id).then(function(){
+      addNote(id, "Ожидание материалов — новый срок устранения: "+fmtDateShort(dateStr)+".");
+    });
+  }
+  function closeTicket(id){
+    sb.from("tickets").update({status:"closed", closed_at:new Date().toISOString()}).eq("id",id).then(function(){
+      addNote(id, "Заявка закрыта, акт об устранении подписан.");
+    });
+  }
+  function rejectTicket(id, reason){
+    sb.from("tickets").update({status:"rejected", closed_at:new Date().toISOString(), case_type:"unfounded"}).eq("id",id).then(function(){
+      addNote(id, "Заявка отклонена."+(reason?" Причина: "+reason:""));
+    });
+  }
+  function reopenTicket(id){
+    sb.from("tickets").update({status:"onsite", closed_at:null}).eq("id",id).then(function(){
+      addNote(id, "Заявка переоткрыта.");
+    });
+  }
+  function clearDemo(){
+    sb.from("tickets").delete().eq("demo", true).then(function(){});
+  }
+  function updateProfile(id, fields){ sb.from("profiles").update(fields).eq("id", id).then(function(){}); }
+  function saveMyName(name){ updateProfile(state.me.id, {name:name}); }
+  function addPart(data){
+    sb.from("parts").insert({name:data.name, qty:Number(data.qty)||0, unit:data.unit||"шт", note:data.note||""}).then(function(){});
+  }
+  function updatePartQty(id, qty){ sb.from("parts").update({qty:Number(qty)||0, updated_at:new Date().toISOString()}).eq("id",id).then(function(){}); }
+  function removePart(id){ sb.from("parts").delete().eq("id",id).then(function(){}); }
+  function savePortfolio(byHotel, snapshotDate){ sb.from("portfolio_snapshot").upsert({id:1, by_hotel:byHotel, snapshot_date:snapshotDate}).then(function(){}); }
+
+  /* ============================== RENDER HELPERS ============================== */
+  function el(html){ var t=document.createElement("template"); t.innerHTML=html.trim(); return t.content.firstElementChild; }
+  function h(strings){ var args=[].slice.call(arguments,1); return strings.reduce(function(acc,s,i){ return acc+s+(i<args.length?args[i]:""); },""); }
+  function navItem(view, label){ var active = state.route.view===view ? "active":""; return h`<a class="nav-item ${active}" href="#/${view}"><span class="nav-dot"></span>${label}</a>`; }
+  function statusPill(status){ return h`<span class="pill ${STATUS_PILL[status]}">${STATUS_LABEL[status]}</span>`; }
+  function groupPill(g){ var cls = g===1?"pill-crit":(g===2?"pill-warn":"pill-neutral"); return h`<span class="pill ${cls}">${GROUP_LABEL[g]}</span>`; }
+  function zoneBadge(zone){ return zone ? h`<span class="zone-badge">Зона ${zone}</span>` : h`<span class="zone-badge">стройка</span>`; }
+  function roleLabel(r){ return ROLE_LABEL[r] || r; }
+
+  /* ============================== AUTH SCREEN ============================== */
+  function renderAuthScreen(){
+    var app = document.getElementById("app");
+    if(state.authView==="sent"){
+      app.innerHTML = h`<div class="auth-wrap"><div class="card auth-card">
+        <div class="auth-logo">Диспетчерская Keruen Inn</div>
+        <div class="auth-sub">Служба сервиса</div>
+        <div class="auth-ok"><b>Проверьте почту</b><br>Мы отправили ссылку для входа на ${escapeHtml(state.authEmail)}. Откройте её на этом устройстве.</div>
+        <button class="btn btn-block" style="margin-top:14px;" id="auth-resend">Отправить ещё раз</button>
+      </div></div>`;
+      document.getElementById("auth-resend").onclick = function(){ sendMagicLink(state.authEmail); };
+      return;
+    }
+    app.innerHTML = h`<div class="auth-wrap"><div class="card auth-card">
+      <div class="auth-logo">Диспетчерская Keruen Inn</div>
+      <div class="auth-sub">Вход по рабочей почте — без пароля</div>
+      ${state.authError ? h`<div class="auth-err">${escapeHtml(state.authError)}</div>` : ""}
+      <form id="auth-form">
+        <div class="field"><label>Рабочая почта</label><input type="email" name="email" required placeholder="you@company.kz" value="${escapeHtml(state.authEmail)}"></div>
+        <button class="btn btn-primary btn-block" type="submit">Отправить ссылку для входа</button>
+      </form>
+    </div></div>`;
+    document.getElementById("auth-form").addEventListener("submit", function(e){
+      e.preventDefault();
+      var email = new FormData(e.target).get("email").trim();
+      if(!email) return;
+      sendMagicLink(email);
+    });
+  }
+
+  /* ============================== VIEWS ============================== */
+  function viewDashboard(){
+    var active = state.tickets.filter(isActive);
+    var overdue = active.filter(function(t){ return deadlineInfo(t).overdue; });
+    var closedWeek = state.tickets.filter(function(t){ return t.status==="closed" && t.closed_at && (Date.now()-new Date(t.closed_at).getTime())<7*24*3600*1000; });
+    var group1Active = active.filter(function(t){ return t.ticket_group===1; });
+    var demoCount = state.tickets.filter(function(t){return t.demo;}).length;
+    var attention = active.slice().sort(function(a,b){ var da=deadlineInfo(a), dbi=deadlineInfo(b); var ma=da.ms==null?Infinity:da.ms, mb=dbi.ms==null?Infinity:dbi.ms; return ma-mb; }).slice(0,6);
+    var byZone = {1:0,2:0,3:0}; active.forEach(function(t){ if(t.zone) byZone[t.zone]=(byZone[t.zone]||0)+1; });
+    var pf = state.portfolio; var pfTotal = {total:0,submitted:0,inWork:0,overdue:0,done:0,rejected:0};
+    if(pf && pf.by_hotel){ Object.keys(pf.by_hotel).forEach(function(k){ var r=pf.by_hotel[k]; Object.keys(pfTotal).forEach(function(f){ pfTotal[f]+=(r[f]||0); }); }); }
+
+    return h`
+      <div class="row-gap">
+        ${demoCount>0 ? h`<div class="banner">Показаны примеры заявок для демонстрации процесса — замените их реальными.
+          <button class="btn btn-sm" data-action="clear-demo">Удалить примеры</button></div>` : ""}
+        <div class="grid-kpi">
+          <div class="card kpi"><div class="kpi-label">Активных заявок</div><div class="kpi-value accent">${active.length}</div><div class="kpi-sub">внутри платформы</div></div>
+          <div class="card kpi"><div class="kpi-label">Просрочено</div><div class="kpi-value ${overdue.length?'crit':''}">${overdue.length}</div><div class="kpi-sub">нарушен срок прибытия/устранения</div></div>
+          <div class="card kpi"><div class="kpi-label">Закрыто за 7 дней</div><div class="kpi-value ok">${closedWeek.length}</div><div class="kpi-sub">учтено платформой</div></div>
+          <div class="card kpi"><div class="kpi-label">Группа 1 в работе</div><div class="kpi-value">${group1Active.length}</div><div class="kpi-sub">критические, на контроле</div></div>
+        </div>
+        <div class="two-col">
+          <div class="card card-pad">
+            <div class="section-title">Требуют внимания</div>
+            ${attention.length===0 ? h`<div class="empty-state"><b>Нет активных заявок</b>Добавьте первую заявку из c-lector кнопкой «Новая заявка».</div>` : h`
+            <div class="table-wrap"><table><thead><tr><th>Отель</th><th>Описание</th><th>Статус</th><th>Срок</th></tr></thead><tbody>
+              ${attention.map(function(t){ var hotel=hotelById(t.hotel_id); var di=deadlineInfo(t);
+                return h`<tr data-open-ticket="${t.id}">
+                  <td><span class="ttl">№${hotel.id} ${hotel.name}</span> ${zoneBadge(t.zone)}</td>
+                  <td>${escapeHtml(t.description).slice(0,54)}${t.description.length>54?"…":""}</td>
+                  <td>${statusPill(t.status)}</td>
+                  <td style="${di.overdue?'color:var(--crit);font-weight:600;':(di.soon?'color:var(--warn);font-weight:600;':'')}">${di.label}</td>
+                </tr>`; }).join("")}
+            </tbody></table></div>`}
+          </div>
+          <div class="row-gap">
+            <div class="card card-pad">
+              <div class="section-title">Активные заявки по зонам</div>
+              <div class="row-gap" style="gap:10px;">${[1,2,3].map(function(z){ return h`<div class="kv"><span class="k">${ZONE_LABEL[z]}</span><span class="v mono">${byZone[z]||0}</span></div>`; }).join("")}</div>
+            </div>
+            <div class="card card-pad">
+              <div class="section-title">Портфель по c-lector.ru ${pf? h`<span class="muted" style="text-transform:none;font-weight:400;">— снимок ${fmtDateShort(pf.snapshot_date)}</span>`:''}</div>
+              <div class="kv"><span class="k">Всего заявок</span><span class="v mono">${pfTotal.total}</span></div>
+              <div class="kv"><span class="k">В работе</span><span class="v mono">${pfTotal.inWork}</span></div>
+              <div class="kv"><span class="k">Просрочено</span><span class="v mono" style="color:var(--crit)">${pfTotal.overdue}</span></div>
+              <div class="kv"><span class="k">Завершено</span><span class="v mono">${pfTotal.done}</span></div>
+              <div class="kv"><span class="k">% выполнения</span><span class="v mono">${pfTotal.total-pfTotal.rejected>0? Math.round(pfTotal.done/(pfTotal.total-pfTotal.rejected)*1000)/10 : 0}%</span></div>
+              <button class="btn btn-sm" style="margin-top:10px;" data-action="edit-portfolio">Обновить снимок</button>
+              <div class="helptext">Ручной снимок из еженедельной выгрузки VDS (c-lector.ru) — не обновляется автоматически.</div>
+            </div>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function viewTickets(){
+    var f = state.filters || {status:"", zone:"", hotel:""};
+    var list = state.tickets.filter(function(t){
+      if(f.status && t.status!==f.status) return false;
+      if(f.zone && String(t.zone)!==f.zone) return false;
+      if(f.hotel && String(t.hotel_id)!==f.hotel) return false;
+      return true;
+    });
+    return h`
+      <div class="filters">
+        <select data-filter="status"><option value="">Все статусы</option>${Object.keys(STATUS_LABEL).map(function(s){return h`<option value="${s}" ${f.status===s?'selected':''}>${STATUS_LABEL[s]}</option>`;}).join("")}</select>
+        <select data-filter="zone"><option value="">Все зоны</option>${[1,2,3].map(function(z){return h`<option value="${z}" ${f.zone===String(z)?'selected':''}>Зона ${z}</option>`;}).join("")}</select>
+        <select data-filter="hotel"><option value="">Все отели</option>${HOTELS.filter(function(x){return x.inService;}).map(function(x){return h`<option value="${x.id}" ${f.hotel===String(x.id)?'selected':''}>№${x.id} ${x.name}</option>`;}).join("")}</select>
+        <span class="muted" style="margin-left:auto;">${list.length} заявок</span>
+      </div>
+      <div class="card"><div class="table-wrap"><table>
+        <thead><tr><th>Отель</th><th>Описание</th><th>Группа</th><th>Статус</th><th>Специалист</th><th>Срок</th></tr></thead>
+        <tbody>${list.length===0 ? h`<tr><td colspan="6"><div class="empty-state"><b>Заявок нет</b>Добавьте заявку по данным из c-lector.ru.</div></td></tr>` :
+          list.map(function(t){ var hotel=hotelById(t.hotel_id); var di=deadlineInfo(t);
+            return h`<tr data-open-ticket="${t.id}">
+              <td><span class="ttl">№${hotel.id} ${hotel.name}</span> ${zoneBadge(t.zone)} ${t.demo?'<span class="demo-tag">пример</span>':''} ${t.source==='c-lector'?'<span class="source-tag">c-lector</span>':''}</td>
+              <td>${escapeHtml(t.description).slice(0,60)}${t.description.length>60?"…":""}</td>
+              <td>${groupPill(t.ticket_group)}</td>
+              <td>${statusPill(t.status)}</td>
+              <td>${t.assigned_to? escapeHtml(t.assigned_to) : '<span class="muted">—</span>'}</td>
+              <td style="${di.overdue?'color:var(--crit);font-weight:600;':(di.soon?'color:var(--warn);font-weight:600;':'')}">${di.label}</td>
+            </tr>`; }).join("")}
+        </tbody></table></div></div>`;
+  }
+
+  function viewTeam(){
+    return h`
+      <div class="two-col">
+        <div class="card card-pad">
+          <div class="section-title">Сотрудники, вошедшие в систему</div>
+          ${state.profiles.length===0 ? h`<div class="empty-state"><b>Пока никто не входил</b>Поделитесь ссылкой на это приложение с коллегами.</div>` : h`
+          <div class="table-wrap"><table>
+            <thead><tr><th>Имя</th><th>Почта</th><th>Роль</th><th>Зоны</th><th>Статус</th></tr></thead>
+            <tbody>${state.profiles.map(function(m){
+              return h`<tr>
+                <td class="ttl">${escapeHtml(m.name||"—")}</td>
+                <td class="muted">${escapeHtml(m.email)}</td>
+                <td>
+                  <select data-profile-role="${m.id}">
+                    ${Object.keys(ROLE_LABEL).map(function(r){return h`<option value="${r}" ${m.role===r?'selected':''}>${ROLE_LABEL[r]}</option>`;}).join("")}
+                  </select>
+                </td>
+                <td>
+                  <div class="chip-toggle">
+                    ${[1,2,3].map(function(z){ return h`<label><input type="checkbox" data-profile-zone="${m.id}" value="${z}" ${(m.zones||[]).indexOf(z)>-1?'checked':''}> З${z}</label>`; }).join("")}
+                  </div>
+                </td>
+                <td><button class="btn btn-sm ${m.active===false?'':'btn-ghost'}" data-profile-active="${m.id}" data-val="${m.active===false?1:0}">${m.active===false?'Включить':'Активен'}</button></td>
+              </tr>`;
+            }).join("")}</tbody>
+          </table></div>`}
+          <div class="helptext" style="margin-top:12px;">Новые коллеги появляются здесь автоматически после первого входа по ссылке — сразу назначьте им роль и зоны.</div>
+        </div>
+        <div class="card card-pad">
+          <div class="section-title">Пригласить коллегу</div>
+          <p style="font-size:13px;">Отправьте ссылку на это приложение — коллега войдёт своей рабочей почтой (без пароля) и появится в списке слева.</p>
+          <button class="btn" id="copy-link">Скопировать ссылку</button>
+        </div>
+      </div>`;
+  }
+
+  function viewParts(){
+    return h`
+      <div class="two-col">
+        <div class="card card-pad">
+          <div class="section-title">Склад ЗИП</div>
+          ${state.parts.length===0 ? h`<div class="empty-state"><b>Склад пуст</b>Добавьте позиции запчастей и материалов.</div>` : h`
+          <div class="table-wrap"><table><thead><tr><th>Наименование</th><th class="num">Остаток</th><th>Ед.</th><th>Заметка</th><th></th></tr></thead>
+            <tbody>${state.parts.map(function(p){
+              return h`<tr>
+                <td class="ttl">${escapeHtml(p.name)}</td>
+                <td class="num"><input type="number" value="${p.qty}" data-part-qty="${p.id}" style="width:70px;text-align:right;padding:4px 6px;"></td>
+                <td>${escapeHtml(p.unit)}</td><td class="muted">${escapeHtml(p.note||"")}</td>
+                <td style="text-align:right;"><button class="btn btn-sm btn-ghost btn-danger" data-part-remove="${p.id}">Удалить</button></td>
+              </tr>`; }).join("")}
+          </tbody></table></div>`}
+        </div>
+        <div class="card card-pad">
+          <div class="section-title">Добавить материал</div>
+          <form id="part-form">
+            <div class="field"><label>Наименование</label><input type="text" name="name" required></div>
+            <div class="field-row"><div class="field"><label>Остаток</label><input type="number" name="qty" value="0"></div><div class="field"><label>Ед. измерения</label><input type="text" name="unit" value="шт"></div></div>
+            <div class="field"><label>Заметка</label><input type="text" name="note" placeholder="напр. срок поставки"></div>
+            <button class="btn btn-primary" type="submit">Добавить</button>
+          </form>
+        </div>
+      </div>`;
+  }
+
+  function viewImport(){
+    if(state.importResult){
+      var c = state.importResult.counts;
+      return h`
+        <div class="card card-pad">
+          <div class="section-title">Импорт завершён</div>
+          <div class="import-summary">
+            <div class="stat"><b>${state.importResult.inserted}</b>добавлено</div>
+            ${state.importResult.failed ? h`<div class="stat"><b style="color:var(--warn);">${state.importResult.failed}</b>не удалось сохранить</div>` : ""}
+            <div class="stat"><b>${c.dupe}</b>уже были (по номеру)</div>
+            <div class="stat"><b>${c["no-hotel"]}</b>не распознан отель</div>
+            <div class="stat"><b>${c.empty}</b>пустое описание</div>
+          </div>
+          ${state.importResult.failed ? h`<div class="banner" style="margin-top:12px;">Часть заявок (${state.importResult.failed}) не удалось сохранить в базу. Ошибка: ${escapeHtml(state.importResult.lastError||"—")}</div>` : ""}
+          <button class="btn btn-primary" data-action="import-reset">Импортировать ещё</button>
+        </div>`;
+    }
+    if(state.importHeaders.length===0){
+      return h`
+        <div class="two-col">
+          <div class="card card-pad">
+            <div class="section-title">1. Вставьте данные из c-lector.ru</div>
+            <p style="font-size:13px;">Так как у c-lector нет открытого API, данные переносятся вручную: откройте список заявок в c-lector, выделите таблицу целиком (включая заголовки) и скопируйте — вставьте сюда. Либо выгрузите список в Excel/CSV и загрузите файл.</p>
+            <div class="field"><textarea id="import-paste" rows="6" placeholder="Вставьте скопированную таблицу (Ctrl+V)…"></textarea></div>
+            <button class="btn btn-primary" id="import-parse-btn">Разобрать вставленные данные</button>
+            <div class="helptext" style="margin:12px 0 6px;">— или —</div>
+            <div class="dropzone">
+              <input type="file" id="import-file" accept=".csv,.txt,.xlsx,.xls" style="width:auto;">
+              <div style="margin-top:6px;">CSV, TXT или XLSX-файл выгрузки из c-lector</div>
+            </div>
+            ${state.importFileError ? h`<div class="banner" style="margin-top:12px;">${state.importFileError}</div>` : ""}
+          </div>
+          <div class="card card-pad">
+            <div class="section-title">Как это работает</div>
+            <div class="kv"><span class="k">1</span><span class="v" style="text-align:left;">Вставляете или загружаете таблицу заявок</span></div>
+            <div class="kv"><span class="k">2</span><span class="v" style="text-align:left;">Сопоставляете колонки c-lector с полями платформы</span></div>
+            <div class="kv"><span class="k">3</span><span class="v" style="text-align:left;">Платформа сама находит отель по названию и пропускает уже импортированные заявки</span></div>
+            <div class="helptext" style="margin-top:10px;">Повторный импорт того же файла не создаст дублей, если в c-lector есть номер заявки — используйте его как «внешний номер».</div>
+          </div>
+        </div>`;
+    }
+    var preview = computeImportPreview();
+    var fieldLabel = {external_ref:"Внешний номер (для защиты от дублей)", hotel:"Отель", description:"Описание", group:"Группа критичности (1/2/3)", created_at:"Дата создания"};
+    var fieldOrder = ["hotel","description","external_ref","group","created_at"];
+    return h`
+      <div class="row-gap">
+        <div class="card card-pad">
+          <div class="section-title">2. Сопоставьте колонки</div>
+          <div class="field-row" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));">
+            ${fieldOrder.map(function(f){
+              return h`<div class="field"><label>${fieldLabel[f]}</label>
+                <select data-import-map="${f}">
+                  <option value="">— не использовать —</option>
+                  ${state.importHeaders.map(function(hdr,i){ return h`<option value="${i}" ${String(state.importMapping[f])===String(i)?'selected':''}>${escapeHtml(hdr)}</option>`; }).join("")}
+                </select></div>`;
+            }).join("")}
+          </div>
+          <div class="import-summary">
+            <div class="stat"><b>${preview.counts.total}</b>строк найдено</div>
+            <div class="stat"><b style="color:var(--ok);">${preview.counts["new"]}</b>будет импортировано</div>
+            <div class="stat"><b style="color:var(--ink-faint);">${preview.counts.dupe}</b>уже были</div>
+            <div class="stat"><b style="color:var(--crit);">${preview.counts["no-hotel"]}</b>отель не распознан</div>
+            <div class="stat"><b style="color:var(--ink-faint);">${preview.counts.empty}</b>без описания</div>
+          </div>
+          <div class="actions-row">
+            <button class="btn btn-primary" data-action="import-commit" ${preview.counts["new"]===0||state.importBusy?'disabled':''}>${state.importBusy?'Импортирую…':'Импортировать '+preview.counts["new"]+' '+pluralRu(preview.counts["new"],'заявку','заявки','заявок')}</button>
+            <button class="btn" data-action="import-reset">Отмена</button>
+          </div>
+        </div>
+        <div class="card"><div class="table-wrap"><table class="map-table">
+          <thead><tr><th>Отель</th><th>Описание</th><th>Внешний №</th><th>Статус</th></tr></thead>
+          <tbody>${preview.rows.slice(0,25).map(function(r){
+            var statusPillMap = {"new":'<span class="pill pill-ok">Новая</span>', dupe:'<span class="pill pill-neutral">Уже импортирована</span>', "no-hotel":'<span class="pill pill-crit">Отель не найден</span>', empty:'<span class="pill pill-neutral">Нет описания</span>'};
+            return h`<tr>
+              <td>${r.hotel? ('№'+r.hotel.id+' '+escapeHtml(r.hotel.name)) : h`<span class="muted">${escapeHtml(r.hotelName)||'—'}</span>`}</td>
+              <td>${escapeHtml((r.description||"").slice(0,60))}</td>
+              <td class="mono muted">${escapeHtml(r.extRef||"—")}</td>
+              <td>${statusPillMap[r.status]}</td>
+            </tr>`;
+          }).join("")}</tbody>
+        </table></div>${preview.rows.length>25 ? h`<div class="helptext" style="padding:10px 16px;">Показаны первые 25 из ${preview.rows.length} строк.</div>`:''}</div>
+      </div>`;
+  }
+
+  function viewWorkOrder(id){
+    var t = state.tickets.find(function(x){return x.id===id;});
+    if(!t) return h`<div class="empty-state"><b>Заявка не найдена</b></div>`;
+    var hotel = hotelById(t.hotel_id);
+    return h`
+      <div class="wo-toolbar no-print">
+        <a class="btn" href="#/tickets">← К списку заявок</a>
+        <button class="btn" data-action="wo-download" data-id="${t.id}">Скачать .html</button>
+        <button class="btn btn-primary" onclick="window.print()">Печать / PDF</button>
+      </div>
+      <div class="wo-page" id="wo-content">
+        <div class="wo-top">
+          <div><div class="wo-co">ТОО «VDS KAZAKHSTAN»</div><div class="wo-addr">Республика Казахстан, г. Астана</div></div>
+          <div style="text-align:right;"><div class="wo-addr">Служба сервиса</div><div class="wo-addr">${new Date().toLocaleDateString("ru-RU")}</div></div>
+        </div>
+        <div class="wo-title">Наряд-задание</div>
+        <div class="wo-no">№ ${workOrderNo(t)}</div>
+        <div class="wo-grid">
+          <div class="wo-field"><div class="k">Объект</div><div class="v">№${hotel.id} ${hotel.name}${hotel.zone?(' · Зона '+hotel.zone):''}</div></div>
+          <div class="wo-field"><div class="k">Категория</div><div class="v">${GROUP_LABEL[t.ticket_group]}</div></div>
+          <div class="wo-field"><div class="k">Специалист</div><div class="v">${t.assigned_to? escapeHtml(t.assigned_to): "не назначен"}</div></div>
+          <div class="wo-field"><div class="k">Срок прибытия</div><div class="v">${t.arrival_deadline? fmtDate(t.arrival_deadline): "—"}</div></div>
+          <div class="wo-field"><div class="k">Дата регистрации</div><div class="v">${fmtDate(t.created_at)}</div></div>
+          <div class="wo-field"><div class="k">Срок устранения</div><div class="v">${t.resolution_deadline? fmtDate(t.resolution_deadline): "определяется по прибытии"}</div></div>
+        </div>
+        <div class="wo-field"><div class="k">Описание неисправности</div></div>
+        <div class="wo-desc">${escapeHtml(t.description)}</div>
+        <div class="helptext" style="margin-bottom:6px;">Основание: Регламент подачи, рассмотрения заявок и определения гарантийных случаев (Приложение №2 к Протоколу разногласий по ДС №10) и Регламент организации и работы Службы сервиса.</div>
+        <div class="wo-sign">
+          <div class="sign-line">Специалист: _______________________ / ${t.assigned_to?escapeHtml(t.assigned_to):''} /</div>
+          <div class="sign-line">Представитель Заказчика на объекте: _______________________ /</div>
+        </div>
+      </div>`;
+  }
+
+  /* ============================== TICKET PANEL ============================== */
+  function renderTicketPanel(){
+    var root = document.getElementById("overlay-root");
+    if(!state.selectedTicketId){ root.innerHTML=""; if(notesChannel){ sb.removeChannel(notesChannel); notesChannel=null; } return; }
+    var t = state.tickets.find(function(x){return x.id===state.selectedTicketId;});
+    if(!t){ root.innerHTML=""; return; }
+    var hotel = hotelById(t.hotel_id); var di = deadlineInfo(t);
+    var specialists = state.profiles.filter(function(m){ return m.role==="specialist" && m.active!==false; });
+
+    root.innerHTML = h`
+      <div class="scrim" data-close-panel></div>
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <div style="font-weight:700;font-size:16px;">№${hotel.id} ${hotel.name} ${t.demo?'<span class="demo-tag">пример</span>':''} ${t.source==='c-lector'?'<span class="source-tag">c-lector</span>':''}</div>
+            <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;">${zoneBadge(t.zone)} ${groupPill(t.ticket_group)} ${statusPill(t.status)}</div>
+          </div>
+          <button class="btn btn-ghost panel-close" data-close-panel>✕</button>
+        </div>
+        <div class="panel-body">
+          <div><div class="section-title">Описание</div><div style="font-size:13.5px;">${escapeHtml(t.description)}</div></div>
+          ${!di.done ? h`<div class="deadline-box ${di.overdue?'overdue':(di.soon?'soon':'')}">
+            <div style="font-weight:600;">${di.label}</div>
+            <div class="helptext" style="margin-top:2px;">${di.kind==='arrival'?'Срок прибытия специалиста по зоне логистики.':'Срок устранения — 3 рабочих дня с момента прибытия.'}</div>
+            ${t.materials_wait ? h`<div class="helptext" style="margin-top:4px;">Ожидаются материалы (срок поставки: ${fmtDateShort(t.materials_eta)}).</div>` : ""}
+          </div>` : ""}
+          <div>
+            <div class="section-title">Действия</div>
+            <div class="actions-row">
+              ${t.status==="new" ? h`
+                <select id="assign-select" style="max-width:220px;"><option value="">Выбрать специалиста…</option>${specialists.map(function(s){return h`<option value="${escapeHtml(s.name||s.email)}">${escapeHtml(s.name||s.email)}</option>`;}).join("")}</select>
+                <button class="btn btn-primary btn-sm" data-action="assign" data-id="${t.id}">Назначить</button>` : ""}
+              ${t.status==="dispatched" ? h`<button class="btn btn-primary btn-sm" data-action="arrived" data-id="${t.id}">Отметить прибытие</button>`:""}
+              ${t.status==="onsite" ? h`<button class="btn btn-sm" data-action="materials" data-id="${t.id}">Нужны материалы…</button>
+                <button class="btn btn-primary btn-sm" data-action="close" data-id="${t.id}" ${!t.case_type?'disabled':''}>Закрыть заявку</button>`:""}
+              ${t.assigned_to ? h`<a class="btn btn-sm" href="#/workorder/${t.id}">Наряд-задание</a>` : ""}
+              ${(t.status==="dispatched"||t.status==="onsite") ? h`<button class="btn btn-sm btn-danger" data-action="reject" data-id="${t.id}">Отклонить</button>`:""}
+              ${(t.status==="closed"||t.status==="rejected") ? h`<button class="btn btn-sm" data-action="reopen" data-id="${t.id}">Переоткрыть</button>`:""}
+            </div>
+          </div>
+          ${t.status==="onsite" ? h`<div>
+            <div class="section-title">Категория (по осмотру)</div>
+            <select id="case-select" data-id="${t.id}">
+              <option value="">Не определена</option>
+              <option value="warranty" ${t.case_type==='warranty'?'selected':''}>Гарантийный случай</option>
+              <option value="nonwarranty" ${t.case_type==='nonwarranty'?'selected':''}>Негарантийный случай</option>
+              <option value="unfounded" ${t.case_type==='unfounded'?'selected':''}>Необоснованная заявка</option>
+            </select>
+            <div class="helptext">Нужна для закрытия заявки — влияет на оплату по Регламенту (п.5.1–5.4).</div>
+          </div>` : ""}
+          <div>
+            <div class="section-title">Карточка заявки</div>
+            <div class="kv"><span class="k">Зарегистрирована</span><span class="v">${fmtDate(t.created_at)} · ${escapeHtml(t.created_by||'—')}</span></div>
+            <div class="kv"><span class="k">Специалист</span><span class="v">${t.assigned_to? escapeHtml(t.assigned_to):'—'}</span></div>
+            <div class="kv"><span class="k">Прибыл</span><span class="v">${t.arrived_at? fmtDate(t.arrived_at):'—'}</span></div>
+            <div class="kv"><span class="k">Категория</span><span class="v">${t.case_type? CASE_LABEL[t.case_type]:'—'}</span></div>
+            <div class="kv"><span class="k">Наряд-задание</span><span class="v mono">${workOrderNo(t)}</span></div>
+            ${t.external_ref ? h`<div class="kv"><span class="k">Номер в c-lector</span><span class="v mono">${escapeHtml(t.external_ref)}</span></div>` : ""}
+          </div>
+          <div>
+            <div class="section-title">Журнал</div>
+            ${state.ticketNotes.slice().reverse().map(function(n){ return h`<div class="note"><div class="meta">${fmtDate(n.created_at)} · ${escapeHtml(n.author||'—')}</div>${escapeHtml(n.note_text)}</div>`; }).join("") || '<div class="muted" style="font-size:12.5px;">Записей пока нет.</div>'}
+            <form id="note-form" data-id="${t.id}" style="margin-top:8px;display:flex;gap:8px;">
+              <input type="text" name="text" placeholder="Добавить запись…" style="flex:1;">
+              <button class="btn btn-sm" type="submit">+</button>
+            </form>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  /* ============================== MODALS ============================== */
+  function openModal(html){ document.getElementById("overlay-root").appendChild(el(h`<div class="modal-scrim" data-close-modal>${html}</div>`)); }
+  function closeModal(){ var m=document.querySelector(".modal-scrim"); if(m) m.remove(); }
+
+  function openNewTicketModal(){
+    var options = HOTELS.filter(function(x){return x.inService;}).map(function(x){return h`<option value="${x.id}">№${x.id} ${x.name} (Зона ${x.zone})</option>`;}).join("");
+    openModal(h`
+      <div class="modal" data-stop>
+        <div class="modal-head"><h2>Новая заявка</h2><button class="btn btn-ghost" data-close-modal>✕</button></div>
+        <form id="new-ticket-form">
+          <div class="modal-body">
+            <div class="field"><label>Отель</label><select name="hotelId">${options}</select></div>
+            <div class="field"><label>Группа критичности</label>
+              <select name="group"><option value="1">Группа 1 · критическая</option><option value="2" selected>Группа 2 · средняя</option><option value="3">Группа 3 · плановая</option></select>
+            </div>
+            <div class="field"><label>Описание (по данным c-lector.ru)</label><textarea name="description" required placeholder="Кратко опишите замечание из заявки"></textarea></div>
+            <div class="helptext">Срок прибытия рассчитается автоматически по зоне логистики объекта.</div>
+          </div>
+          <div class="modal-foot"><button type="button" class="btn" data-close-modal>Отмена</button><button type="submit" class="btn btn-primary">Зарегистрировать</button></div>
+        </form>
+      </div>`);
+    document.getElementById("new-ticket-form").addEventListener("submit", function(e){
+      e.preventDefault(); var fd=new FormData(e.target);
+      createTicket({hotelId:fd.get("hotelId"), group:fd.get("group"), description:fd.get("description")});
+      closeModal();
+    });
+  }
+
+  function openMeModal(){
+    openModal(h`
+      <div class="modal" data-stop style="width:420px;">
+        <div class="modal-head"><h2>Профиль</h2><button class="btn btn-ghost" data-close-modal>✕</button></div>
+        <form id="me-form">
+          <div class="modal-body">
+            <div class="field"><label>Почта</label><input type="text" value="${escapeHtml(state.me.email)}" disabled></div>
+            <div class="field"><label>Имя</label><input type="text" name="name" value="${escapeHtml(state.me.name||'')}" placeholder="Как к вам обращаться"></div>
+            <div class="field"><label>Роль</label><input type="text" value="${roleLabel(state.me.role)}" disabled></div>
+            <div class="helptext">Роль и зоны назначает руководитель службы в разделе «Команда».</div>
+          </div>
+          <div class="modal-foot">
+            <button type="button" class="btn btn-danger" id="me-signout">Выйти</button>
+            <button type="submit" class="btn btn-primary">Сохранить</button>
+          </div>
+        </form>
+      </div>`);
+    document.getElementById("me-form").addEventListener("submit", function(e){
+      e.preventDefault(); saveMyName(new FormData(e.target).get("name")||""); closeModal();
+    });
+    document.getElementById("me-signout").addEventListener("click", function(){ closeModal(); signOut(); });
+  }
+
+  function openPortfolioModal(){
+    var pf = state.portfolio || {by_hotel:{}, snapshot_date:new Date().toISOString().slice(0,10)};
+    var fields = ["total","submitted","inWork","overdue","done","rejected"];
+    var fieldLabels = {total:"Всего",submitted:"Подано",inWork:"В работе",overdue:"Просрочено",done:"Завершено",rejected:"Отклонено"};
+    openModal(h`
+      <div class="modal" data-stop style="width:760px;">
+        <div class="modal-head"><h2>Снимок портфеля (c-lector.ru)</h2><button class="btn btn-ghost" data-close-modal>✕</button></div>
+        <form id="portfolio-form">
+          <div class="modal-body">
+            <div class="field" style="max-width:220px;"><label>Дата снимка</label><input type="date" name="snapshotDate" value="${pf.snapshot_date||''}"></div>
+            <div class="table-wrap"><table><thead><tr><th>Отель</th>${fields.map(function(f){return '<th class="num">'+fieldLabels[f]+'</th>';}).join("")}</tr></thead>
+              <tbody>${HOTELS.filter(function(x){return x.inService;}).map(function(x){
+                var row = (pf.by_hotel && pf.by_hotel[x.id]) || {};
+                return h`<tr><td>№${x.id} ${x.name}</td>${fields.map(function(f){return '<td class="num"><input type="number" name="h'+x.id+'_'+f+'" value="'+(row[f]||0)+'" style="width:64px;text-align:right;padding:4px 6px;"></td>';}).join("")}</tr>`;
+              }).join("")}</tbody></table></div>
+          </div>
+          <div class="modal-foot"><button type="button" class="btn" data-close-modal>Отмена</button><button type="submit" class="btn btn-primary">Сохранить</button></div>
+        </form>
+      </div>`);
+    document.getElementById("portfolio-form").addEventListener("submit", function(e){
+      e.preventDefault(); var fd=new FormData(e.target); var byHotel={};
+      HOTELS.filter(function(x){return x.inService;}).forEach(function(x){ byHotel[x.id]={}; fields.forEach(function(f){ byHotel[x.id][f]=Number(fd.get("h"+x.id+"_"+f))||0; }); });
+      savePortfolio(byHotel, fd.get("snapshotDate")); closeModal();
+    });
+  }
+
+  /* ============================== ROOT RENDER ============================== */
+  function render(){
+    if(!CONFIGURED){
+      document.getElementById("app").innerHTML = h`<div class="card configwarn">
+        <h2 style="margin-top:0;">Настройка не завершена</h2>
+        <p>Впишите <code>SUPABASE_URL</code> и <code>SUPABASE_ANON_KEY</code> в начале файла (значения — в вашем проекте Supabase: Project Settings → API) и разверните страницу снова.</p>
+      </div>`;
+      return;
+    }
+    if(!LIB_LOADED){
+      document.getElementById("app").innerHTML = h`<div class="card configwarn">
+        <h2 style="margin-top:0;">Не удалось загрузить Supabase</h2>
+        <p>Библиотека <code>supabase-js</code> не загрузилась с CDN (cdn.jsdelivr.net) — проверьте подключение к интернету, отключите VPN/блокировщик, если он ограничивает доступ к CDN, и обновите страницу (F5).</p>
+        <button class="btn btn-primary" onclick="location.reload()">Обновить страницу</button>
+      </div>`;
+      return;
+    }
+    if(!state.session){ renderAuthScreen(); return; }
+    if(!state.me){ document.getElementById("app").innerHTML = h`<div class="auth-wrap"><div class="muted">Загрузка…</div></div>`; return; }
+
+    var app = document.getElementById("app");
+    if(state.route.view==="workorder"){
+      state.selectedTicketId = null; document.getElementById("overlay-root").innerHTML = "";
+      app.innerHTML = h`<div class="content" style="max-width:900px;">${viewWorkOrder(state.route.id)}</div>`;
+      return;
+    }
+    var titleMap = {dashboard:"Дашборд", tickets:"Заявки", team:"Команда", parts:"Склад ЗИП", "import":"Импорт из c-lector"};
+    var body = state.route.view==="tickets"?viewTickets(): state.route.view==="team"?viewTeam(): state.route.view==="parts"?viewParts(): state.route.view==="import"?viewImport(): viewDashboard();
+
+    app.innerHTML = h`
+      <div class="sidebar">
+        <div class="brand"><div class="brand-name">Диспетчерская</div><div class="brand-sub">Keruen Inn · Служба сервиса</div></div>
+        <nav class="nav">${navItem("dashboard","Дашборд")}${navItem("tickets","Заявки")}${navItem("import","Импорт из c-lector")}${navItem("team","Команда")}${navItem("parts","Склад ЗИП")}</nav>
+        <div class="nav-footer">
+          <div class="zone-legend"><span><b>З1</b> 24ч</span><span><b>З2</b> 48ч</span><span><b>З3</b> 72ч</span></div>
+          <p>Заявки поступают через c-lector.ru — здесь только внутренняя диспетчеризация и наряд-задания.</p>
+        </div>
+      </div>
+      <div class="main">
+        <div class="topbar">
+          <h1>${titleMap[state.route.view]||"Дашборд"}</h1>
+          <button class="btn btn-primary" data-action="new-ticket">+ Новая заявка</button>
+          <div class="whoami"><div class="whoami-chip" data-action="me">
+            <span class="avatar">${(state.me.name||state.me.email||"?").trim().charAt(0).toUpperCase()}</span>
+            <span>${escapeHtml(state.me.name||state.me.email)}</span>
+          </div></div>
+        </div>
+        <div class="content">${body}</div>
+      </div>`;
+    renderTicketPanel();
+    if(state.selectedTicketId) loadNotesFor(state.selectedTicketId);
+  }
+
+  /* ============================== EVENTS ============================== */
+  document.addEventListener("click", function(e){
+    var t = e.target;
+    if(t.closest(".nav-item")) return;
+    var openTicket = t.closest("[data-open-ticket]");
+    if(openTicket){ state.selectedTicketId = openTicket.getAttribute("data-open-ticket"); renderTicketPanel(); loadNotesFor(state.selectedTicketId); return; }
+    if(t.closest("[data-close-panel]")){ state.selectedTicketId = null; renderTicketPanel(); return; }
+    if(t.matches(".modal-scrim") && t.hasAttribute("data-close-modal")){ closeModal(); return; }
+    if(t.hasAttribute("data-close-modal")){ closeModal(); return; }
+
+    if(t.id==="import-parse-btn"){
+      var ta = document.getElementById("import-paste"); var parsed = parseDelimited(ta?ta.value:"");
+      if(parsed.headers.length) setImportData(parsed.headers, parsed.rows);
+      else alert("Не удалось распознать таблицу — убедитесь, что скопирована таблица с заголовками.");
+      return;
+    }
+    if(t.id==="copy-link"){
+      navigator.clipboard && navigator.clipboard.writeText(window.location.origin+window.location.pathname).then(function(){ t.textContent="Скопировано"; setTimeout(function(){ t.textContent="Скопировать ссылку"; },1500); });
+      return;
+    }
+
+    var actionEl = t.closest("[data-action]");
+    if(actionEl){
+      var action = actionEl.getAttribute("data-action"); var id = actionEl.getAttribute("data-id");
+      if(action==="new-ticket") return openNewTicketModal();
+      if(action==="me") return openMeModal();
+      if(action==="edit-portfolio") return openPortfolioModal();
+      if(action==="clear-demo"){ if(confirm("Удалить все примеры заявок?")) clearDemo(); return; }
+      if(action==="import-commit") return commitImport();
+      if(action==="import-reset") return resetImport();
+      if(action==="assign"){
+        var sel=document.getElementById("assign-select"); var name=sel&&sel.value;
+        if(!name){ alert("Выберите специалиста из списка (назначьте роль в разделе «Команда», если список пуст)."); return; }
+        assignSpecialist(id,name); return;
+      }
+      if(action==="arrived") return markArrived(id);
+      if(action==="materials"){ var d=prompt("Ожидаемая дата поставки материалов (ГГГГ-ММ-ДД):"); if(d) setMaterialsEta(id,d); return; }
+      if(action==="close") return closeTicket(id);
+      if(action==="reject"){ var reason=prompt("Причина отклонения (необязательно):")||""; return rejectTicket(id,reason); }
+      if(action==="reopen") return reopenTicket(id);
+      if(action==="wo-download"){
+        var tk = state.tickets.find(function(x){return x.id===id;});
+        var htmlDoc = "<!doctype html><html><head><meta charset='utf-8'><title>"+workOrderNo(tk)+"</title></head><body>"+document.getElementById("wo-content").outerHTML+"</body></html>";
+        var blob = new Blob([htmlDoc], {type:"text/html"}); var url = URL.createObjectURL(blob);
+        var a = document.createElement("a"); a.href=url; a.download=workOrderNo(tk)+".html"; document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(function(){ URL.revokeObjectURL(url); }, 2000);
+        return;
+      }
+      var pActive = actionEl.getAttribute("data-profile-active");
+      if(pActive){ updateProfile(pActive, {active: actionEl.getAttribute("data-val")==="1"}); return; }
+      var partRemove = actionEl.getAttribute("data-part-remove");
+      if(partRemove){ if(confirm("Удалить позицию склада?")) removePart(partRemove); return; }
+    }
+  });
+
+  document.addEventListener("change", function(e){
+    if(e.target.matches("[data-filter]")){ state.filters=state.filters||{}; state.filters[e.target.getAttribute("data-filter")]=e.target.value; render(); }
+    if(e.target.id==="import-file"){ var f=e.target.files&&e.target.files[0]; if(f) loadImportFile(f); return; }
+    if(e.target.matches("[data-import-map]")){ state.importMapping[e.target.getAttribute("data-import-map")]=e.target.value; render(); return; }
+    if(e.target.id==="case-select") setCaseType(e.target.getAttribute("data-id"), e.target.value);
+    if(e.target.matches("[data-part-qty]")) updatePartQty(e.target.getAttribute("data-part-qty"), e.target.value);
+    if(e.target.matches("[data-profile-role]")) updateProfile(e.target.getAttribute("data-profile-role"), {role:e.target.value});
+    if(e.target.matches("[data-profile-zone]")){
+      var pid = e.target.getAttribute("data-profile-zone");
+      var m = state.profiles.find(function(p){return p.id===pid;});
+      var zones = (m&&m.zones)? m.zones.slice() : [];
+      var z = Number(e.target.value);
+      if(e.target.checked){ if(zones.indexOf(z)===-1) zones.push(z); } else { zones = zones.filter(function(x){return x!==z;}); }
+      updateProfile(pid, {zones:zones});
+    }
+  });
+
+  document.addEventListener("submit", function(e){
+    if(e.target.id==="note-form"){
+      e.preventDefault(); var fd=new FormData(e.target); var text=(fd.get("text")||"").trim();
+      if(text){ addNote(e.target.getAttribute("data-id"), text); e.target.reset(); }
+    }
+    if(e.target.id==="part-form"){
+      e.preventDefault(); var fd3=new FormData(e.target); if(!fd3.get("name")) return;
+      addPart({name:fd3.get("name"), qty:fd3.get("qty"), unit:fd3.get("unit"), note:fd3.get("note")}); e.target.reset();
+    }
+  });
+
+  setInterval(function(){ if(!document.querySelector(".modal-scrim")) render(); }, 60000);
+
+  render();
+  initAuth();
+})();
+</script>
+</body>
+</html>
