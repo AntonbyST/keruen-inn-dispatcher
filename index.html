@@ -148,6 +148,10 @@
   /* ---------- filters ---------- */
   .filters{ display:flex; gap:10px; flex-wrap:wrap; margin-bottom:16px; align-items:center; }
   .filters select, .filters input[type=text]{ width:auto; min-width:140px; }
+  .status-filter-group{ display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+  .status-filter-chip{ cursor:pointer; padding:3px 10px; border-radius:20px; font-size:12px; font-weight:600; border:1px solid var(--line); color:var(--ink-soft); background:var(--surface-2); user-select:none; }
+  .status-filter-chip:hover{ border-color:var(--accent-line); }
+  .status-filter-chip.active{ background:var(--accent); color:var(--accent-ink); border-color:var(--accent); }
 
   /* ---------- panel (slide-over) ---------- */
   .scrim{ position:fixed; inset:0; background:rgba(10,16,22,.35); z-index:20; }
@@ -890,6 +894,15 @@
   function groupPill(g){ var cls = g===1?"pill-crit":(g===2?"pill-warn":"pill-neutral"); return h`<span class="pill ${cls}">${GROUP_LABEL[g]}</span>`; }
   function zoneBadge(zone){ return zone ? h`<span class="zone-badge">Зона ${zone}</span>` : h`<span class="zone-badge">стройка</span>`; }
   function roleLabel(r){ return ROLE_LABEL[r] || r; }
+  // Видимый статус заявки для списка/фильтра: если есть статус из c-lector — берём
+  // его текстом как есть (это и есть то, что реально показывается пользователю),
+  // иначе — внутренний статус наряда-задания.
+  function ticketStatusLabel(t){ return t.external_status || STATUS_LABEL[t.status] || "—"; }
+  // Компактная отметка "назначена бригаде/инженеру" — раньше для этого была отдельная
+  // колонка "Главный инженер" в списке заявок, теперь вместо неё значок рядом со
+  // статусом (статуса "Диспетчеризована" как отдельного состояния на практике не бывает,
+  // а вот видеть с одного взгляда, назначен ли исполнитель, — нужно).
+  function assignedTag(t){ return t.assigned_to ? h`<span class="pill pill-ok" style="padding:2px 8px;" title="Назначено: ${escapeHtml(t.assigned_to)}">✓ назначена</span>` : ""; }
 
   /* ============================== AUTH SCREEN ============================== */
   function renderAuthScreen(){
@@ -979,10 +992,16 @@
   }
 
   function viewTickets(){
-    var f = state.filters || {status:"", zone:"", hotel:"", q:""};
+    var f = state.filters || {statusList:[], zone:"", hotel:"", q:""};
+    if(!f.statusList) f.statusList = [];
     var q = normalizeForMatch(f.q||"");
+    // Список статусов для фильтра строим из реальных значений, которые сейчас есть
+    // в заявках (текст из c-lector произвольный, единого перечня нет) — а не из
+    // фиксированного внутреннего набора new/dispatched/onsite/closed/rejected.
+    var statusSeen = {}; state.tickets.forEach(function(t){ statusSeen[ticketStatusLabel(t)] = true; });
+    var statusOptions = Object.keys(statusSeen).sort();
     var list = state.tickets.filter(function(t){
-      if(f.status && t.status!==f.status) return false;
+      if(f.statusList.length && f.statusList.indexOf(ticketStatusLabel(t))===-1) return false;
       if(f.zone && String(t.zone)!==f.zone) return false;
       if(f.hotel && String(t.hotel_id)!==f.hotel) return false;
       if(q){
@@ -993,23 +1012,29 @@
     });
     return h`
       <div class="filters">
-        <select data-filter="status"><option value="">Все статусы</option>${Object.keys(STATUS_LABEL).map(function(s){return h`<option value="${s}" ${f.status===s?'selected':''}>${STATUS_LABEL[s]}</option>`;}).join("")}</select>
+        <div class="status-filter-group">
+          ${statusOptions.map(function(s){ var active = f.statusList.indexOf(s)>-1;
+            return h`<span class="status-filter-chip ${active?'active':''}" data-action="toggle-status-filter" data-value="${escapeHtml(s)}">${escapeHtml(s)}</span>`;
+          }).join("")}
+          ${f.statusList.length ? h`<a href="#" data-action="clear-status-filter" style="font-size:12px;">сбросить</a>` : ""}
+        </div>
         <select data-filter="zone"><option value="">Все зоны</option>${[1,2,3].map(function(z){return h`<option value="${z}" ${f.zone===String(z)?'selected':''}>Зона ${z}</option>`;}).join("")}</select>
         <select data-filter="hotel"><option value="">Все отели</option>${HOTELS.filter(function(x){return x.inService;}).map(function(x){return h`<option value="${x.id}" ${f.hotel===String(x.id)?'selected':''}>№${x.id} ${x.name}</option>`;}).join("")}</select>
         <input type="text" data-filter="q" value="${escapeHtml(f.q||"")}" placeholder="Поиск по описанию или № заявки…" style="min-width:220px;">
         <span class="muted" style="margin-left:auto;">${list.length} заявок</span>
       </div>
       <div class="card"><div class="table-wrap"><table>
-        <thead><tr><th>№ c-lector</th><th>Отель</th><th>Описание</th><th>Группа</th><th>Статус</th><th>Главный инженер</th><th>Срок</th></tr></thead>
-        <tbody>${list.length===0 ? h`<tr><td colspan="7"><div class="empty-state"><b>Заявок нет</b>Добавьте заявку по данным из c-lector.ru.</div></td></tr>` :
+        <thead><tr><th>№ c-lector</th><th>Отель</th><th>Описание</th><th>Статус</th><th>Срок</th></tr></thead>
+        <tbody>${list.length===0 ? h`<tr><td colspan="5"><div class="empty-state"><b>Заявок нет</b>Добавьте заявку по данным из c-lector.ru.</div></td></tr>` :
           list.map(function(t){ var hotel=hotelById(t.hotel_id); var di=deadlineInfo(t);
             return h`<tr data-open-ticket="${t.id}">
               <td class="mono">${t.external_ref? escapeHtml(t.external_ref) : '<span class="muted">—</span>'}</td>
-              <td><span class="ttl">№${hotel.id} ${hotel.name}</span> ${zoneBadge(t.zone)} ${t.demo?'<span class="demo-tag">пример</span>':''} ${t.source==='c-lector'?'<span class="source-tag">c-lector</span>':''}</td>
+              <td>
+                <div><span class="ttl">№${hotel.id} ${hotel.name}</span></div>
+                <div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap;">${zoneBadge(t.zone)}${t.demo?' <span class="demo-tag">пример</span>':''}${t.source==='c-lector'?' <span class="source-tag">c-lector</span>':''}</div>
+              </td>
               <td>${escapeHtml(t.description_short||t.description).slice(0,60)}${(t.description_short||t.description).length>60?"…":""}</td>
-              <td>${groupPill(t.ticket_group)}</td>
-              <td>${t.external_status? externalStatusPill(t.external_status): statusPill(t.status)}</td>
-              <td>${t.assigned_to? escapeHtml(t.assigned_to) : '<span class="muted">—</span>'}</td>
+              <td>${t.external_status? externalStatusPill(t.external_status): statusPill(t.status)} ${assignedTag(t)}</td>
               <td style="${di.overdue?'color:var(--crit);font-weight:600;':(di.soon?'color:var(--warn);font-weight:600;':'')}">${di.label}</td>
             </tr>`; }).join("")}
         </tbody></table></div></div>`;
@@ -1186,7 +1211,7 @@
           title: "№"+hotel.id+" "+hotel.name+" — открытых заявок: "+count
         });
         marker.addListener("click", function(){
-          state.filters = state.filters||{}; state.filters.hotel = String(hotel.id); state.filters.status=""; state.filters.zone=""; state.filters.q="";
+          state.filters = state.filters||{}; state.filters.hotel = String(hotel.id); state.filters.statusList=[]; state.filters.zone=""; state.filters.q="";
           location.hash = "#/tickets";
         });
         mapMarkers.push(marker);
@@ -1638,6 +1663,14 @@
       if(action==="reopen") return reopenTicket(id);
       if(action==="invoice-open") return openInvoiceFile(actionEl.getAttribute("data-path"));
       if(action==="registry-export") return exportRegistryExcel();
+      if(action==="toggle-status-filter"){
+        var sv = actionEl.getAttribute("data-value");
+        state.filters = state.filters||{}; state.filters.statusList = state.filters.statusList||[];
+        var sidx = state.filters.statusList.indexOf(sv);
+        if(sidx>-1) state.filters.statusList.splice(sidx,1); else state.filters.statusList.push(sv);
+        render(); return;
+      }
+      if(action==="clear-status-filter"){ e.preventDefault(); state.filters=state.filters||{}; state.filters.statusList=[]; render(); return; }
       if(action==="note-edit"){ e.preventDefault(); state.editingNoteId = id; renderTicketPanel(); return; }
       if(action==="note-cancel"){ e.preventDefault(); state.editingNoteId = null; renderTicketPanel(); return; }
       if(action==="note-delete"){ e.preventDefault(); if(confirm("Удалить запись из журнала?")) deleteNote(id); return; }
