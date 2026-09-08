@@ -245,18 +245,11 @@
   var sb = (CONFIGURED && LIB_LOADED) ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
 
   /* ============================== CONFIG ============================== */
-  // lat/lng — координаты города (не точного адреса объекта); при необходимости
-  // поправьте на точные координаты гостиницы для более точных меток на карте.
-  var HOTELS = [
-    {id:1, name:"Мерке",        zone:3, inService:true,  lat:42.8500, lng:73.4333},
-    {id:2, name:"Аральск",      zone:3, inService:true,  lat:46.7900, lng:61.6600},
-    {id:3, name:"Семей",        zone:2, inService:true,  lat:50.4111, lng:80.2275},
-    {id:4, name:"Атырау",       zone:2, inService:true,  lat:47.1167, lng:51.9000},
-    {id:5, name:"Актау",        zone:2, inService:true,  lat:43.6500, lng:51.1600},
-    {id:6, name:"Каркаралинск", zone:1, inService:true,  lat:49.4167, lng:75.4667},
-    {id:7, name:"Караганда",    zone:1, inService:true,  lat:49.8047, lng:73.1094},
-    {id:8, name:"Кызылорда",    zone:null, inService:false, lat:44.8479, lng:65.5093}
-  ];
+  // Список отелей раньше был зашит прямо здесь в коде — теперь он хранится в
+  // таблице hotels в Supabase и редактируется в разделе «Отели» интерфейса
+  // (добавить/переименовать/сменить зону/снять с эксплуатации — без правки кода
+  // и передеплоя). SQL-скрипт при первой настройке сам заполняет эту таблицу
+  // теми же 8 отелями, что были здесь раньше. См. state.hotels и reloadHotels().
   var ZONE_HOURS = {1:24, 2:48, 3:72};
   var ZONE_LABEL = {1:"Зона 1 · авто", 2:"Зона 2 · авиа", 3:"Зона 3 · смешанная"};
   var GROUP_LABEL = {1:"Группа 1 · критическая", 2:"Группа 2 · средняя", 3:"Группа 3 · плановая"};
@@ -264,6 +257,34 @@
   var STATUS_PILL = { new:"pill-neutral", dispatched:"pill-accent", onsite:"pill-warn", closed:"pill-ok", rejected:"pill-neutral" };
   var CASE_LABEL = { warranty:"Гарантийный", nonwarranty:"Негарантийный", unfounded:"Необоснованная" };
   var ROLE_LABEL = {dispatcher:"Диспетчер", specialist:"Главный инженер", head:"Руководитель", warehouse:"Склад ЗИП", finance:"Финансист"};
+  // Какие разделы меню видит каждая роль. null = видит всё. Это ограничение
+  // только интерфейса (чтобы не путать людей лишними разделами) — на уровне
+  // базы данных (RLS) доступ по-прежнему открыт всем вошедшим, поэтому это
+  // не защита данных, а удобство навигации.
+  // «Команда» доступна всем ролям без исключения: это единственное место, где
+  // назначается роль, и по умолчанию любой новый человек становится
+  // «Главный инженер» (specialist) — если убрать отсюда «Команду», человек,
+  // первым вошедший в систему, никогда не сможет сам себе (или другим)
+  // назначить роль диспетчера/руководителя.
+  var ROLE_NAV = {
+    dispatcher: null,
+    head: null,
+    specialist: ["dashboard","tickets","map","team"],
+    warehouse: ["dashboard","parts","team"],
+    finance: ["dashboard","registry","team"]
+  };
+  function navAllowed(view){
+    var role = state.me && state.me.role;
+    var allowed = ROLE_NAV.hasOwnProperty(role) ? ROLE_NAV[role] : null;
+    if(allowed===null) return true;
+    return allowed.indexOf(view) > -1;
+  }
+  function firstAllowedView(){
+    var role = state.me && state.me.role;
+    var allowed = ROLE_NAV.hasOwnProperty(role) ? ROLE_NAV[role] : null;
+    if(allowed===null || !allowed.length) return "dashboard";
+    return allowed[0];
+  }
   var CURRENCIES = ["KZT","RUB","USD","EUR","BYN"];
   // Полный набор колонок «Реестра платежей» — 1:1 с корпоративным файлом
   // «Реестр платежей Мотель N.xlsm» (лист по месяцу), чтобы и таблица на
@@ -282,7 +303,7 @@
     saveInvoiceField(iv.id, {extra: extra});
   }
 
-  function hotelById(id){ for (var i=0;i<HOTELS.length;i++){ if (HOTELS[i].id===Number(id)) return HOTELS[i]; } return null; }
+  function hotelById(id){ var list=state.hotels||[]; for (var i=0;i<list.length;i++){ if (list[i].id===Number(id)) return list[i]; } return null; }
   function fmtDate(iso){ if(!iso) return "—"; var d=new Date(iso); return d.toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit",year:"numeric"})+" "+d.toLocaleTimeString("ru-RU",{hour:"2-digit",minute:"2-digit"}); }
   function fmtDateShort(iso){ if(!iso) return "—"; var d=new Date(iso); return d.toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit",year:"2-digit"}); }
   function addHours(iso, h){ var d=new Date(iso); d.setHours(d.getHours()+h); return d.toISOString(); }
@@ -304,7 +325,8 @@
     if(!n) return null;
     var byNum = n.match(/(?:^|\D)(\d{1,2})(?:\D|$)/); // "№4 Атырау" / "отель 4"
     if(byNum){ var h1 = hotelById(Number(byNum[1])); if(h1 && n.indexOf(normalizeForMatch(h1.name))>-1) return h1; }
-    for(var i=0;i<HOTELS.length;i++){ var hn = normalizeForMatch(HOTELS[i].name); if(hn && (n.indexOf(hn)>-1 || hn.indexOf(n)>-1)) return HOTELS[i]; }
+    var hlist = state.hotels||[];
+    for(var i=0;i<hlist.length;i++){ var hn = normalizeForMatch(hlist[i].name); if(hn && (n.indexOf(hn)>-1 || hn.indexOf(n)>-1)) return hlist[i]; }
     return null;
   }
   function parseDelimited(text){
@@ -489,7 +511,7 @@
     route: parseHash(),
     session: null, me: null,           // auth session + own profile row
     authView: "signin", authEmail: "", authError: "",
-    tickets: [], profiles: [], parts: [], portfolio: null, invoices: [], snapshots: [], crews: [],
+    tickets: [], profiles: [], parts: [], portfolio: null, invoices: [], snapshots: [], crews: [], hotels: [], hotelsLoaded: false,
     selectedTicketId: null, ticketNotes: [], editingNoteId: null,
     loaded: false,
     importHeaders: [], importRows: [], importMapping: {}, importResult: null, importBusy: false, importFileError: ""
@@ -544,7 +566,7 @@
 
   /* ============================== DATA LOAD + REALTIME ============================== */
   function subscribeAll(){
-    reloadTickets(); reloadProfiles(); reloadParts(); reloadPortfolio(); reloadInvoices(); reloadSnapshots(); reloadCrews();
+    reloadTickets(); reloadProfiles(); reloadParts(); reloadPortfolio(); reloadInvoices(); reloadSnapshots(); reloadCrews(); reloadHotels();
     sb.channel("tickets-rt").on("postgres_changes", {event:"*", schema:"public", table:"tickets"}, reloadTickets).subscribe();
     sb.channel("profiles-rt").on("postgres_changes", {event:"*", schema:"public", table:"profiles"}, reloadProfiles).subscribe();
     sb.channel("parts-rt").on("postgres_changes", {event:"*", schema:"public", table:"parts"}, reloadParts).subscribe();
@@ -552,6 +574,18 @@
     sb.channel("invoices-rt").on("postgres_changes", {event:"*", schema:"public", table:"invoices"}, reloadInvoices).subscribe();
     sb.channel("snapshots-rt").on("postgres_changes", {event:"*", schema:"public", table:"import_snapshots"}, reloadSnapshots).subscribe();
     sb.channel("crews-rt").on("postgres_changes", {event:"*", schema:"public", table:"crews"}, reloadCrews).subscribe();
+    sb.channel("hotels-rt").on("postgres_changes", {event:"*", schema:"public", table:"hotels"}, reloadHotels).subscribe();
+  }
+  // Список отелей — раньше был константой в коде, теперь строка в таблице hotels;
+  // maybeSeed() (демо-заявки) ждёт, пока отели тоже загрузятся, иначе примерные
+  // заявки могут сослаться на ещё не загруженный отель.
+  function reloadHotels(){
+    sb.from("hotels").select("*").order("id", {ascending:true}).then(function(res){
+      state.hotels = res.data || [];
+      state.hotelsLoaded = true;
+      maybeSeed();
+      render();
+    });
   }
   function reloadCrews(){
     sb.from("crews").select("*").order("name", {ascending:true}).then(function(res){ state.crews = res.data || []; render(); });
@@ -680,7 +714,7 @@
 
   var seeded = false;
   function maybeSeed(){
-    if(seeded || !state.loaded) return;
+    if(seeded || !state.loaded || !state.hotelsLoaded) return;
     if(state.tickets.length>0){ seeded = true; return; }
     seeded = true;
     var now = new Date();
@@ -691,6 +725,7 @@
     ];
     examples.forEach(function(ex){
       var hotel = hotelById(ex.hotelId);
+      if(!hotel) return; // отель мог быть переименован/удалён из «Отелей» ещё до первого запуска
       sb.from("tickets").insert({
         hotel_id: ex.hotelId, zone: hotel.zone, ticket_group: ex.group, description: ex.description,
         status: ex.status, assigned_to: ex.assignedTo||null, created_by:"Пример", created_at: ex.createdAt,
@@ -898,6 +933,14 @@
   // его текстом как есть (это и есть то, что реально показывается пользователю),
   // иначе — внутренний статус наряда-задания.
   function ticketStatusLabel(t){ return t.external_status || STATUS_LABEL[t.status] || "—"; }
+  // Заявка считается закрытой/отклонённой для целей списка «Заявки» (скрыть по
+  // умолчанию), если так говорит статус c-lector (там свои формулировки —
+  // "Выполнена", "Отклонена" и т.п.), а если внешнего статуса нет — по
+  // внутреннему статусу наряда-задания.
+  function isTicketDone(t){
+    if(t.external_status) return /выполн|заверш|устранен[оы]|закрыт|отклон|отказ/i.test(t.external_status);
+    return t.status==="closed" || t.status==="rejected";
+  }
   // Компактная отметка "назначена бригаде/инженеру" — раньше для этого была отдельная
   // колонка "Главный инженер" в списке заявок, теперь вместо неё значок рядом со
   // статусом (статуса "Диспетчеризована" как отдельного состояния на практике не бывает,
@@ -991,16 +1034,14 @@
       </div>`;
   }
 
-  function viewTickets(){
-    var f = state.filters || {statusList:[], zone:"", hotel:"", q:""};
+  // Общая фильтрация+сортировка списка заявок — используется и для самого экрана
+  // «Заявки», и для выгрузки в Excel (чтобы выгружался ровно тот же список, что
+  // сейчас показан на экране, с теми же фильтрами и сортировкой).
+  function getFilteredTicketsList(){
+    var f = state.filters || {statusList:[], zone:"", hotel:"", q:"", showClosed:false};
     if(!f.statusList) f.statusList = [];
     var q = normalizeForMatch(f.q||"");
-    // Список статусов для фильтра строим из реальных значений, которые сейчас есть
-    // в заявках (текст из c-lector произвольный, единого перечня нет) — а не из
-    // фиксированного внутреннего набора new/dispatched/onsite/closed/rejected.
-    var statusSeen = {}; state.tickets.forEach(function(t){ statusSeen[ticketStatusLabel(t)] = true; });
-    var statusOptions = Object.keys(statusSeen).sort();
-    var list = state.tickets.filter(function(t){
+    var baseFiltered = state.tickets.filter(function(t){
       if(f.statusList.length && f.statusList.indexOf(ticketStatusLabel(t))===-1) return false;
       if(f.zone && String(t.zone)!==f.zone) return false;
       if(f.hotel && String(t.hotel_id)!==f.hotel) return false;
@@ -1010,6 +1051,56 @@
       }
       return true;
     });
+    var list = f.showClosed ? baseFiltered.slice() : baseFiltered.filter(function(t){ return !isTicketDone(t); });
+    var hiddenClosedCount = baseFiltered.length - list.length;
+    var sortField = f.sort && f.sort.field;
+    var sortDir = (f.sort && f.sort.dir) || "asc";
+    function sortVal(t, field){
+      var hotel = hotelById(t.hotel_id);
+      if(field==="ref") return t.external_ref || "";
+      if(field==="hotel") return hotel ? hotel.name : "";
+      if(field==="desc") return t.description_short || t.description || "";
+      if(field==="status") return ticketStatusLabel(t);
+      if(field==="deadline"){ var di=deadlineInfo(t); return di.ms==null ? Infinity : di.ms; }
+      return "";
+    }
+    if(sortField){
+      list = list.slice().sort(function(a,b){
+        var va = sortVal(a, sortField), vb = sortVal(b, sortField);
+        var cmp = (typeof va==="number" || typeof vb==="number") ? ((va||0)-(vb||0)) : String(va).localeCompare(String(vb), "ru");
+        return sortDir==="desc" ? -cmp : cmp;
+      });
+    }
+    return { list: list, hiddenClosedCount: hiddenClosedCount, sortField: sortField, sortDir: sortDir };
+  }
+  function exportTicketsExcel(){
+    if(typeof XLSX==="undefined" || !XLSX.utils){ alert("Модуль Excel не загрузился (возможно, заблокирован интернет/VPN) — обновите страницу и попробуйте снова."); return; }
+    var list = getFilteredTicketsList().list;
+    var header = ["№ c-lector","Отель","Описание","Статус","Исполнитель","Срок"];
+    var rows = list.map(function(t){
+      var hotel = hotelById(t.hotel_id); var di = deadlineInfo(t);
+      return [ t.external_ref||"", hotel?("№"+hotel.id+" "+hotel.name):"", t.description_short||t.description||"", ticketStatusLabel(t), t.assigned_to||"", di.label ];
+    });
+    var ws = XLSX.utils.aoa_to_sheet([header].concat(rows));
+    ws["!cols"] = header.map(function(){ return {wch:22}; });
+    var wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Заявки");
+    XLSX.writeFile(wb, "Заявки_Keruen_Inn_"+new Date().toISOString().slice(0,10)+".xlsx");
+  }
+  function viewTickets(){
+    var f = state.filters || {statusList:[], zone:"", hotel:"", q:"", showClosed:false};
+    if(!f.statusList) f.statusList = [];
+    // Список статусов для фильтра строим из реальных значений, которые сейчас есть
+    // в заявках (текст из c-lector произвольный, единого перечня нет) — а не из
+    // фиксированного внутреннего набора new/dispatched/onsite/closed/rejected.
+    var statusSeen = {}; state.tickets.forEach(function(t){ statusSeen[ticketStatusLabel(t)] = true; });
+    var statusOptions = Object.keys(statusSeen).sort();
+    var computed = getFilteredTicketsList();
+    var list = computed.list, hiddenClosedCount = computed.hiddenClosedCount, sortField = computed.sortField, sortDir = computed.sortDir;
+    function sortableTh(label, field){
+      var active = sortField===field;
+      return h`<th data-action="sort-tickets" data-field="${field}" style="cursor:pointer;user-select:none;" title="Сортировать">${label}${active?(sortDir==="asc"?" ▲":" ▼"):""}</th>`;
+    }
     return h`
       <div class="filters">
         <div class="status-filter-group">
@@ -1019,12 +1110,14 @@
           ${f.statusList.length ? h`<a href="#" data-action="clear-status-filter" style="font-size:12px;">сбросить</a>` : ""}
         </div>
         <select data-filter="zone"><option value="">Все зоны</option>${[1,2,3].map(function(z){return h`<option value="${z}" ${f.zone===String(z)?'selected':''}>Зона ${z}</option>`;}).join("")}</select>
-        <select data-filter="hotel"><option value="">Все отели</option>${HOTELS.filter(function(x){return x.inService;}).map(function(x){return h`<option value="${x.id}" ${f.hotel===String(x.id)?'selected':''}>№${x.id} ${x.name}</option>`;}).join("")}</select>
+        <select data-filter="hotel"><option value="">Все отели</option>${state.hotels.filter(function(x){return x.in_service;}).map(function(x){return h`<option value="${x.id}" ${f.hotel===String(x.id)?'selected':''}>№${x.id} ${x.name}</option>`;}).join("")}</select>
         <input type="text" data-filter="q" value="${escapeHtml(f.q||"")}" placeholder="Поиск по описанию или № заявки…" style="min-width:220px;">
-        <span class="muted" style="margin-left:auto;">${list.length} заявок</span>
+        <div class="chip-toggle"><label><input type="checkbox" data-filter-checkbox="showClosed" ${f.showClosed?'checked':''}> Показывать закрытые/отклонённые</label></div>
+        <button class="btn btn-sm" data-action="tickets-export" ${list.length===0?'disabled':''}>Экспорт в Excel</button>
+        <span class="muted" style="margin-left:auto;">${list.length} заявок${(!f.showClosed && hiddenClosedCount>0) ? h` <span title="Закрытые и отклонённые скрыты по умолчанию">(скрыто: ${hiddenClosedCount})</span>` : ""}</span>
       </div>
       <div class="card"><div class="table-wrap"><table>
-        <thead><tr><th>№ c-lector</th><th>Отель</th><th>Описание</th><th>Статус</th><th>Срок</th></tr></thead>
+        <thead><tr>${sortableTh("№ c-lector","ref")}${sortableTh("Отель","hotel")}${sortableTh("Описание","desc")}${sortableTh("Статус","status")}${sortableTh("Срок","deadline")}</tr></thead>
         <tbody>${list.length===0 ? h`<tr><td colspan="5"><div class="empty-state"><b>Заявок нет</b>Добавьте заявку по данным из c-lector.ru.</div></td></tr>` :
           list.map(function(t){ var hotel=hotelById(t.hotel_id); var di=deadlineInfo(t);
             return h`<tr data-open-ticket="${t.id}">
@@ -1062,7 +1155,7 @@
                     ${[1,2,3].map(function(z){ return h`<label><input type="checkbox" data-profile-zone="${m.id}" value="${z}" ${(m.zones||[]).indexOf(z)>-1?'checked':''}> З${z}</label>`; }).join("")}
                   </div>
                 </td>
-                <td><button class="btn btn-sm ${m.active===false?'':'btn-ghost'}" data-profile-active="${m.id}" data-val="${m.active===false?1:0}">${m.active===false?'Включить':'Активен'}</button></td>
+                <td><button class="btn btn-sm ${m.active===false?'':'btn-ghost'}" data-action="profile-toggle-active" data-id="${m.id}" data-val="${m.active===false?1:0}">${m.active===false?'Включить':'Активен'}</button></td>
               </tr>`;
             }).join("")}</tbody>
           </table></div>`}
@@ -1109,17 +1202,77 @@
   // обоснование платежа (= краткая суть заявки), валюта и сумма редактируются
   // прямо в таблице — счёт заносится сюда автоматически при прикреплении к заявке.
   function viewRegistry(){
-    var list = (state.invoices||[]).filter(function(iv){ return iv.in_registry; });
+    var all = (state.invoices||[]).filter(function(iv){ return iv.in_registry; });
+    var rf = state.registryFilters || {q:"", hotel:"", dateFrom:"", dateTo:""};
+    var q = normalizeForMatch(rf.q||"");
+    // Поиск/фильтр действуют только на то, что показано на экране и на «Итого» —
+    // выгрузка в Excel всегда забирает ВЕСЬ реестр целиком, чтобы случайно не
+    // забытый фильтр не «съел» часть строк из официальной выгрузки.
+    var list = all.filter(function(iv){
+      var tk = state.tickets.find(function(x){return x.id===iv.ticket_id;});
+      var hotel = tk ? hotelById(tk.hotel_id) : null;
+      if(rf.hotel && (!hotel || String(hotel.id)!==rf.hotel)) return false;
+      if(rf.dateFrom && (!iv.added_to_registry_at || iv.added_to_registry_at < rf.dateFrom)) return false;
+      if(rf.dateTo && (!iv.added_to_registry_at || iv.added_to_registry_at > (rf.dateTo+"T23:59:59"))) return false;
+      if(q){
+        var hay = normalizeForMatch((iv.supplier||"")+" "+(tk&&tk.external_ref||"")+" "+(hotel?hotel.name:"")+" "+(tk?(tk.description_short||tk.description||""):""));
+        if(hay.indexOf(q)===-1) return false;
+      }
+      return true;
+    });
     var totals = {};
     list.forEach(function(iv){ var c=iv.currency||"—"; totals[c]=(totals[c]||0)+(Number(iv.amount)||0); });
+    var filtersActive = !!(rf.q||rf.hotel||rf.dateFrom||rf.dateTo);
+    // Сортировка по клику на заголовок — как в «Заявках»: считаем значение для
+    // сортировки по каждой строке (с учётом связанной заявки/отеля), сортируем
+    // список, который уже отфильтрован выше. На выгрузку в Excel не влияет —
+    // она всегда идёт по всему реестру целиком (см. комментарий выше).
+    var rsort = rf.sort || {};
+    var rSortField = rsort.field, rSortDir = rsort.dir || "asc";
+    function registrySortVal(iv, field){
+      var tk = state.tickets.find(function(x){return x.id===iv.ticket_id;});
+      var hotel = tk ? hotelById(tk.hotel_id) : null;
+      if(field==="ref") return (tk && tk.external_ref) || "";
+      if(field==="hotel") return hotel ? hotel.name : "";
+      if(field==="supplier") return iv.supplier || "";
+      if(field==="desc") return tk ? (tk.description_short||tk.description||"") : "";
+      if(field==="currency") return iv.currency || "";
+      if(field==="amount") return Number(iv.amount)||0;
+      if(field==="responsible") return extraVal(iv,"responsible") || "";
+      if(field==="added_at") return iv.added_to_registry_at || "";
+      return "";
+    }
+    if(rSortField){
+      list = list.slice().sort(function(a,b){
+        var va = registrySortVal(a, rSortField), vb = registrySortVal(b, rSortField);
+        var cmp = (typeof va==="number" || typeof vb==="number") ? ((va||0)-(vb||0)) : String(va).localeCompare(String(vb), "ru");
+        return rSortDir==="desc" ? -cmp : cmp;
+      });
+    }
+    function registryTh(label, field){
+      if(!field) return h`<th>${label}</th>`;
+      var active = rSortField===field;
+      return h`<th data-action="sort-registry" data-field="${field}" style="cursor:pointer;user-select:none;" title="Сортировать">${label}${active?(rSortDir==="asc"?" ▲":" ▼"):""}</th>`;
+    }
+    // поле сортировки для каждой колонки реестра — null там, где сортировка
+    // не имеет смысла (произвольные текстовые поля, файл и т.п.)
+    var REGISTRY_SORT_FIELDS = [null,"ref","hotel","supplier","desc","currency","amount",null,null,null,null,null,null,null,null,"responsible",null,null,null,null,null,null,"added_at"];
     return h`
       <div class="row-gap">
+        <div class="filters">
+          <input type="text" data-registry-filter="q" value="${escapeHtml(rf.q||"")}" placeholder="Поиск: поставщик, № заявки, отель…" style="min-width:220px;">
+          <select data-registry-filter="hotel"><option value="">Все отели</option>${state.hotels.filter(function(x){return x.in_service;}).map(function(x){return h`<option value="${x.id}" ${rf.hotel===String(x.id)?'selected':''}>№${x.id} ${x.name}</option>`;}).join("")}</select>
+          <label style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ink-soft);margin:0;">с <input type="date" data-registry-filter="dateFrom" value="${rf.dateFrom||''}" style="width:auto;"></label>
+          <label style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ink-soft);margin:0;">по <input type="date" data-registry-filter="dateTo" value="${rf.dateTo||''}" style="width:auto;"></label>
+          ${filtersActive ? h`<a href="#" data-action="clear-registry-filter" style="font-size:12px;">сбросить</a>` : ""}
+          <span class="muted" style="margin-left:auto;">${list.length} из ${all.length}</span>
+        </div>
         <div class="card card-pad">
           <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
-            <div class="section-title" style="margin:0;">Итого по валютам</div>
-            <button class="btn btn-sm" data-action="registry-export" ${list.length===0?'disabled':''}>Экспорт в Excel</button>
+            <div class="section-title" style="margin:0;">Итого по валютам${filtersActive?' (по отфильтрованным строкам)':''}</div>
+            <button class="btn btn-sm" data-action="registry-export" ${all.length===0?'disabled':''}>Экспорт в Excel${filtersActive?' (весь реестр)':''}</button>
           </div>
-          ${Object.keys(totals).length===0 ? h`<div class="muted" style="font-size:12.5px;margin-top:8px;">Реестр пуст.</div>` : h`
+          ${Object.keys(totals).length===0 ? h`<div class="muted" style="font-size:12.5px;margin-top:8px;">${filtersActive?'Ничего не найдено по фильтру.':'Реестр пуст.'}</div>` : h`
           <div class="row-gap" style="gap:10px;flex-direction:row;flex-wrap:wrap;margin-top:8px;">${Object.keys(totals).map(function(c){
             return h`<div class="kv"><span class="k">${escapeHtml(c)}</span><span class="v mono">${totals[c].toLocaleString("ru-RU")}</span></div>`;
           }).join("")}</div>`}
@@ -1127,8 +1280,8 @@
         </div>
         <div class="card">
           <div class="table-wrap"><table>
-            <thead><tr>${REGISTRY_COLUMN_LABELS.map(function(lbl){ return h`<th>${lbl}</th>`; }).join("")}</tr></thead>
-            <tbody>${list.length===0 ? h`<tr><td colspan="${REGISTRY_COLUMN_LABELS.length}"><div class="empty-state"><b>Реестр пуст</b>Прикрепите счёт к заявке — он появится здесь автоматически.</div></td></tr>` :
+            <thead><tr>${REGISTRY_COLUMN_LABELS.map(function(lbl, i){ return registryTh(lbl, REGISTRY_SORT_FIELDS[i]); }).join("")}</tr></thead>
+            <tbody>${list.length===0 ? h`<tr><td colspan="${REGISTRY_COLUMN_LABELS.length}"><div class="empty-state"><b>${filtersActive?'Ничего не найдено':'Реестр пуст'}</b>${filtersActive?'Попробуйте изменить или сбросить фильтр.':'Прикрепите счёт к заявке — он появится здесь автоматически.'}</div></td></tr>` :
               list.map(function(iv, i){
                 var tk = state.tickets.find(function(x){return x.id===iv.ticket_id;});
                 var hotel = tk ? hotelById(tk.hotel_id) : null;
@@ -1203,7 +1356,7 @@
       }
       mapMarkers.forEach(function(m){ m.setMap(null); });
       mapMarkers = [];
-      HOTELS.forEach(function(hotel){
+      state.hotels.forEach(function(hotel){
         if(hotel.lat==null || hotel.lng==null) return;
         var count = counts[hotel.id]||0;
         var marker = new google.maps.Marker({
@@ -1235,6 +1388,13 @@
   }
 
   /* ============================== БРИГАДЫ ============================== */
+  // Сколько сейчас активных (не выполненных/не отклонённых) заявок числится за
+  // бригадой — заявка на бригаду хранит assigned_to как "Бригада: <название>"
+  // (см. renderTicketPanel/assign-select).
+  function crewActiveCount(crewName){
+    var label = "Бригада: " + crewName;
+    return state.tickets.filter(function(t){ return t.assigned_to===label && !isTicketDone(t); }).length;
+  }
   function viewCrews(){
     return h`
       <div class="two-col">
@@ -1242,9 +1402,11 @@
           <div class="section-title">Бригады</div>
           ${state.crews.length===0 ? h`<div class="empty-state"><b>Бригад пока нет</b>Создайте первую бригаду справа.</div>` : h`
           <div class="row-gap">${state.crews.map(function(c){
+            var activeCount = crewActiveCount(c.name);
             return h`<div class="card card-pad" style="background:var(--surface-2);">
               <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
                 <input type="text" data-crew-rename="${c.id}" value="${escapeHtml(c.name)}" style="flex:1;min-width:160px;font-weight:600;">
+                <span class="pill ${activeCount>0?'pill-accent':'pill-neutral'}" title="Активных заявок на этой бригаде сейчас">${activeCount} в работе</span>
                 <button class="btn btn-sm btn-ghost btn-danger" data-action="crew-delete" data-id="${c.id}">Удалить бригаду</button>
               </div>
               <div class="chip-toggle" style="margin-top:10px;">
@@ -1263,6 +1425,70 @@
             <div class="field"><label>Название бригады</label><input type="text" name="name" required placeholder="напр. Бригада №1"></div>
             <button class="btn btn-primary" type="submit">Создать</button>
           </form>
+        </div>
+      </div>`;
+  }
+
+  /* ============================== ОТЕЛИ ============================== */
+  function addHotel(name, zone, lat, lng){
+    if(!name || !name.trim()){ alert("Введите название отеля."); return; }
+    sb.from("hotels").insert({
+      name: name.trim(), zone: zone? Number(zone): null, in_service:true,
+      lat: (lat!==""&&lat!=null)? Number(lat): null, lng: (lng!==""&&lng!=null)? Number(lng): null
+    }).then(function(res){ if(res && res.error) alert("Не удалось добавить отель: "+res.error.message); });
+  }
+  function updateHotelField(id, field, val){
+    var patch = {};
+    if(field==="zone") patch.zone = val===""? null : Number(val);
+    else if(field==="lat" || field==="lng") patch[field] = val===""? null : Number(val);
+    else patch[field] = val;
+    sb.from("hotels").update(patch).eq("id", id).then(function(){});
+  }
+  function toggleHotelActive(id, makeActive){ sb.from("hotels").update({in_service: makeActive}).eq("id", id).then(function(){}); }
+  function deleteHotel(id){
+    var used = state.tickets.some(function(t){ return Number(t.hotel_id)===Number(id); });
+    if(used){ alert("Нельзя удалить отель, по которому уже есть заявки в системе — история должна остаться привязана к отелю. Вместо удаления снимите галочку «В эксплуатации»: он перестанет предлагаться для новых заявок, но старые не пострадают."); return; }
+    if(!confirm("Удалить отель?")) return;
+    sb.from("hotels").delete().eq("id", id).then(function(){});
+  }
+  function viewHotels(){
+    var list = state.hotels.slice().sort(function(a,b){ return a.id-b.id; });
+    return h`
+      <div class="row-gap">
+        <div class="card">
+          <div class="table-wrap"><table>
+            <thead><tr><th>№</th><th>Название</th><th>Зона</th><th>Координаты (для карты)</th><th>В эксплуатации</th><th></th></tr></thead>
+            <tbody>${list.length===0 ? h`<tr><td colspan="6"><div class="empty-state"><b>Отелей нет</b>Добавьте первый отель ниже.</div></td></tr>` :
+              list.map(function(x){
+                return h`<tr>
+                  <td class="mono muted">№${x.id}</td>
+                  <td><input type="text" data-hotel-field="name" data-id="${x.id}" value="${escapeHtml(x.name)}" style="min-width:150px;"></td>
+                  <td>
+                    <select data-hotel-field="zone" data-id="${x.id}">
+                      <option value="">—</option>
+                      ${[1,2,3].map(function(z){return h`<option value="${z}" ${x.zone===z?'selected':''}>Зона ${z}</option>`;}).join("")}
+                    </select>
+                  </td>
+                  <td>
+                    <input type="number" step="0.0001" data-hotel-field="lat" data-id="${x.id}" value="${x.lat!=null?x.lat:''}" placeholder="широта" style="width:96px;">
+                    <input type="number" step="0.0001" data-hotel-field="lng" data-id="${x.id}" value="${x.lng!=null?x.lng:''}" placeholder="долгота" style="width:96px;">
+                  </td>
+                  <td><button class="btn btn-sm ${x.in_service===false?'':'btn-ghost'}" data-action="hotel-toggle-active" data-id="${x.id}" data-val="${x.in_service===false?1:0}">${x.in_service===false?'Включить':'В эксплуатации'}</button></td>
+                  <td><button class="btn btn-sm btn-ghost btn-danger" data-action="hotel-delete" data-id="${x.id}">Удалить</button></td>
+                </tr>`;
+              }).join("")}
+            </tbody></table></div>
+          <div class="helptext" style="padding:10px 16px;">Зона определяет срок прибытия по регламенту: Зона 1 — 24ч, Зона 2 — 48ч, Зона 3 — 72ч. Координаты нужны только для метки на «Карте» — необязательны. Отель, по которому уже есть заявки, нельзя удалить (снимите «В эксплуатации» вместо этого).</div>
+        </div>
+        <div class="card card-pad">
+          <div class="section-title">Добавить отель</div>
+          <form id="hotel-form" class="field-row" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr));">
+            <div class="field"><label>Название</label><input type="text" name="name" required></div>
+            <div class="field"><label>Зона</label><select name="zone"><option value="">—</option>${[1,2,3].map(function(z){return h`<option value="${z}">Зона ${z}</option>`;}).join("")}</select></div>
+            <div class="field"><label>Широта (lat)</label><input type="number" step="0.0001" name="lat"></div>
+            <div class="field"><label>Долгота (lng)</label><input type="number" step="0.0001" name="lng"></div>
+          </form>
+          <button class="btn btn-primary btn-sm" style="margin-top:10px;" data-action="hotel-add">Добавить отель</button>
         </div>
       </div>`;
   }
@@ -1380,7 +1606,7 @@
           ${t.external_ref ? h`<div class="wo-field"><div class="k">№ c-lector</div><div class="v mono">${escapeHtml(t.external_ref)}</div></div>` : ""}
           <div class="wo-field"><div class="k">Объект</div><div class="v">№${hotel.id} ${hotel.name}${hotel.zone?(' · Зона '+hotel.zone):''}</div></div>
           <div class="wo-field"><div class="k">Категория</div><div class="v">${GROUP_LABEL[t.ticket_group]}</div></div>
-          <div class="wo-field"><div class="k">Главный инженер</div><div class="v">${t.assigned_to? escapeHtml(t.assigned_to): "не назначен"}</div></div>
+          <div class="wo-field"><div class="k">Исполнитель</div><div class="v">${t.assigned_to? escapeHtml(t.assigned_to): "не назначен"}</div></div>
           <div class="wo-field"><div class="k">Срок прибытия</div><div class="v">${t.arrival_deadline? fmtDateShort(t.arrival_deadline): "—"}</div></div>
           <div class="wo-field"><div class="k">Дата регистрации</div><div class="v">${fmtDate(t.created_at)}</div></div>
           <div class="wo-field"><div class="k">Срок устранения</div><div class="v">${t.resolution_deadline? fmtDate(t.resolution_deadline): "определяется по прибытии"}</div></div>
@@ -1389,7 +1615,7 @@
         <div class="wo-desc">${escapeHtml(t.description)}</div>
         <div class="helptext" style="margin-bottom:6px;">Основание: Регламент подачи, рассмотрения заявок и определения гарантийных случаев (Приложение №2 к Протоколу разногласий по ДС №10) и Регламент организации и работы Службы сервиса.</div>
         <div class="wo-sign">
-          <div class="sign-line">Главный инженер: _______________________ / ${t.assigned_to?escapeHtml(t.assigned_to):''} /</div>
+          <div class="sign-line">Исполнитель: _______________________ / ${t.assigned_to?escapeHtml(t.assigned_to):''} /</div>
           <div class="sign-line">Представитель Заказчика на объекте: _______________________ /</div>
         </div>
       </div>`;
@@ -1433,7 +1659,11 @@
             <div class="section-title">Действия</div>
             <div class="actions-row">
               ${t.status==="new" ? h`
-                <select id="assign-select" style="max-width:220px;"><option value="">Выбрать главного инженера…</option>${specialists.map(function(s){return h`<option value="${escapeHtml(s.name||s.email)}">${escapeHtml(s.name||s.email)}</option>`;}).join("")}</select>
+                <select id="assign-select" style="max-width:240px;">
+                  <option value="">Выбрать исполнителя…</option>
+                  ${specialists.length ? h`<optgroup label="Главные инженеры">${specialists.map(function(s){return h`<option value="${escapeHtml(s.name||s.email)}">${escapeHtml(s.name||s.email)}</option>`;}).join("")}</optgroup>` : ""}
+                  ${state.crews.length ? h`<optgroup label="Бригады">${state.crews.map(function(c){return h`<option value="Бригада: ${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`;}).join("")}</optgroup>` : ""}
+                </select>
                 <button class="btn btn-primary btn-sm" data-action="assign" data-id="${t.id}">Назначить</button>` : ""}
               ${t.status==="dispatched" ? h`<button class="btn btn-primary btn-sm" data-action="arrived" data-id="${t.id}">Отметить прибытие</button>`:""}
               ${t.status==="onsite" ? h`<button class="btn btn-sm" data-action="materials" data-id="${t.id}">Нужны материалы…</button>
@@ -1458,7 +1688,7 @@
             ${t.external_ref ? h`<div class="kv"><span class="k">Номер в c-lector</span><span class="v mono">${escapeHtml(t.external_ref)}</span></div>` : ""}
             ${t.external_status ? h`<div class="kv"><span class="k">Статус в c-lector</span><span class="v">${externalStatusPill(t.external_status)}</span></div>` : ""}
             <div class="kv"><span class="k">Зарегистрирована</span><span class="v">${fmtDate(t.created_at)} · ${escapeHtml(t.created_by||'—')}</span></div>
-            <div class="kv"><span class="k">Главный инженер</span><span class="v">${t.assigned_to? escapeHtml(t.assigned_to):'—'}</span></div>
+            <div class="kv"><span class="k">Исполнитель</span><span class="v">${t.assigned_to? escapeHtml(t.assigned_to):'—'}</span></div>
             <div class="kv"><span class="k">Прибыл</span><span class="v">${t.arrived_at? fmtDateShort(t.arrived_at):'—'}</span></div>
             <div class="kv"><span class="k">Категория</span><span class="v">${t.case_type? CASE_LABEL[t.case_type]:'—'}</span></div>
             <div class="kv"><span class="k">Наряд-задание</span><span class="v mono">${workOrderNo(t)}</span></div>
@@ -1554,7 +1784,7 @@
           <div class="modal-body">
             <div class="field" style="max-width:220px;"><label>Дата снимка</label><input type="date" name="snapshotDate" value="${pf.snapshot_date||''}"></div>
             <div class="table-wrap"><table><thead><tr><th>Отель</th>${fields.map(function(f){return '<th class="num">'+fieldLabels[f]+'</th>';}).join("")}</tr></thead>
-              <tbody>${HOTELS.filter(function(x){return x.inService;}).map(function(x){
+              <tbody>${state.hotels.filter(function(x){return x.in_service;}).map(function(x){
                 var row = (pf.by_hotel && pf.by_hotel[x.id]) || {};
                 return h`<tr><td>№${x.id} ${x.name}</td>${fields.map(function(f){return '<td class="num"><input type="number" name="h'+x.id+'_'+f+'" value="'+(row[f]||0)+'" style="width:64px;text-align:right;padding:4px 6px;"></td>';}).join("")}</tr>`;
               }).join("")}</tbody></table></div>
@@ -1564,7 +1794,7 @@
       </div>`);
     document.getElementById("portfolio-form").addEventListener("submit", function(e){
       e.preventDefault(); var fd=new FormData(e.target); var byHotel={};
-      HOTELS.filter(function(x){return x.inService;}).forEach(function(x){ byHotel[x.id]={}; fields.forEach(function(f){ byHotel[x.id][f]=Number(fd.get("h"+x.id+"_"+f))||0; }); });
+      state.hotels.filter(function(x){return x.in_service;}).forEach(function(x){ byHotel[x.id]={}; fields.forEach(function(f){ byHotel[x.id][f]=Number(fd.get("h"+x.id+"_"+f))||0; }); });
       savePortfolio(byHotel, fd.get("snapshotDate")); closeModal();
     });
   }
@@ -1587,7 +1817,7 @@
       return;
     }
     if(!state.session){ renderAuthScreen(); return; }
-    if(!state.me){ document.getElementById("app").innerHTML = h`<div class="auth-wrap"><div class="muted">Загрузка…</div></div>`; return; }
+    if(!state.me || !state.hotelsLoaded){ document.getElementById("app").innerHTML = h`<div class="auth-wrap"><div class="muted">Загрузка…</div></div>`; return; }
 
     var app = document.getElementById("app");
     if(state.route.view==="workorder"){
@@ -1595,13 +1825,18 @@
       app.innerHTML = h`<div class="content" style="max-width:900px;">${viewWorkOrder(state.route.id)}</div>`;
       return;
     }
-    var titleMap = {dashboard:"Дашборд", tickets:"Заявки", team:"Команда", parts:"Склад ЗИП", "import":"Импорт из c-lector", registry:"Реестр платежей", map:"Карта", crews:"Бригады"};
-    var body = state.route.view==="tickets"?viewTickets(): state.route.view==="team"?viewTeam(): state.route.view==="parts"?viewParts(): state.route.view==="import"?viewImport(): state.route.view==="registry"?viewRegistry(): state.route.view==="map"?viewMap(): state.route.view==="crews"?viewCrews(): viewDashboard();
+    if(!navAllowed(state.route.view)){ state.route = {view: firstAllowedView(), id:null}; }
+    var titleMap = {dashboard:"Дашборд", tickets:"Заявки", team:"Команда", parts:"Склад ЗИП", "import":"Импорт из c-lector", registry:"Реестр платежей", map:"Карта", crews:"Бригады", hotels:"Отели"};
+    var body = state.route.view==="tickets"?viewTickets(): state.route.view==="team"?viewTeam(): state.route.view==="parts"?viewParts(): state.route.view==="import"?viewImport(): state.route.view==="registry"?viewRegistry(): state.route.view==="map"?viewMap(): state.route.view==="crews"?viewCrews(): state.route.view==="hotels"?viewHotels(): viewDashboard();
 
+    var navItems = [
+      ["dashboard","Дашборд"], ["tickets","Заявки"], ["import","Импорт из c-lector"], ["map","Карта"],
+      ["team","Команда"], ["crews","Бригады"], ["parts","Склад ЗИП"], ["registry","Реестр платежей"], ["hotels","Отели"]
+    ].filter(function(x){ return navAllowed(x[0]); });
     app.innerHTML = h`
       <div class="sidebar">
         <div class="brand"><div class="brand-name">Диспетчерская</div><div class="brand-sub">Keruen Inn · Служба сервиса</div></div>
-        <nav class="nav">${navItem("dashboard","Дашборд")}${navItem("tickets","Заявки")}${navItem("import","Импорт из c-lector")}${navItem("map","Карта")}${navItem("team","Команда")}${navItem("crews","Бригады")}${navItem("parts","Склад ЗИП")}${navItem("registry","Реестр платежей")}</nav>
+        <nav class="nav">${navItems.map(function(x){ return navItem(x[0], x[1]); }).join("")}</nav>
         <div class="nav-footer">
           <div class="zone-legend"><span>Срок прибытия: <b>Зона 1</b> — 24ч</span><span><b>Зона 2</b> — 48ч</span><span><b>Зона 3</b> — 72ч</span></div>
           <p>Заявки поступают через c-lector.ru — здесь только внутренняя диспетчеризация и наряд-задания.</p>
@@ -1653,7 +1888,7 @@
       if(action==="import-reset") return resetImport();
       if(action==="assign"){
         var sel=document.getElementById("assign-select"); var name=sel&&sel.value;
-        if(!name){ alert("Выберите главного инженера из списка (назначьте роль в разделе «Команда», если список пуст)."); return; }
+        if(!name){ alert("Выберите исполнителя из списка (назначьте роль в «Команде» или создайте бригаду в «Бригадах», если список пуст)."); return; }
         assignSpecialist(id,name); return;
       }
       if(action==="arrived") return markArrived(id);
@@ -1663,6 +1898,7 @@
       if(action==="reopen") return reopenTicket(id);
       if(action==="invoice-open") return openInvoiceFile(actionEl.getAttribute("data-path"));
       if(action==="registry-export") return exportRegistryExcel();
+      if(action==="tickets-export") return exportTicketsExcel();
       if(action==="toggle-status-filter"){
         var sv = actionEl.getAttribute("data-value");
         state.filters = state.filters||{}; state.filters.statusList = state.filters.statusList||[];
@@ -1671,6 +1907,21 @@
         render(); return;
       }
       if(action==="clear-status-filter"){ e.preventDefault(); state.filters=state.filters||{}; state.filters.statusList=[]; render(); return; }
+      if(action==="sort-tickets"){
+        var sfield = actionEl.getAttribute("data-field");
+        state.filters = state.filters||{};
+        var curSort = state.filters.sort || {};
+        state.filters.sort = (curSort.field===sfield) ? {field:sfield, dir: curSort.dir==="asc"?"desc":"asc"} : {field:sfield, dir:"asc"};
+        render(); return;
+      }
+      if(action==="clear-registry-filter"){ e.preventDefault(); var keepSort = (state.registryFilters||{}).sort; state.registryFilters = {q:"", hotel:"", dateFrom:"", dateTo:"", sort: keepSort}; render(); return; }
+      if(action==="sort-registry"){
+        var rfield = actionEl.getAttribute("data-field");
+        state.registryFilters = state.registryFilters||{};
+        var rcurSort = state.registryFilters.sort || {};
+        state.registryFilters.sort = (rcurSort.field===rfield) ? {field:rfield, dir: rcurSort.dir==="asc"?"desc":"asc"} : {field:rfield, dir:"asc"};
+        render(); return;
+      }
       if(action==="note-edit"){ e.preventDefault(); state.editingNoteId = id; renderTicketPanel(); return; }
       if(action==="note-cancel"){ e.preventDefault(); state.editingNoteId = null; renderTicketPanel(); return; }
       if(action==="note-delete"){ e.preventDefault(); if(confirm("Удалить запись из журнала?")) deleteNote(id); return; }
@@ -1689,15 +1940,26 @@
         setTimeout(function(){ URL.revokeObjectURL(url); }, 2000);
         return;
       }
-      var pActive = actionEl.getAttribute("data-profile-active");
-      if(pActive){ updateProfile(pActive, {active: actionEl.getAttribute("data-val")==="1"}); return; }
+      if(action==="profile-toggle-active"){ updateProfile(id, {active: actionEl.getAttribute("data-val")==="1"}); return; }
       var partRemove = actionEl.getAttribute("data-part-remove");
       if(partRemove){ if(confirm("Удалить позицию склада?")) removePart(partRemove); return; }
+      if(action==="hotel-add"){
+        var hform = document.getElementById("hotel-form");
+        var hfd = new FormData(hform);
+        addHotel(hfd.get("name"), hfd.get("zone"), hfd.get("lat"), hfd.get("lng"));
+        hform.reset();
+        return;
+      }
+      if(action==="hotel-delete"){ deleteHotel(id); return; }
+      if(action==="hotel-toggle-active"){ toggleHotelActive(id, actionEl.getAttribute("data-val")==="1"); return; }
     }
   });
 
   document.addEventListener("change", function(e){
     if(e.target.matches("[data-filter]")){ state.filters=state.filters||{}; state.filters[e.target.getAttribute("data-filter")]=e.target.value; render(); }
+    if(e.target.matches("[data-filter-checkbox]")){ state.filters=state.filters||{}; state.filters[e.target.getAttribute("data-filter-checkbox")]=e.target.checked; render(); return; }
+    if(e.target.matches("[data-registry-filter]")){ state.registryFilters=state.registryFilters||{}; state.registryFilters[e.target.getAttribute("data-registry-filter")]=e.target.value; render(); return; }
+    if(e.target.matches("[data-hotel-field]")){ updateHotelField(e.target.getAttribute("data-id"), e.target.getAttribute("data-hotel-field"), e.target.value); return; }
     if(e.target.id==="import-file"){ var f=e.target.files&&e.target.files[0]; if(f) loadImportFile(f); return; }
     if(e.target.matches("[data-import-map]")){ state.importMapping[e.target.getAttribute("data-import-map")]=e.target.value; render(); return; }
     if(e.target.id==="case-select") setCaseType(e.target.getAttribute("data-id"), e.target.value);
