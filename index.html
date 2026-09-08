@@ -119,6 +119,16 @@
   .status-icon{ width:18px; height:18px; display:inline-flex; align-items:center; justify-content:center; color:var(--ink-faint); opacity:.4; transition:opacity .15s ease, color .15s ease, filter .15s ease; cursor:default; }
   .status-icon svg{ width:14px; height:14px; display:block; }
   .status-icon.lit{ color:var(--ok); opacity:1; filter:drop-shadow(0 0 3px var(--ok)); }
+  .attn-badge{ display:inline-flex; color:var(--crit); margin-right:5px; filter:drop-shadow(0 0 3px var(--crit)); vertical-align:middle; }
+  .attn-badge svg{ width:15px; height:15px; display:block; }
+  tr.attn-row{ background:var(--crit-soft); }
+  tr.attn-row:hover{ filter:brightness(0.97); }
+  .photo-grid{ display:flex; flex-wrap:wrap; gap:8px; }
+  .photo-thumb{ position:relative; width:84px; height:84px; border-radius:8px; border:1px solid var(--line); overflow:hidden; display:flex; align-items:center; justify-content:center; background:var(--surface-3); }
+  .photo-thumb img{ width:100%; height:100%; object-fit:cover; display:block; }
+  .photo-thumb .photo-del{ position:absolute; top:2px; right:2px; background:rgba(0,0,0,.55); color:#fff; border:none; border-radius:5px; font-size:11px; line-height:1; padding:3px 5px; cursor:pointer; }
+  .zone-list{ display:flex; flex-direction:column; gap:3px; list-style:none; padding:0; margin:0; }
+  .zone-list li{ display:flex; align-items:center; gap:6px; font-size:12.5px; }
   .map-table td, .map-table th{ vertical-align:middle; }
   .import-summary{ display:flex; gap:18px; flex-wrap:wrap; margin:14px 0; }
   .import-summary .stat{ font-size:13px; } .import-summary .stat b{ font-size:18px; display:block; font-family:"IBM Plex Mono",monospace; }
@@ -289,6 +299,14 @@
     if(allowed===null || !allowed.length) return "dashboard";
     return allowed[0];
   }
+  // Единственный email, которому в разделе «Команда» доступны изменение
+  // роли/зон, включение/отключение и удаление сотрудника — по просьбе Антона
+  // это должен делать только он, а не любой, кто открыл «Команду». Как и
+  // ROLE_NAV выше, это ограничение только интерфейса: RLS в базе остаётся
+  // открытой для всех вошедших, так что это подсказка/удобство, а не
+  // настоящая защита от технически подкованного сотрудника.
+  var OWNER_EMAIL = "anton.byst@gmail.com";
+  function isOwner(){ return !!(state.me && state.me.email && state.me.email.toLowerCase() === OWNER_EMAIL.toLowerCase()); }
   // Реестр платежей — по просьбе Антона упрощён до простого списка прикреплённых
   // счетов: заявка, отель, сам файл и дата. Раньше здесь было 23 колонки 1:1 с
   // корпоративным Excel-файлом (поставщик, суммы, валюта, НДС, статья бюджета,
@@ -504,7 +522,7 @@
     route: parseHash(),
     session: null, me: null,           // auth session + own profile row
     authView: "signin", authEmail: "", authError: "",
-    tickets: [], profiles: [], parts: [], portfolio: null, invoices: [], snapshots: [], crews: [], hotels: [], hotelsLoaded: false,
+    tickets: [], profiles: [], parts: [], portfolio: null, invoices: [], photos: [], snapshots: [], crews: [], hotels: [], hotelsLoaded: false,
     selectedTicketId: null, ticketNotes: [], editingNoteId: null,
     loaded: false,
     importHeaders: [], importRows: [], importMapping: {}, importResult: null, importBusy: false, importFileError: ""
@@ -559,12 +577,13 @@
 
   /* ============================== DATA LOAD + REALTIME ============================== */
   function subscribeAll(){
-    reloadTickets(); reloadProfiles(); reloadParts(); reloadPortfolio(); reloadInvoices(); reloadSnapshots(); reloadCrews(); reloadHotels();
+    reloadTickets(); reloadProfiles(); reloadParts(); reloadPortfolio(); reloadInvoices(); reloadPhotos(); reloadSnapshots(); reloadCrews(); reloadHotels();
     sb.channel("tickets-rt").on("postgres_changes", {event:"*", schema:"public", table:"tickets"}, reloadTickets).subscribe();
     sb.channel("profiles-rt").on("postgres_changes", {event:"*", schema:"public", table:"profiles"}, reloadProfiles).subscribe();
     sb.channel("parts-rt").on("postgres_changes", {event:"*", schema:"public", table:"parts"}, reloadParts).subscribe();
     sb.channel("portfolio-rt").on("postgres_changes", {event:"*", schema:"public", table:"portfolio_snapshot"}, reloadPortfolio).subscribe();
     sb.channel("invoices-rt").on("postgres_changes", {event:"*", schema:"public", table:"invoices"}, reloadInvoices).subscribe();
+    sb.channel("photos-rt").on("postgres_changes", {event:"*", schema:"public", table:"ticket_photos"}, reloadPhotos).subscribe();
     sb.channel("snapshots-rt").on("postgres_changes", {event:"*", schema:"public", table:"import_snapshots"}, reloadSnapshots).subscribe();
     sb.channel("crews-rt").on("postgres_changes", {event:"*", schema:"public", table:"crews"}, reloadCrews).subscribe();
     sb.channel("hotels-rt").on("postgres_changes", {event:"*", schema:"public", table:"hotels"}, reloadHotels).subscribe();
@@ -632,6 +651,51 @@
     sb.storage.from("invoices").createSignedUrl(path, 3600).then(function(res){
       if(res.data && res.data.signedUrl) window.open(res.data.signedUrl, "_blank");
       else alert("Не удалось открыть файл.");
+    });
+  }
+
+  // Фото по заявке — рабочий инструмент (до/после, подтверждение выполненных
+  // работ), отдельно от c-lector и от счетов. Храним в собственном бакете
+  // ticket-photos, чтобы не путать с реестром платежей.
+  function reloadPhotos(){
+    sb.from("ticket_photos").select("*").order("uploaded_at", {ascending:false}).then(function(res){ state.photos = res.data || []; render(); });
+  }
+  function uploadPhoto(ticketId, file){
+    var path = ticketId + "/" + Date.now() + "_" + file.name.replace(/[^\w.\-]+/g,"_");
+    return readFileAsBuffer(file).then(function(buf){
+      return sb.storage.from("ticket-photos").upload(path, buf, {contentType: file.type || "application/octet-stream"});
+    }).then(function(res){
+      if(res.error) throw res.error;
+      return sb.from("ticket_photos").insert({ ticket_id: ticketId, file_path: path, file_name: file.name, uploaded_by: myLabel() });
+    }).catch(function(err){
+      alert("Не удалось загрузить фото: " + (err&&err.message?err.message:err));
+    });
+  }
+  function deletePhoto(photoId, path){
+    if(!confirm("Удалить это фото?")) return;
+    sb.storage.from("ticket-photos").remove([path]).then(function(){
+      return sb.from("ticket_photos").delete().eq("id", photoId);
+    }).then(function(){
+      delete photoUrlCache[path];
+    });
+  }
+  // Бакет с фото приватный, поэтому для показа миниатюр нужна временная
+  // подписанная ссылка — запрашиваем её один раз на путь файла и кешируем в
+  // памяти (не в state, чтобы не гонять её через realtime/сравнения состояния),
+  // а когда ссылка приходит — перерисовываем открытую карточку заявки.
+  function openPhotoFile(path){
+    sb.storage.from("ticket-photos").createSignedUrl(path, 3600).then(function(res){
+      if(res.data && res.data.signedUrl) window.open(res.data.signedUrl, "_blank");
+      else alert("Не удалось открыть фото.");
+    });
+  }
+  var photoUrlCache = {};
+  function ensurePhotoUrl(path){
+    if(photoUrlCache.hasOwnProperty(path)) return;
+    photoUrlCache[path] = "pending";
+    sb.storage.from("ticket-photos").createSignedUrl(path, 3600).then(function(res){
+      photoUrlCache[path] = (res.data && res.data.signedUrl) || null;
+      renderTicketPanel();
     });
   }
   function weekRangeLabel(iso){
@@ -796,6 +860,13 @@
       addNote(id, val ? "Материалы закуплены/получены." : "Отметка «материалы закуплены» снята.");
     });
   }
+  // Ручная пометка "особое внимание" — например, когда заявкой заинтересовался
+  // руководитель или заказчик, независимо от статуса/сроков по c-lector.
+  function setAttentionFlag(id, val, note){
+    sb.from("tickets").update({attention_flag:val, attention_note: val ? (note||null) : null}).eq("id",id).then(function(){
+      addNote(id, val ? ("Поставлена пометка «особое внимание»."+(note?" "+note:"")) : "Пометка «особое внимание» снята.");
+    });
+  }
   function closeTicket(id){
     sb.from("tickets").update({status:"closed", closed_at:new Date().toISOString()}).eq("id",id).then(function(){
       addNote(id, "Заявка закрыта, акт об устранении подписан.");
@@ -815,6 +886,13 @@
     sb.from("tickets").delete().eq("demo", true).then(function(){});
   }
   function updateProfile(id, fields){ sb.from("profiles").update(fields).eq("id", id).then(function(){}); }
+  // Удаление сотрудника из «Команды» — доступно только владельцу (см. isOwner()).
+  // Заявки, уже назначенные на этого человека (assigned_to — текст-имя, не
+  // внешний ключ), не трогаем: они просто останутся с прежним именем исполнителя.
+  function deleteProfile(id, label){
+    if(!confirm("Удалить сотрудника «"+label+"» из списка команды и сбросить его роль/зоны? Уже назначенные на него заявки не изменятся (имя останется в поле «Исполнитель»).\n\nВажно: сам вход по почте это не отключает (это может сделать только Supabase Auth, у приложения нет туда доступа) — если человек всё ещё нужен, войдя снова, он будет работать как «Главный инженер» без ролей/зон, но обратно в этот список автоматически не попадёт.")) return;
+    sb.from("profiles").delete().eq("id", id).then(function(){});
+  }
   function saveMyName(name){ updateProfile(state.me.id, {name:name}); }
   function addPart(data){
     sb.from("parts").insert({name:data.name, qty:Number(data.qty)||0, unit:data.unit||"шт", note:data.note||""}).then(function(){});
@@ -956,6 +1034,18 @@
       return h`<span class="status-icon${lit?' lit':''}" title="${escapeHtml(def.label(t))}">${def.svg}</span>`;
     }).join("")}</span>`;
   }
+  // Ручная пометка "особое внимание" — например, заявкой заинтересовался
+  // руководитель или заказчик. В отличие от 4 иконок хода работ выше, эта
+  // видна, только когда действительно установлена (не приглушённая по
+  // умолчанию иконка, а явный "флажок"), чтобы не размывать внимание на
+  // рутинных заявках.
+  function attentionBadge(t){
+    if(!t.attention_flag) return "";
+    var title = "Особое внимание"+(t.attention_note?": "+t.attention_note:"");
+    return h`<span class="attn-badge" title="${escapeHtml(title)}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>
+    </span>`;
+  }
 
   /* ============================== AUTH SCREEN ============================== */
   function renderAuthScreen(){
@@ -994,7 +1084,13 @@
     var closedWeek = closedSinceLastWeek();
     var group1Active = active.filter(function(t){ return t.ticket_group===1; });
     var demoCount = state.tickets.filter(function(t){return t.demo;}).length;
-    var attention = active.slice().sort(function(a,b){ var da=deadlineInfo(a), dbi=deadlineInfo(b); var ma=da.ms==null?Infinity:da.ms, mb=dbi.ms==null?Infinity:dbi.ms; return ma-mb; }).slice(0,6);
+    // Заявки с ручной пометкой "особое внимание" всегда идут первыми в этом виджете,
+    // независимо от срока — иначе флаг от руководителя/заказчика мог бы затеряться
+    // за более срочными по дедлайну заявками.
+    var attention = active.slice().sort(function(a,b){
+      if(!!b.attention_flag !== !!a.attention_flag) return (b.attention_flag?1:0)-(a.attention_flag?1:0);
+      var da=deadlineInfo(a), dbi=deadlineInfo(b); var ma=da.ms==null?Infinity:da.ms, mb=dbi.ms==null?Infinity:dbi.ms; return ma-mb;
+    }).slice(0,6);
     var byZone = {1:0,2:0,3:0}; active.forEach(function(t){ if(t.zone) byZone[t.zone]=(byZone[t.zone]||0)+1; });
     var pf = state.portfolio; var pfTotal = {total:0,submitted:0,inWork:0,overdue:0,done:0,rejected:0};
     if(pf && pf.by_hotel){ Object.keys(pf.by_hotel).forEach(function(k){ var r=pf.by_hotel[k]; Object.keys(pfTotal).forEach(function(f){ pfTotal[f]+=(r[f]||0); }); }); }
@@ -1015,8 +1111,8 @@
             ${attention.length===0 ? h`<div class="empty-state"><b>Нет активных заявок</b>Загрузите заявки в разделе «Импорт из c-lector».</div>` : h`
             <div class="table-wrap"><table><thead><tr><th>№ c-lector</th><th>Отель</th><th>Описание</th><th>Статус</th><th>Срок</th></tr></thead><tbody>
               ${attention.map(function(t){ var hotel=hotelById(t.hotel_id); var di=deadlineInfo(t);
-                return h`<tr data-open-ticket="${t.id}">
-                  <td class="mono">${t.external_ref? escapeHtml(t.external_ref) : '<span class="muted">—</span>'}</td>
+                return h`<tr data-open-ticket="${t.id}" ${t.attention_flag?'class="attn-row"':''}>
+                  <td class="mono">${attentionBadge(t)}${t.external_ref? escapeHtml(t.external_ref) : '<span class="muted">—</span>'}</td>
                   <td><span class="ttl">№${hotel.id} ${hotel.name}</span> ${zoneBadge(t.zone)}</td>
                   <td>${escapeHtml(t.description_short||t.description).slice(0,54)}${(t.description_short||t.description).length>54?"…":""}</td>
                   <td>${t.external_status? externalStatusPill(t.external_status): statusPill(t.status)}</td>
@@ -1048,10 +1144,11 @@
   // «Заявки», и для выгрузки в Excel (чтобы выгружался ровно тот же список, что
   // сейчас показан на экране, с теми же фильтрами и сортировкой).
   function getFilteredTicketsList(){
-    var f = state.filters || {statusList:[], zone:"", hotel:"", q:"", showClosed:false};
+    var f = state.filters || {statusList:[], zone:"", hotel:"", q:"", showClosed:false, attentionOnly:false};
     if(!f.statusList) f.statusList = [];
     var q = normalizeForMatch(f.q||"");
     var baseFiltered = state.tickets.filter(function(t){
+      if(f.attentionOnly && !t.attention_flag) return false;
       if(f.statusList.length && f.statusList.indexOf(ticketStatusLabel(t))===-1) return false;
       if(f.zone && String(t.zone)!==f.zone) return false;
       if(f.hotel && String(t.hotel_id)!==f.hotel) return false;
@@ -1090,10 +1187,10 @@
   function exportTicketsExcel(){
     if(typeof XLSX==="undefined" || !XLSX.utils){ alert("Модуль Excel не загрузился (возможно, заблокирован интернет/VPN) — обновите страницу и попробуйте снова."); return; }
     var list = getFilteredTicketsList().list;
-    var header = ["№ c-lector","Отель","Описание","Статус","Исполнитель","Срок"];
+    var header = ["№ c-lector","Отель","Описание","Статус","Исполнитель","Срок","Особое внимание"];
     var rows = list.map(function(t){
       var hotel = hotelById(t.hotel_id); var di = deadlineInfo(t);
-      return [ t.external_ref||"", hotel?("№"+hotel.id+" "+hotel.name):"", t.description_short||t.description||"", ticketStatusLabel(t), t.assigned_to||"", di.label ];
+      return [ t.external_ref||"", hotel?("№"+hotel.id+" "+hotel.name):"", t.description_short||t.description||"", ticketStatusLabel(t), t.assigned_to||"", di.label, t.attention_flag?("Да"+(t.attention_note?": "+t.attention_note:"")):"" ];
     });
     var ws = XLSX.utils.aoa_to_sheet([header].concat(rows));
     ws["!cols"] = header.map(function(){ return {wch:22}; });
@@ -1102,7 +1199,7 @@
     XLSX.writeFile(wb, "Заявки_Keruen_Inn_"+new Date().toISOString().slice(0,10)+".xlsx");
   }
   function viewTickets(){
-    var f = state.filters || {statusList:[], zone:"", hotel:"", q:"", showClosed:false};
+    var f = state.filters || {statusList:[], zone:"", hotel:"", q:"", showClosed:false, attentionOnly:false};
     if(!f.statusList) f.statusList = [];
     // Список статусов для фильтра строим из реальных значений, которые сейчас есть
     // в заявках (текст из c-lector произвольный, единого перечня нет) — а не из
@@ -1127,6 +1224,7 @@
         <select data-filter="hotel"><option value="">Все отели</option>${state.hotels.filter(function(x){return x.in_service;}).map(function(x){return h`<option value="${x.id}" ${f.hotel===String(x.id)?'selected':''}>№${x.id} ${x.name}</option>`;}).join("")}</select>
         <input type="text" data-filter="q" value="${escapeHtml(f.q||"")}" placeholder="Поиск по описанию или № заявки…" style="min-width:220px;">
         <div class="chip-toggle"><label><input type="checkbox" data-filter-checkbox="showClosed" ${f.showClosed?'checked':''}> Показывать закрытые/отклонённые</label></div>
+        <div class="chip-toggle"><label><input type="checkbox" data-filter-checkbox="attentionOnly" ${f.attentionOnly?'checked':''}> Только с пометкой «особое внимание»</label></div>
         <button class="btn btn-sm" data-action="tickets-export" ${list.length===0?'disabled':''}>Экспорт в Excel</button>
         <span class="muted" style="margin-left:auto;">${list.length} заявок${(!f.showClosed && hiddenClosedCount>0) ? h` <span title="Закрытые и отклонённые скрыты по умолчанию">(скрыто: ${hiddenClosedCount})</span>` : ""}</span>
       </div>
@@ -1134,8 +1232,8 @@
         <thead><tr>${sortableTh("№ c-lector","ref")}${sortableTh("Отель","hotel")}${sortableTh("Описание","desc")}${sortableTh("Статус","status")}${sortableTh("Срок","deadline")}</tr></thead>
         <tbody>${list.length===0 ? h`<tr><td colspan="5"><div class="empty-state"><b>Заявок нет</b>Добавьте заявку по данным из c-lector.ru.</div></td></tr>` :
           list.map(function(t){ var hotel=hotelById(t.hotel_id); var di=deadlineInfo(t);
-            return h`<tr data-open-ticket="${t.id}">
-              <td class="mono">${t.external_ref? escapeHtml(t.external_ref) : '<span class="muted">—</span>'}</td>
+            return h`<tr data-open-ticket="${t.id}" ${t.attention_flag?'class="attn-row"':''}>
+              <td class="mono">${attentionBadge(t)}${t.external_ref? escapeHtml(t.external_ref) : '<span class="muted">—</span>'}</td>
               <td>
                 <div><span class="ttl">№${hotel.id} ${hotel.name}</span></div>
                 <div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap;">${zoneBadge(t.zone)}${t.demo?' <span class="demo-tag">пример</span>':''}${t.source==='c-lector'?' <span class="source-tag">c-lector</span>':''}</div>
@@ -1147,29 +1245,42 @@
         </tbody></table></div></div>`;
   }
 
+  // Зоны раньше показывались как компактные подписи "З1 З2 З3" — но кириллическая
+  // "З" визуально почти неотличима от цифры "3" в большинстве шрифтов, из-за чего
+  // это читалось как непонятные "31 32 33". Показываем зоны отдельным списком
+  // (по просьбе Антона — "буллетами") с полным словом "Зона N".
+  function zoneList(m, editable){
+    return h`<ul class="zone-list">${[1,2,3].map(function(z){
+      var checked = (m.zones||[]).indexOf(z)>-1;
+      if(!editable) return checked ? h`<li>· Зона ${z}</li>` : "";
+      return h`<li><label style="display:flex;align-items:center;gap:6px;margin:0;"><input type="checkbox" data-profile-zone="${m.id}" value="${z}" ${checked?'checked':''}> Зона ${z}</label></li>`;
+    }).join("")}${(!editable && !(m.zones||[]).length) ? '<li class="muted">—</li>' : ""}</ul>`;
+  }
   function viewTeam(){
+    var owner = isOwner();
     return h`
       <div class="two-col">
         <div class="card card-pad">
           <div class="section-title">Сотрудники, вошедшие в систему</div>
+          ${!owner ? h`<div class="helptext" style="margin-bottom:10px;">Роль, зоны и удаление сотрудников редактирует только руководитель службы.</div>` : ""}
           ${state.profiles.length===0 ? h`<div class="empty-state"><b>Пока никто не входил</b>Поделитесь ссылкой на это приложение с коллегами.</div>` : h`
           <div class="table-wrap"><table>
-            <thead><tr><th>Имя</th><th>Почта</th><th>Роль</th><th>Зоны</th><th>Статус</th></tr></thead>
+            <thead><tr><th>Имя</th><th>Почта</th><th>Роль</th><th>Зоны</th><th>Статус</th>${owner?h`<th></th>`:''}</tr></thead>
             <tbody>${state.profiles.map(function(m){
+              var isSelf = state.me && m.id===state.me.id;
               return h`<tr>
                 <td class="ttl">${escapeHtml(m.name||"—")}</td>
                 <td class="muted">${escapeHtml(m.email)}</td>
                 <td>
-                  <select data-profile-role="${m.id}">
+                  ${owner ? h`<select data-profile-role="${m.id}">
                     ${Object.keys(ROLE_LABEL).map(function(r){return h`<option value="${r}" ${m.role===r?'selected':''}>${ROLE_LABEL[r]}</option>`;}).join("")}
-                  </select>
+                  </select>` : escapeHtml(ROLE_LABEL[m.role]||m.role)}
                 </td>
-                <td>
-                  <div class="chip-toggle">
-                    ${[1,2,3].map(function(z){ return h`<label><input type="checkbox" data-profile-zone="${m.id}" value="${z}" ${(m.zones||[]).indexOf(z)>-1?'checked':''}> З${z}</label>`; }).join("")}
-                  </div>
-                </td>
-                <td><button class="btn btn-sm ${m.active===false?'':'btn-ghost'}" data-action="profile-toggle-active" data-id="${m.id}" data-val="${m.active===false?1:0}">${m.active===false?'Включить':'Активен'}</button></td>
+                <td>${zoneList(m, owner)}</td>
+                <td>${owner
+                  ? h`<button class="btn btn-sm ${m.active===false?'':'btn-ghost'}" data-action="profile-toggle-active" data-id="${m.id}" data-val="${m.active===false?1:0}">${m.active===false?'Включить':'Активен'}</button>`
+                  : h`<span class="pill ${m.active===false?'pill-neutral':'pill-ok'}">${m.active===false?'Отключён':'Активен'}</span>`}</td>
+                ${owner ? h`<td>${isSelf?'':h`<button class="btn btn-sm btn-ghost btn-danger" data-action="profile-delete" data-id="${m.id}" data-label="${escapeHtml(m.name||m.email)}">Удалить</button>`}</td>` : ''}
               </tr>`;
             }).join("")}</tbody>
           </table></div>`}
@@ -1608,11 +1719,15 @@
           <div>
             ${t.external_ref ? h`<div class="mono" style="font-weight:700;font-size:18px;color:var(--accent);">№ ${escapeHtml(t.external_ref)}</div>` : ""}
             <div style="font-weight:700;font-size:16px;${t.external_ref?'margin-top:2px;':''}">№${hotel.id} ${hotel.name} ${t.demo?'<span class="demo-tag">пример</span>':''} ${t.source==='c-lector'?'<span class="source-tag">c-lector</span>':''}</div>
-            <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;">${zoneBadge(t.zone)} ${groupPill(t.ticket_group)} ${t.external_status? externalStatusPill(t.external_status): statusPill(t.status)} ${t.external_status? internalStageTag(t.status): ''}</div>
+            <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;">${zoneBadge(t.zone)} ${groupPill(t.ticket_group)} ${t.external_status? externalStatusPill(t.external_status): statusPill(t.status)} ${t.external_status? internalStageTag(t.status): ''} ${t.attention_flag?attentionBadge(t):''}</div>
           </div>
           <button class="btn btn-ghost panel-close" data-close-panel>✕</button>
         </div>
         <div class="panel-body">
+          <div class="actions-row">
+            <button class="btn btn-sm ${t.attention_flag?'btn-danger':''}" data-action="attention-toggle" data-id="${t.id}" data-val="${t.attention_flag?'0':'1'}">${t.attention_flag?'Снять пометку «особое внимание»':'Пометить: особое внимание'}</button>
+          </div>
+          ${t.attention_flag ? h`<div class="deadline-box overdue" style="margin-top:-4px;"><div style="font-weight:600;">Особое внимание</div>${t.attention_note ? h`<div class="helptext" style="margin-top:2px;">${escapeHtml(t.attention_note)}</div>` : ""}</div>` : ""}
           <div><div class="section-title">Описание</div>
             ${t.description_short ? h`<div style="font-size:14.5px;font-weight:600;margin-bottom:6px;">${escapeHtml(t.description_short)}</div>` : ""}
             <div style="font-size:13px;${t.description_short?'color:var(--ink-faint);':''}margin-bottom:10px;">${escapeHtml(t.description)}</div>
@@ -1688,6 +1803,27 @@
               <button class="btn btn-sm" type="submit" style="align-self:flex-start;">Прикрепить счёт</button>
             </form>
             <div class="helptext" style="margin-top:6px;">Счёт автоматически попадает в реестр платежей. Поставщика, сумму и валюту впишите вручную в разделе «Реестр платежей».</div>
+          </div>
+          <div>
+            <div class="section-title">Фото</div>
+            ${(function(){
+              var photos = (state.photos||[]).filter(function(p){return p.ticket_id===t.id;});
+              if(!photos.length) return h`<div class="muted" style="font-size:12.5px;">Фото пока нет.</div>`;
+              return h`<div class="photo-grid">${photos.map(function(p){
+                ensurePhotoUrl(p.file_path);
+                var url = photoUrlCache[p.file_path];
+                var inner = (url && url!=="pending") ? h`<img src="${url}" alt="${escapeHtml(p.file_name)}">` : h`<span class="muted" style="font-size:10.5px;">…</span>`;
+                return h`<div class="photo-thumb" title="${escapeHtml(p.file_name)} · ${escapeHtml(p.uploaded_by||'—')}" data-action="photo-open" data-path="${escapeHtml(p.file_path)}" style="cursor:pointer;">
+                  ${inner}
+                  <button type="button" class="photo-del" data-action="photo-delete" data-id="${p.id}" data-path="${escapeHtml(p.file_path)}" title="Удалить фото">✕</button>
+                </div>`;
+              }).join("")}</div>`;
+            })()}
+            <form id="photo-form" data-id="${t.id}" style="margin-top:10px;display:flex;flex-direction:column;gap:6px;">
+              <input type="file" name="files" accept="image/*" capture="environment" multiple required>
+              <button class="btn btn-sm" type="submit" style="align-self:flex-start;">Добавить фото</button>
+            </form>
+            <div class="helptext" style="margin-top:6px;">Рабочие фото (до/после, подтверждение работ) — не зависят от c-lector и не пропадают при обновлении/повторном импорте.</div>
           </div>
           <div>
             <div class="section-title">Журнал</div>
@@ -1913,7 +2049,15 @@
         setTimeout(function(){ URL.revokeObjectURL(url); }, 2000);
         return;
       }
-      if(action==="profile-toggle-active"){ updateProfile(id, {active: actionEl.getAttribute("data-val")==="1"}); return; }
+      if(action==="profile-toggle-active"){ if(!isOwner()) return; updateProfile(id, {active: actionEl.getAttribute("data-val")==="1"}); return; }
+      if(action==="profile-delete"){ if(!isOwner()) return; deleteProfile(id, actionEl.getAttribute("data-label")||"—"); return; }
+      if(action==="attention-toggle"){
+        var turnOn = actionEl.getAttribute("data-val")==="1";
+        var note = turnOn ? (prompt("Комментарий (необязательно) — например, кто обратил внимание:")||"") : "";
+        return setAttentionFlag(id, turnOn, note);
+      }
+      if(action==="photo-open") return openPhotoFile(actionEl.getAttribute("data-path"));
+      if(action==="photo-delete"){ deletePhoto(id, actionEl.getAttribute("data-path")); return; }
       var partRemove = actionEl.getAttribute("data-part-remove");
       if(partRemove){ if(confirm("Удалить позицию склада?")) removePart(partRemove); return; }
       if(action==="hotel-add"){
@@ -1945,8 +2089,9 @@
     }
     if(e.target.matches("[data-crew-rename]")) renameCrew(e.target.getAttribute("data-crew-rename"), e.target.value);
     if(e.target.matches("[data-part-qty]")) updatePartQty(e.target.getAttribute("data-part-qty"), e.target.value);
-    if(e.target.matches("[data-profile-role]")) updateProfile(e.target.getAttribute("data-profile-role"), {role:e.target.value});
+    if(e.target.matches("[data-profile-role]")){ if(!isOwner()) return; updateProfile(e.target.getAttribute("data-profile-role"), {role:e.target.value}); }
     if(e.target.matches("[data-profile-zone]")){
+      if(!isOwner()) return;
       var pid = e.target.getAttribute("data-profile-zone");
       var m = state.profiles.find(function(p){return p.id===pid;});
       var zones = (m&&m.zones)? m.zones.slice() : [];
@@ -1973,6 +2118,14 @@
       if(!file || !file.name){ alert("Выберите файл счёта (PDF или фото)."); return; }
       var ticketId = e.target.getAttribute("data-id");
       uploadInvoice(ticketId, file).then(function(){ e.target.reset(); });
+    }
+    if(e.target.id==="photo-form"){
+      e.preventDefault();
+      var pfInput = e.target.querySelector("input[type=file]");
+      var files = pfInput ? Array.from(pfInput.files||[]) : [];
+      if(!files.length){ alert("Выберите одну или несколько фотографий."); return; }
+      var ticketId2 = e.target.getAttribute("data-id");
+      Promise.all(files.map(function(f){ return uploadPhoto(ticketId2, f); })).then(function(){ e.target.reset(); });
     }
     if(e.target.id==="part-form"){
       e.preventDefault(); var fd3=new FormData(e.target); if(!fd3.get("name")) return;
