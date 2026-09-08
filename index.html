@@ -191,12 +191,29 @@
   .milestone-row{ border-top:1px solid var(--line); }
   .milestone-row:first-child{ border-top:none; }
   .milestone-hd{ display:flex; align-items:center; gap:8px; padding:7px 2px; cursor:pointer; user-select:none; }
-  .milestone-check{ flex:none; width:20px; height:20px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:700; }
-  .milestone-check.done{ background:var(--ok-soft); color:var(--ok); }
-  .milestone-check.pending{ background:var(--surface-2); color:var(--ink-faint); }
+  /* Значок-иконка пункта (бригада/материал/работа/акт) — та же картинка, что и
+     в статус-иконках под номером заявки наверху (см. STATUS_ICON_DEFS), чтобы
+     обе точки были явно "одно и то же состояние". Для пункта "Материал" значок
+     ещё и кликабелен — мгновенно переключает t.materials_ready, не разворачивая
+     строку (см. renderTicketPanel/milestoneRow); остальные 3 пункта отмечаются
+     выполненными только реальным действием (назначить бригаду/приложить
+     фото/подписать акт), поэтому там значок не кликабелен. */
+  .milestone-icon{ flex:none; width:26px; height:26px; border-radius:50%; display:flex; align-items:center; justify-content:center; background:var(--surface-2); color:var(--ink-faint); border:none; padding:0; }
+  .milestone-icon svg{ width:14px; height:14px; display:block; }
+  .milestone-icon.done{ background:var(--ok-soft); color:var(--ok); filter:drop-shadow(0 0 3px var(--ok)); }
+  button.milestone-icon{ cursor:pointer; }
   .milestone-title{ flex:1; min-width:0; font-weight:600; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .milestone-meta{ flex:none; font-size:11.5px; color:var(--ink-faint); white-space:nowrap; }
+  /* Кнопка "прикрепить" прямо в строке чек-листа (видна без разворачивания) —
+     круглая иконка со скрепкой, поверх которой лежит невидимый input[type=file];
+     клик по ней открывает системный диалог выбора файлов (можно выбрать сразу
+     несколько — счетов на бригаду/материал, или фото на работу). */
+  .milestone-attach-btn{ flex:none; position:relative; overflow:hidden; width:26px; height:26px; border-radius:50%; display:flex; align-items:center; justify-content:center; background:var(--surface-2); border:1px solid var(--line); color:var(--ink-faint); cursor:pointer; }
+  .milestone-attach-btn svg{ width:13px; height:13px; display:block; }
+  .milestone-attach-btn:hover{ color:var(--accent); border-color:var(--accent-line); }
+  .milestone-attach-btn input[type=file]{ position:absolute; inset:0; opacity:0; cursor:pointer; }
   .milestone-chevron{ flex:none; color:var(--ink-faint); font-size:10px; }
-  .milestone-body{ padding:0 4px 10px 28px; }
+  .milestone-body{ padding:0 4px 10px 32px; }
   .line-clamp-2{ display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
 
   /* ---------- modal ---------- */
@@ -329,6 +346,16 @@
   function hotelById(id){ var list=state.hotels||[]; for (var i=0;i<list.length;i++){ if (list[i].id===Number(id)) return list[i]; } return null; }
   function fmtDate(iso){ if(!iso) return "—"; var d=new Date(iso); return d.toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit",year:"numeric"})+" "+d.toLocaleTimeString("ru-RU",{hour:"2-digit",minute:"2-digit"}); }
   function fmtDateShort(iso){ if(!iso) return "—"; var d=new Date(iso); return d.toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit",year:"2-digit"}); }
+  // Русское склонение существительного по числу — используется для счётчиков
+  // файлов в чек-листе "Ход работ" (1 файл / 2 файла / 5 файлов).
+  function ruPlural(n, forms){
+    n = Math.abs(n) % 100;
+    var n1 = n % 10;
+    if(n>10 && n<20) return forms[2];
+    if(n1>1 && n1<5) return forms[1];
+    if(n1===1) return forms[0];
+    return forms[2];
+  }
   function addHours(iso, h){ var d=new Date(iso); d.setHours(d.getHours()+h); return d.toISOString(); }
   function addBusinessDays(iso, n){
     var d = new Date(iso); var added=0;
@@ -728,6 +755,12 @@
       if(res.data && res.data.signedUrl) window.open(res.data.signedUrl, "_blank");
       else alert("Не удалось открыть файл.");
     });
+  }
+  function deleteInvoice(invoiceId, path){
+    if(!confirm("Удалить этот файл?")) return;
+    sb.storage.from("invoices").remove([path]).then(function(){
+      return sb.from("invoices").delete().eq("id", invoiceId);
+    }).then(function(){});
   }
 
   // Фото по заявке — рабочий инструмент (до/после, подтверждение выполненных
@@ -1192,32 +1225,65 @@
       return h`<span class="status-icon${lit?' lit':''}" title="${escapeHtml(def.label(t))}">${def.svg}</span>`;
     }).join("")}</span>`;
   }
+  // Те же 4 картинки, что и в STATUS_ICON_DEFS выше, по ключу пункта — чтобы в
+  // чек-листе "Ход работ" (milestoneRow) стояла ровно та же иконка, что и в
+  // строке статус-иконок под номером заявки: это одно и то же состояние,
+  // показанное в двух местах, и они обязаны выглядеть одинаково.
+  var MS_ICON = { crew: STATUS_ICON_DEFS[0].svg, materials: STATUS_ICON_DEFS[1].svg, work: STATUS_ICON_DEFS[2].svg, act: STATUS_ICON_DEFS[3].svg };
+  // Круглая кнопка "прикрепить" прямо в строке чек-листа (см. .milestone-attach-btn) —
+  // скрепка, под которой лежит настоящий <input type=file>. category — categория
+  // счёта (crew|materials), multiple — можно выбрать сразу несколько файлов разом
+  // (один и тот же пункт часто закрывают несколькими счетами/накладными).
+  function milestoneAttachControl(opts){
+    return h`<label class="milestone-attach-btn" title="${escapeHtml(opts.title)}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+      <input type="file" class="${opts.cls}" data-id="${opts.id}" ${opts.category?('data-category="'+opts.category+'"'):''} accept="${opts.accept}" ${opts.multiple?'multiple':''}>
+    </label>`;
+  }
   // Строка чек-листа "Ход работ" в карточке заявки (см. renderTicketPanel):
   // одна и та же вёрстка для всех 4 пунктов (бригада/материал/работа/акт),
-  // отличаются только галочка-статус, заголовок и произвольное тело (form/список).
+  // отличаются иконка, галочка-статус, заголовок, содержимое meta (счётчик
+  // файлов + кнопка "прикрепить", видны сразу, без разворачивания строки) и
+  // произвольное тело (form/список), которое остаётся скрытым до раскрытия.
   function milestoneRow(opts){
     // opts.key — уникальный ключ пункта (crew/materials/work/act) для
     // сворачивания/разворачивания (state.milestoneOpen), opts.done — галочка,
-    // opts.title — заголовок (1 строка, длинный текст обрезается), opts.body —
-    // раскрывающееся содержимое (формы/списки), видно только когда раскрыто.
+    // opts.icon — svg пункта (см. MS_ICON), opts.clickable — если true, клик по
+    // иконке сразу переключает opts.toggleAction/toggleId/toggleVal (сейчас
+    // только у "Материал" — это единственный пункт, где "выполнено" — это
+    // просто ручной флажок, а не результат реального действия вроде назначения
+    // бригады/фото/подписи акта), opts.title — заголовок (1 строка, длинный
+    // текст обрезается), opts.meta — счётчик файлов/кнопка "прикрепить" (видны
+    // всегда), opts.body — раскрывающееся содержимое, видно только когда раскрыто.
     var open = !!(state.milestoneOpen && state.milestoneOpen[opts.key]);
+    var iconTag = opts.clickable
+      ? h`<button type="button" class="milestone-icon${opts.done?' done':''}" data-action="${opts.toggleAction}" data-id="${opts.toggleId}" data-val="${opts.toggleVal}" title="${opts.done?'Снять отметку':'Отметить выполненным'}">${opts.icon}</button>`
+      : h`<span class="milestone-icon${opts.done?' done':''}">${opts.icon}</span>`;
     return h`<div class="milestone-row">
       <div class="milestone-hd" data-action="toggle-milestone" data-key="${opts.key}">
-        <span class="milestone-check ${opts.done?'done':'pending'}">${opts.done?'✓':'○'}</span>
+        ${iconTag}
         <span class="milestone-title" title="${escapeHtml(opts.title)}">${opts.title}</span>
+        ${opts.meta||""}
         <span class="milestone-chevron">${open?'▾':'▸'}</span>
       </div>
       ${open ? h`<div class="milestone-body">${opts.body}</div>` : ""}
     </div>`;
   }
+  // Счета/договоры заявки нужной категории (crew | materials | null — обычный
+  // "Счета") — фильтр общий для счётчика в шапке пункта и для списка внутри.
+  function invoicesFor(t, category){
+    return (state.invoices||[]).filter(function(iv){ return iv.ticket_id===t.id && iv.category===category; });
+  }
   // Список уже прикреплённых к заявке счетов/договоров нужной категории
-  // (crew | materials) — используется в чек-листе "Ход работ".
+  // (crew | materials) — используется в чек-листе "Ход работ". Каждый файл
+  // можно открыть или удалить (раньше удалить было нельзя вообще).
   function milestoneInvoiceList(t, category){
-    var list = (state.invoices||[]).filter(function(iv){ return iv.ticket_id===t.id && iv.category===category; });
+    var list = invoicesFor(t, category);
     if(!list.length) return h`<div class="muted" style="font-size:12.5px;">Файлов пока нет.</div>`;
     return h`<div class="row-gap" style="gap:6px;display:flex;flex-direction:column;">${list.map(function(iv){
       return h`<div class="invoice-row" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 10px;border:1px solid var(--line);border-radius:8px;">
         <button type="button" class="btn btn-sm" data-action="invoice-open" data-path="${escapeHtml(iv.file_path)}">${escapeHtml(iv.file_name)}</button>
+        <button type="button" class="btn btn-sm btn-ghost btn-danger" style="margin-left:auto;" data-action="invoice-delete" data-id="${iv.id}" data-path="${escapeHtml(iv.file_path)}" title="Удалить файл">✕</button>
       </div>`;
     }).join("")}</div>`;
   }
@@ -1929,11 +1995,19 @@
       <div class="scrim" data-close-panel></div>
       <div class="panel">
         <div class="panel-head">
-          <div>
-            ${t.external_ref ? h`<div class="mono" style="font-weight:700;font-size:18px;color:var(--accent);">№ ${escapeHtml(t.external_ref)}</div>` : ""}
-            <div style="margin-top:4px;">${statusIconsRow(t)}</div>
-            <div style="font-weight:700;font-size:16px;margin-top:6px;">№${hotel.id} ${hotel.name} ${t.demo?'<span class="demo-tag">пример</span>':''} ${t.source==='c-lector'?'<span class="source-tag">c-lector</span>':''}</div>
-            <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;">${zoneBadge(t.zone)} ${groupPill(t.ticket_group)} ${t.external_status? externalStatusPill(t.external_status): statusPill(t.status)} ${t.external_status? internalStageTag(t.status): ''} ${t.attention_flag?attentionBadge(t):''}</div>
+          <div style="flex:1;min-width:0;">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+              <span style="display:flex;align-items:baseline;gap:6px;min-width:0;overflow:hidden;">
+                ${t.external_ref ? h`<span class="mono" style="font-weight:700;font-size:18px;color:var(--accent);white-space:nowrap;">№ ${escapeHtml(t.external_ref)}</span>` : ""}
+                <span style="font-size:12px;color:var(--ink-faint);font-weight:600;white-space:nowrap;">· ${t.zone? ("Зона "+escapeHtml(String(t.zone))) : "стройка"}</span>
+              </span>
+              <span style="display:flex;align-items:center;gap:6px;flex:none;">
+                ${t.attention_flag?attentionBadge(t):''}
+                ${t.external_status? externalStatusPill(t.external_status): statusPill(t.status)}
+              </span>
+            </div>
+            <div style="margin-top:8px;">${statusIconsRow(t)}</div>
+            <div style="font-weight:700;font-size:16px;margin-top:8px;">№${hotel.id} ${hotel.name} ${t.demo?'<span class="demo-tag">пример</span>':''} ${t.source==='c-lector'?'<span class="source-tag">c-lector</span>':''}</div>
           </div>
           <button class="btn btn-ghost panel-close" data-close-panel>✕</button>
         </div>
@@ -1956,74 +2030,77 @@
                 ${feedbackHtml("desc-short-feedback")}
               </div>` : ''}
           </div>
-          ${t.status!=="new" ? h`<div>
+          <div>
             <div class="section-title">Ход работ</div>
-            ${milestoneRow({
-              key: "crew",
-              done: !!t.assigned_to,
-              title: t.assigned_to ? ("Бригада назначена: " + escapeHtml(t.assigned_to)) : "Бригада ещё не назначена",
-              body: h`
-                ${(t.status==="dispatched"||t.status==="onsite") ? h`
-                <div class="actions-row" style="margin-bottom:8px;">
-                  <select id="reassign-select" style="max-width:240px;">
-                    <option value="">Сменить исполнителя…</option>
-                    ${specialists.length ? h`<optgroup label="Главные инженеры">${specialists.map(function(s){return h`<option value="${escapeHtml(s.name||s.email)}" ${t.assigned_to===(s.name||s.email)?'selected':''}>${escapeHtml(s.name||s.email)}</option>`;}).join("")}</optgroup>` : ""}
-                    ${state.crews.length ? h`<optgroup label="Бригады">${state.crews.map(function(c){return h`<option value="Бригада: ${escapeHtml(c.name)}" ${t.assigned_to===("Бригада: "+c.name)?'selected':''}>${escapeHtml(c.name)}</option>`;}).join("")}</optgroup>` : ""}
-                  </select>
-                  <button class="btn btn-sm" data-action="reassign" data-id="${t.id}">Сменить</button>
-                </div>` : ""}
-                ${milestoneInvoiceList(t, "crew")}
-                <form class="milestone-attach-form" data-category="crew" data-id="${t.id}" style="margin-top:8px;display:flex;flex-direction:column;gap:6px;">
-                  <input type="file" name="file" accept="application/pdf,image/*" required>
-                  <button class="btn btn-sm" type="submit" style="align-self:flex-start;">Прикрепить счёт/договор</button>
-                </form>`
-            })}
-            ${milestoneRow({
-              key: "materials",
-              done: !!t.materials_ready,
-              title: t.materials_ready ? "Материал закуплен/получен" : "Материал ещё не закуплен",
-              body: h`
-                <div class="actions-row" style="margin-bottom:8px;">
-                  <button class="btn btn-sm" data-action="materials-ready-toggle" data-id="${t.id}" data-val="${t.materials_ready?'0':'1'}">${t.materials_ready?'✓ Материал закуплен':'Отметить: материал закуплен'}</button>
-                </div>
-                ${milestoneInvoiceList(t, "materials")}
-                <form class="milestone-attach-form" data-category="materials" data-id="${t.id}" style="margin-top:8px;display:flex;flex-direction:column;gap:6px;">
-                  <input type="file" name="file" accept="application/pdf,image/*" required>
-                  <button class="btn btn-sm" type="submit" style="align-self:flex-start;">Прикрепить счёт/договор</button>
-                </form>`
-            })}
-            ${milestoneRow({
-              key: "work",
-              done: (state.photos||[]).some(function(p){return p.ticket_id===t.id;}),
-              title: (state.photos||[]).some(function(p){return p.ticket_id===t.id;}) ? "Работа выполнена (есть фото)" : "Работа ещё не выполнена",
-              body: h`
-                ${milestonePhotoGrid(t)}
-                <form id="photo-form" data-id="${t.id}" style="margin-top:8px;display:flex;flex-direction:column;gap:6px;">
-                  <input type="file" name="files" accept="image/*" capture="environment" multiple required>
-                  <button class="btn btn-sm" type="submit" style="align-self:flex-start;">Прикрепить фото</button>
-                </form>
-                <div class="actions-row" style="margin-top:10px;">
-                  <input type="number" id="repair-hours-input" data-id="${t.id}" min="0" step="0.5" placeholder="Кол-во часов" value="${t.repair_hours!=null?t.repair_hours:''}" style="max-width:160px;">
-                  <span class="helptext">Часы главного инженера на устранение (для табеля, необязательно).</span>
-                  ${feedbackHtml("repair-hours-feedback")}
-                </div>`
-            })}
-            ${milestoneRow({
-              key: "act",
-              done: !!t.act_signed,
-              title: t.act_signed ? "Акт подписан" : "Акт ещё не подписан",
-              body: h`
-                ${t.act_signed ? h`<div class="actions-row" style="margin-bottom:8px;">
-                  <button type="button" class="btn btn-sm" data-action="act-open" data-path="${escapeHtml(t.act_file_path||'')}">${escapeHtml(t.act_file_name||'Файл акта')}</button>
-                  <button type="button" class="btn btn-sm btn-ghost" data-action="act-clear" data-id="${t.id}">Снять отметку</button>
-                </div>` : h`
-                <form id="act-form" data-id="${t.id}" style="display:flex;flex-direction:column;gap:6px;">
-                  <input type="file" name="file" accept="application/pdf,image/*" required>
-                  <button class="btn btn-sm" type="submit" style="align-self:flex-start;">Прикрепить акт</button>
-                </form>`}`
-            })}
-            <div class="helptext" style="margin-top:6px;">Когда все 4 пункта отмечены, заявка автоматически переходит в статус «Выполнено».</div>
-          </div>` : ""}
+            ${(function(){
+              var crewFiles = invoicesFor(t, "crew").length;
+              var materialsFiles = invoicesFor(t, "materials").length;
+              var photoCount = (state.photos||[]).filter(function(p){return p.ticket_id===t.id;}).length;
+              var workDone = photoCount>0;
+              return h`
+              ${milestoneRow({
+                key: "crew",
+                icon: MS_ICON.crew,
+                done: !!t.assigned_to,
+                title: t.assigned_to ? ("Бригада назначена: " + escapeHtml(t.assigned_to)) : "Бригада ещё не назначена",
+                meta: h`
+                  ${crewFiles ? h`<span class="milestone-meta">${crewFiles} ${ruPlural(crewFiles,["файл","файла","файлов"])}</span>` : ""}
+                  ${milestoneAttachControl({cls:"ms-quick-attach", id:t.id, category:"crew", accept:"application/pdf,image/*", multiple:true, title:"Прикрепить счёт/договор (можно сразу несколько)"})}`,
+                body: h`
+                  ${(t.status==="dispatched"||t.status==="onsite") ? h`
+                  <div class="actions-row" style="margin-bottom:8px;">
+                    <select id="reassign-select" style="max-width:240px;">
+                      <option value="">Сменить исполнителя…</option>
+                      ${specialists.length ? h`<optgroup label="Главные инженеры">${specialists.map(function(s){return h`<option value="${escapeHtml(s.name||s.email)}" ${t.assigned_to===(s.name||s.email)?'selected':''}>${escapeHtml(s.name||s.email)}</option>`;}).join("")}</optgroup>` : ""}
+                      ${state.crews.length ? h`<optgroup label="Бригады">${state.crews.map(function(c){return h`<option value="Бригада: ${escapeHtml(c.name)}" ${t.assigned_to===("Бригада: "+c.name)?'selected':''}>${escapeHtml(c.name)}</option>`;}).join("")}</optgroup>` : ""}
+                    </select>
+                    <button class="btn btn-sm" data-action="reassign" data-id="${t.id}">Сменить</button>
+                  </div>` : ""}
+                  ${milestoneInvoiceList(t, "crew")}`
+              })}
+              ${milestoneRow({
+                key: "materials",
+                icon: MS_ICON.materials,
+                done: !!t.materials_ready,
+                clickable: true,
+                toggleAction: "materials-ready-toggle", toggleId: t.id, toggleVal: t.materials_ready?'0':'1',
+                title: t.materials_ready ? "Материал закуплен/получен" : "Материал ещё не закуплен",
+                meta: h`
+                  ${materialsFiles ? h`<span class="milestone-meta">${materialsFiles} ${ruPlural(materialsFiles,["файл","файла","файлов"])}</span>` : ""}
+                  ${milestoneAttachControl({cls:"ms-quick-attach", id:t.id, category:"materials", accept:"application/pdf,image/*", multiple:true, title:"Прикрепить счёт/накладную (можно сразу несколько)"})}`,
+                body: h`
+                  ${milestoneInvoiceList(t, "materials")}`
+              })}
+              ${milestoneRow({
+                key: "work",
+                icon: MS_ICON.work,
+                done: workDone,
+                title: workDone ? "Работа выполнена (есть фото)" : "Работа ещё не выполнена",
+                meta: h`
+                  ${photoCount ? h`<span class="milestone-meta">${photoCount} фото</span>` : ""}
+                  ${milestoneAttachControl({cls:"ms-quick-photo", id:t.id, accept:"image/*", multiple:true, title:"Прикрепить фото"})}`,
+                body: h`
+                  ${milestonePhotoGrid(t)}
+                  <div class="actions-row" style="margin-top:10px;">
+                    <input type="number" id="repair-hours-input" data-id="${t.id}" min="0" step="0.5" placeholder="Кол-во часов" value="${t.repair_hours!=null?t.repair_hours:''}" style="max-width:160px;">
+                    <span class="helptext">Часы главного инженера на устранение (для табеля, необязательно).</span>
+                    ${feedbackHtml("repair-hours-feedback")}
+                  </div>`
+              })}
+              ${milestoneRow({
+                key: "act",
+                icon: MS_ICON.act,
+                done: !!t.act_signed,
+                title: t.act_signed ? "Акт подписан" : "Акт ещё не подписан",
+                meta: t.act_signed ? "" : milestoneAttachControl({cls:"ms-quick-act", id:t.id, accept:"application/pdf,image/*", title:"Прикрепить акт"}),
+                body: t.act_signed ? h`<div class="actions-row">
+                    <button type="button" class="btn btn-sm" data-action="act-open" data-path="${escapeHtml(t.act_file_path||'')}">${escapeHtml(t.act_file_name||'Файл акта')}</button>
+                    <button type="button" class="btn btn-sm btn-ghost" data-action="act-clear" data-id="${t.id}">Снять отметку</button>
+                  </div>` : h`<div class="muted" style="font-size:12.5px;">Акт ещё не прикреплён.</div>`
+              })}`;
+            })()}
+            <div class="helptext" style="margin-top:6px;">Значок «Материал» можно отметить кликом; «Бригада», «Работа» и «Акт» отмечаются сами, как только сделано реальное действие (назначен исполнитель, приложено фото, подписан акт) — в обоих случаях тот же значок сразу подсвечивается вверху карточки, у номера заявки. Когда отмечены все 4 пункта, заявка автоматически переходит в статус «Выполнено».</div>
+          </div>
           ${!di.done ? h`<div class="deadline-box ${di.overdue?'overdue':(di.soon?'soon':'')}">
             <div style="font-weight:600;">${di.label}</div>
             <div class="helptext" style="margin-top:2px;">${di.kind==='arrival'?'Срок прибытия главного инженера по зоне логистики.':'Срок устранения — приходит из c-lector при импорте, платформа его не рассчитывает.'}</div>
@@ -2059,11 +2136,9 @@
           </div>` : ""}
           <div>
             <div class="section-title">Карточка заявки</div>
-            ${t.external_ref ? h`<div class="kv"><span class="k">Номер в c-lector</span><span class="v mono">${escapeHtml(t.external_ref)}</span></div>` : ""}
             ${t.external_status ? h`<div class="kv"><span class="k">Статус в c-lector</span><span class="v">${externalStatusPill(t.external_status)}</span></div>` : ""}
-            <div class="kv"><span class="k">Зарегистрирована</span><span class="v">${fmtDate(t.created_at)} · ${escapeHtml(t.created_by||'—')}</span></div>
+            <div class="kv"><span class="k">Зарегистрирована</span><span class="v">${fmtDate(t.created_at).split(" ")[0]}</span></div>
             <div class="kv"><span class="k">Исполнитель</span><span class="v">${t.assigned_to? escapeHtml(t.assigned_to):'—'}</span></div>
-            <div class="kv"><span class="k">Прибыл</span><span class="v">${t.arrived_at? fmtDateShort(t.arrived_at):'—'}</span></div>
             <div class="kv"><span class="k">Категория</span><span class="v">${t.case_type? CASE_LABEL[t.case_type]:'—'}</span></div>
             <div class="kv"><span class="k">Наряд-задание</span><span class="v mono">${workOrderNo(t)}</span></div>
           </div>
@@ -2075,6 +2150,7 @@
                 <button type="button" class="btn btn-sm" data-action="invoice-open" data-path="${escapeHtml(iv.file_path)}">${escapeHtml(iv.file_name)}</button>
                 <span class="muted" style="font-size:12.5px;">${iv.supplier?escapeHtml(iv.supplier):'—'}${iv.amount!=null?(' · '+iv.amount+' '+(iv.currency||'')):''}</span>
                 <span class="pill pill-ok">В реестре</span>
+                <button type="button" class="btn btn-sm btn-ghost btn-danger" style="margin-left:auto;" data-action="invoice-delete" data-id="${iv.id}" data-path="${escapeHtml(iv.file_path)}" title="Удалить файл">✕</button>
               </div>`;
             }).join("")}</div>`}
             <form id="invoice-form" data-id="${t.id}" style="margin-top:10px;display:flex;flex-direction:column;gap:6px;">
@@ -2294,6 +2370,7 @@
       if(action==="reject"){ var reason=prompt("Причина отклонения (необязательно):")||""; return rejectTicket(id,reason); }
       if(action==="reopen") return reopenTicket(id);
       if(action==="invoice-open") return openInvoiceFile(actionEl.getAttribute("data-path"));
+      if(action==="invoice-delete") return deleteInvoice(id, actionEl.getAttribute("data-path"));
       if(action==="registry-export") return exportRegistryExcel();
       if(action==="tickets-export") return exportTicketsExcel();
       if(action==="toggle-status-filter"){
@@ -2386,6 +2463,30 @@
     if(e.target.matches("[data-crew-rename]")) renameCrew(e.target.getAttribute("data-crew-rename"), e.target.value);
     if(e.target.matches("[data-part-qty]")) updatePartQty(e.target.getAttribute("data-part-qty"), e.target.value);
     if(e.target.matches("[data-profile-role]")){ if(!isOwner()) return; updateProfile(e.target.getAttribute("data-profile-role"), {role:e.target.value}); }
+    // Кнопки "прикрепить" прямо в строке чек-листа "Ход работ" (milestoneAttachControl) —
+    // в отличие от прежних форм с отдельной кнопкой "Отправить", загрузка начинается
+    // сразу при выборе файла(ов), можно выбрать несколько штук за один раз.
+    if(e.target.matches(".ms-quick-attach")){
+      var qaFiles = Array.from(e.target.files||[]);
+      if(!qaFiles.length) return;
+      var qaId = e.target.getAttribute("data-id"), qaCategory = e.target.getAttribute("data-category");
+      Promise.all(qaFiles.map(function(f){ return uploadInvoice(qaId, f, qaCategory); })).then(function(){ e.target.value=""; });
+      return;
+    }
+    if(e.target.matches(".ms-quick-photo")){
+      var qpFiles = Array.from(e.target.files||[]);
+      if(!qpFiles.length) return;
+      var qpId = e.target.getAttribute("data-id");
+      Promise.all(qpFiles.map(function(f){ return uploadPhoto(qpId, f); })).then(function(){ e.target.value=""; maybeAutoComplete(qpId); });
+      return;
+    }
+    if(e.target.matches(".ms-quick-act")){
+      var qactFile = e.target.files && e.target.files[0];
+      if(!qactFile) return;
+      var qactId = e.target.getAttribute("data-id");
+      uploadActFile(qactId, qactFile).then(function(){ e.target.value=""; });
+      return;
+    }
   });
 
   document.addEventListener("submit", function(e){
@@ -2405,31 +2506,6 @@
       if(!file || !file.name){ alert("Выберите файл счёта (PDF или фото)."); return; }
       var ticketId = e.target.getAttribute("data-id");
       uploadInvoice(ticketId, file).then(function(){ e.target.reset(); });
-    }
-    if(e.target.id==="photo-form"){
-      e.preventDefault();
-      var pfInput = e.target.querySelector("input[type=file]");
-      var files = pfInput ? Array.from(pfInput.files||[]) : [];
-      if(!files.length){ alert("Выберите одну или несколько фотографий."); return; }
-      var ticketId2 = e.target.getAttribute("data-id");
-      Promise.all(files.map(function(f){ return uploadPhoto(ticketId2, f); })).then(function(){ e.target.reset(); maybeAutoComplete(ticketId2); });
-    }
-    if(e.target.matches(".milestone-attach-form")){
-      e.preventDefault();
-      var mfInput = e.target.querySelector("input[type=file]");
-      var mfile = mfInput && mfInput.files && mfInput.files[0];
-      if(!mfile){ alert("Выберите файл счёта или договора."); return; }
-      var mTicketId = e.target.getAttribute("data-id");
-      var mCategory = e.target.getAttribute("data-category");
-      uploadInvoice(mTicketId, mfile, mCategory).then(function(){ e.target.reset(); });
-    }
-    if(e.target.id==="act-form"){
-      e.preventDefault();
-      var afInput = e.target.querySelector("input[type=file]");
-      var afile = afInput && afInput.files && afInput.files[0];
-      if(!afile){ alert("Выберите файл акта."); return; }
-      var actTicketId = e.target.getAttribute("data-id");
-      uploadActFile(actTicketId, afile).then(function(){ e.target.reset(); });
     }
     if(e.target.id==="part-form"){
       e.preventDefault(); var fd3=new FormData(e.target); if(!fd3.get("name")) return;
