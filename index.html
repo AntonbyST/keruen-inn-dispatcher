@@ -115,6 +115,10 @@
   .zone-badge{ display:inline-flex; align-items:center; padding:2px 8px; border-radius:6px; border:1px solid var(--line); font-size:11px; font-weight:600; color:var(--ink-soft); }
   .demo-tag{ background:var(--warn-soft); color:var(--warn); font-size:10px; padding:1px 6px; border-radius:5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; }
   .source-tag{ background:var(--accent-soft); color:var(--accent); font-size:10px; padding:1px 6px; border-radius:5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; }
+  .status-icons{ display:inline-flex; align-items:center; gap:4px; vertical-align:middle; }
+  .status-icon{ width:18px; height:18px; display:inline-flex; align-items:center; justify-content:center; color:var(--ink-faint); opacity:.4; transition:opacity .15s ease, color .15s ease, filter .15s ease; cursor:default; }
+  .status-icon svg{ width:14px; height:14px; display:block; }
+  .status-icon.lit{ color:var(--ok); opacity:1; filter:drop-shadow(0 0 3px var(--ok)); }
   .map-table td, .map-table th{ vertical-align:middle; }
   .import-summary{ display:flex; gap:18px; flex-wrap:wrap; margin:14px 0; }
   .import-summary .stat{ font-size:13px; } .import-summary .stat b{ font-size:18px; display:block; font-family:"IBM Plex Mono",monospace; }
@@ -787,6 +791,11 @@
       addNote(id, "Ожидание материалов — новый срок устранения: "+fmtDateShort(dateStr)+".");
     });
   }
+  function setMaterialsReady(id, val){
+    sb.from("tickets").update({materials_ready:val}).eq("id",id).then(function(){
+      addNote(id, val ? "Материалы закуплены/получены." : "Отметка «материалы закуплены» снята.");
+    });
+  }
   function closeTicket(id){
     sb.from("tickets").update({status:"closed", closed_at:new Date().toISOString()}).eq("id",id).then(function(){
       addNote(id, "Заявка закрыта, акт об устранении подписан.");
@@ -922,7 +931,31 @@
   // колонка "Главный инженер" в списке заявок, теперь вместо неё значок рядом со
   // статусом (статуса "Диспетчеризована" как отдельного состояния на практике не бывает,
   // а вот видеть с одного взгляда, назначен ли исполнитель, — нужно).
-  function assignedTag(t){ return t.assigned_to ? h`<span class="pill pill-ok" style="padding:2px 8px;" title="Назначено: ${escapeHtml(t.assigned_to)}">✓ назначена</span>` : ""; }
+  // Мини-иконки хода работ в списке заявок (заменяют собой прежний текстовый
+  // значок "✓ назначена"). Каждая иконка приглушена по умолчанию и "загорается"
+  // (акцентный цвет + лёгкое свечение) когда соответствующее условие выполнено.
+  // Иконка "материал закуплен" опирается на новое поле t.materials_ready —
+  // остальные три используют уже существующие поля заявки.
+  var STATUS_ICON_DEFS = [
+    { svg:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 0-5.6 5.6L2 19l3 3 7.1-7.1a4 4 0 0 0 5.6-5.6l-2.5 2.5-2-2 2.5-2.5z"/></svg>',
+      lit:function(t){ return !!t.assigned_to; },
+      label:function(t){ return t.assigned_to ? "Бригада назначена: "+t.assigned_to : "Бригада ещё не назначена"; } },
+    { svg:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg>',
+      lit:function(t){ return !!t.materials_ready; },
+      label:function(t){ return t.materials_ready ? "Материал закуплен" : "Материал ещё не закуплен"; } },
+    { svg:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>',
+      lit:function(t){ return t.repair_hours!=null; },
+      label:function(t){ return t.repair_hours!=null ? "Работы выполнены ("+t.repair_hours+" ч)" : "Работы ещё не завершены"; } },
+    { svg:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="9 2 9 8 15 8"/><path d="M9 13h6"/><path d="M9 17h6"/></svg>',
+      lit:function(t){ return t.status==="closed"; },
+      label:function(t){ return t.status==="closed" ? "Акт/наряд-задание готовы" : "Акт ещё не готов (заявка не закрыта)"; } }
+  ];
+  function statusIconsRow(t){
+    return h`<span class="status-icons">${STATUS_ICON_DEFS.map(function(def){
+      var lit = def.lit(t);
+      return h`<span class="status-icon${lit?' lit':''}" title="${escapeHtml(def.label(t))}">${def.svg}</span>`;
+    }).join("")}</span>`;
+  }
 
   /* ============================== AUTH SCREEN ============================== */
   function renderAuthScreen(){
@@ -1028,7 +1061,11 @@
       }
       return true;
     });
-    var list = f.showClosed ? baseFiltered.slice() : baseFiltered.filter(function(t){ return !isTicketDone(t); });
+    // Скрывать закрытые/отклонённые по умолчанию имеет смысл только когда статус
+    // не выбран явно — если человек сам кликнул чип "Отклонена" или "Выполнена",
+    // он однозначно хочет видеть именно эти заявки, а не получить пустой список
+    // из-за того, что они попадают под "закрыто по умолчанию".
+    var list = (f.showClosed || f.statusList.length) ? baseFiltered.slice() : baseFiltered.filter(function(t){ return !isTicketDone(t); });
     var hiddenClosedCount = baseFiltered.length - list.length;
     var sortField = f.sort && f.sort.field;
     var sortDir = (f.sort && f.sort.dir) || "asc";
@@ -1104,7 +1141,7 @@
                 <div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap;">${zoneBadge(t.zone)}${t.demo?' <span class="demo-tag">пример</span>':''}${t.source==='c-lector'?' <span class="source-tag">c-lector</span>':''}</div>
               </td>
               <td>${escapeHtml(t.description_short||t.description).slice(0,60)}${(t.description_short||t.description).length>60?"…":""}</td>
-              <td>${t.external_status? externalStatusPill(t.external_status): statusPill(t.status)} ${assignedTag(t)}</td>
+              <td>${t.external_status? externalStatusPill(t.external_status): statusPill(t.status)} ${statusIconsRow(t)}</td>
               <td style="${di.overdue?'color:var(--crit);font-weight:600;':(di.soon?'color:var(--warn);font-weight:600;':'')}">${di.label}</td>
             </tr>`; }).join("")}
         </tbody></table></div></div>`;
@@ -1602,6 +1639,7 @@
               ${t.status==="dispatched" ? h`<button class="btn btn-primary btn-sm" data-action="arrived" data-id="${t.id}">Отметить прибытие</button>`:""}
               ${t.status==="onsite" ? h`<button class="btn btn-sm" data-action="materials" data-id="${t.id}">Нужны материалы…</button>
                 <button class="btn btn-primary btn-sm" data-action="close" data-id="${t.id}" ${!t.case_type?'disabled':''}>Закрыть заявку</button>`:""}
+              ${(t.status==="dispatched"||t.status==="onsite") ? h`<button class="btn btn-sm" data-action="materials-ready-toggle" data-id="${t.id}" data-val="${t.materials_ready?'0':'1'}">${t.materials_ready?'✓ Материал закуплен':'Отметить: материал закуплен'}</button>` : ""}
               ${t.assigned_to ? h`<a class="btn btn-sm" href="#/workorder/${t.id}">Наряд-задание</a>` : ""}
               ${(t.status==="dispatched"||t.status==="onsite") ? h`<button class="btn btn-sm btn-danger" data-action="reject" data-id="${t.id}">Отклонить</button>`:""}
               ${(t.status==="closed"||t.status==="rejected") ? h`<button class="btn btn-sm" data-action="reopen" data-id="${t.id}">Переоткрыть</button>`:""}
@@ -1827,6 +1865,7 @@
       }
       if(action==="arrived") return markArrived(id);
       if(action==="materials"){ var d=prompt("Ожидаемая дата поставки материалов (ГГГГ-ММ-ДД):"); if(d) setMaterialsEta(id,d); return; }
+      if(action==="materials-ready-toggle") return setMaterialsReady(id, actionEl.getAttribute("data-val")==="1");
       if(action==="close") return closeTicket(id);
       if(action==="reject"){ var reason=prompt("Причина отклонения (необязательно):")||""; return rejectTicket(id,reason); }
       if(action==="reopen") return reopenTicket(id);
