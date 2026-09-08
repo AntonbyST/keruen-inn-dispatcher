@@ -414,6 +414,10 @@
       external_ref: /№|номер|id|ref/i,
       hotel: /отел|объект|гостиниц|hotel/i,
       status: /статус/i,
+      // "deadline" (срок устранения) должен определяться раньше created_at —
+      // заголовки вида "Плановая дата устранения" содержат "дата" и были бы
+      // перехвачены created_at, если бы deadline проверялся позже.
+      deadline: /срок|дедлайн|due|планов.*(дат|заверш|исполнен)|устранени.*до|дата.*устранен/i,
       group: /групп|критич|приоритет/i,
       created_at: /дата|созда|подач|created/i,
       description: /описан|замечан|проблем|суть|заявк/i
@@ -478,13 +482,17 @@
     var existingRefs = {}; state.tickets.forEach(function(t){ if(t.external_ref) existingRefs[t.external_ref]=t; });
     var out = state.importRows.map(function(row){
       var get = function(field){ var idx = m[field]; return (idx!=="" && idx!=null) ? (row[Number(idx)]||"").trim() : ""; };
-      var extRef = get("external_ref"), hotelName = get("hotel"), desc = get("description"), groupRaw = get("group"), dateRaw = get("created_at"), statusRaw = get("status");
+      var extRef = get("external_ref"), hotelName = get("hotel"), desc = get("description"), groupRaw = get("group"), dateRaw = get("created_at"), statusRaw = get("status"), deadlineRaw = get("deadline");
+      // "Срок устранения" считаем только тем, что реально пришло из c-lector —
+      // никакой локальной подмены/расчёта; не распозналась дата — оставляем пусто.
+      var deadlineIso = deadlineRaw && !isNaN(new Date(deadlineRaw).getTime()) ? new Date(deadlineRaw).toISOString() : null;
       var hotel = matchHotelByName(hotelName);
       var existingTicket = hasExt && extRef ? existingRefs[extRef] : null;
       var isDupe = !!existingTicket;
-      var willUpdateStatus = isDupe && statusRaw && existingTicket.external_status !== statusRaw;
+      var deadlineChanged = isDupe && deadlineRaw && deadlineIso !== (existingTicket.resolution_deadline||null);
+      var willUpdateStatus = isDupe && ((statusRaw && existingTicket.external_status !== statusRaw) || deadlineChanged);
       var status = !desc ? "empty" : (!hotel ? "no-hotel" : (isDupe ? "dupe" : "new"));
-      return { extRef:extRef, hotelName:hotelName, hotel:hotel, description:desc, groupRaw:groupRaw, dateRaw:dateRaw, statusRaw:statusRaw, existingTicket:existingTicket, willUpdateStatus:willUpdateStatus, status:status };
+      return { extRef:extRef, hotelName:hotelName, hotel:hotel, description:desc, groupRaw:groupRaw, dateRaw:dateRaw, statusRaw:statusRaw, deadlineRaw:deadlineRaw, deadlineIso:deadlineIso, existingTicket:existingTicket, willUpdateStatus:willUpdateStatus, status:status };
     });
     var counts = {total:out.length, "new":0, dupe:0, "no-hotel":0, empty:0, statusUpdate:0};
     out.forEach(function(r){ counts[r.status]++; if(r.willUpdateStatus) counts.statusUpdate++; });
@@ -516,14 +524,20 @@
         description: r.description,
         status:"new", created_by: myLabel()+" (импорт c-lector)", created_at: createdAt,
         arrival_deadline: r.hotel.zone ? addHours(createdAt, ZONE_HOURS[r.hotel.zone]) : null,
+        resolution_deadline: r.deadlineIso,
         external_ref: r.extRef || null, external_status: r.statusRaw || null, source:"c-lector", demo:false
       };
     });
-    // берём ПОЛНУЮ существующую строку и меняем в ней только external_status —
-    // частичный upsert (только id + external_status) упал бы на NOT NULL полях
-    // (hotel_id, description и т.п.), так как Postgres проверяет их при
-    // построении INSERT-строки ещё до перехода на ON CONFLICT DO UPDATE.
-    var updatePayloads = toUpdate.map(function(r){ return Object.assign({}, r.existingTicket, {external_status: r.statusRaw}); });
+    // берём ПОЛНУЮ существующую строку и меняем в ней external_status и/или
+    // resolution_deadline ("срок устранения" — только из c-lector, платформа
+    // его сама не считает) — частичный upsert (только id + пара полей) упал бы
+    // на NOT NULL полях (hotel_id, description и т.п.), так как Postgres
+    // проверяет их при построении INSERT-строки ещё до ON CONFLICT DO UPDATE.
+    var updatePayloads = toUpdate.map(function(r){
+      var patch = { external_status: r.statusRaw };
+      if(r.deadlineRaw) patch.resolution_deadline = r.deadlineIso;
+      return Object.assign({}, r.existingTicket, patch);
+    });
 
     // вставляем/обновляем пачками, а не одним залпом из сотен параллельных
     // запросов — иначе один упавший запрос топит весь Promise.all без единой
@@ -855,6 +869,11 @@
       return {label:"Прибытие к "+fmtDateShort(t.arrival_deadline), overdue: ms<0, soon: ms>0 && ms<4*3600*1000, ms:ms, kind:"arrival"};
     }
     if(t.status==="onsite"){
+      // Срок устранения теперь берётся ТОЛЬКО из данных c-lector (колонка при
+      // импорте) — платформа сама его больше не считает и не сдвигает. Если
+      // в c-lector этот срок не указан/не сопоставлен при импорте, честно
+      // показываем, что данных нет, а не подставляем свою дату.
+      if(!t.resolution_deadline) return {label:"Срок не указан (нет данных c-lector)", overdue:false, kind:"resolution"};
       var ms2 = new Date(t.resolution_deadline).getTime()-now;
       return {label:"Устранение к "+fmtDate(t.resolution_deadline), overdue: ms2<0, soon: ms2>0 && ms2<24*3600*1000, ms:ms2, kind:"resolution"};
     }
@@ -908,15 +927,19 @@
     });
   }
   function markArrived(id){
+    // Срок устранения (resolution_deadline) сюда больше не пишем — он приходит
+    // только из c-lector при импорте, платформа его сама не считает.
     var now = new Date().toISOString();
-    sb.from("tickets").update({status:"onsite", arrived_at:now, resolution_deadline:addBusinessDays(now,3)}).eq("id",id).then(function(){
+    sb.from("tickets").update({status:"onsite", arrived_at:now}).eq("id",id).then(function(){
       addNote(id, "Главный инженер прибыл на объект.");
     });
   }
   function setCaseType(id, val){ sb.from("tickets").update({case_type:val||null}).eq("id",id); }
   function setMaterialsEta(id, dateStr){
-    sb.from("tickets").update({materials_wait:true, materials_eta:dateStr, resolution_deadline:new Date(dateStr).toISOString()}).eq("id",id).then(function(){
-      addNote(id, "Ожидание материалов — новый срок устранения: "+fmtDateShort(dateStr)+".");
+    // Дата ожидаемой поставки материалов — чисто информационная пометка, срок
+    // устранения (из c-lector) она больше не подменяет и не сдвигает.
+    sb.from("tickets").update({materials_wait:true, materials_eta:dateStr}).eq("id",id).then(function(){
+      addNote(id, "Ожидание материалов — ожидаемая поставка: "+fmtDateShort(dateStr)+".");
     });
   }
   function setMaterialsReady(id, val){
@@ -964,10 +987,17 @@
   // Тянем свежую строку заявки напрямую из базы (а не из state.tickets), чтобы не
   // зависеть от того, успел ли уже прийти realtime-апдейт к этому моменту.
   function maybeAutoComplete(id){
-    sb.from("tickets").select("*").eq("id", id).maybeSingle().then(function(res){
-      var t = res.data; if(!t) return;
+    // "работа выполнена" определяется по наличию хотя бы одного фото (см.
+    // milestoneRow #3 в renderTicketPanel) — фото лежат в отдельной таблице
+    // ticket_photos, поэтому берём свежий срез и по тикету, и по фото.
+    Promise.all([
+      sb.from("tickets").select("*").eq("id", id).maybeSingle(),
+      sb.from("ticket_photos").select("*").eq("ticket_id", id)
+    ]).then(function(results){
+      var t = results[0].data; if(!t) return;
+      var photos = results[1].data || [];
       if(t.status==="closed" || t.status==="rejected") return;
-      var allDone = !!t.assigned_to && !!t.materials_ready && t.repair_hours!=null && !!t.act_signed;
+      var allDone = !!t.assigned_to && !!t.materials_ready && photos.length>0 && !!t.act_signed;
       if(!allDone) return;
       sb.from("tickets").update({status:"closed", closed_at:new Date().toISOString()}).eq("id",id).then(function(){
         addNote(id, "Все 4 пункта выполнены (бригада, материал, работа, акт) — статус автоматически изменён на «Закрыта»."+(!t.case_type?" Категория по осмотру не указана — заполните её для расчёта оплаты по Регламенту.":""));
@@ -1136,16 +1166,19 @@
       lit:function(t){ return !!t.materials_ready; },
       label:function(t){ return t.materials_ready ? "Материал закуплен" : "Материал ещё не закуплен"; } },
     { svg:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>',
-      lit:function(t){ return t.repair_hours!=null; },
-      label:function(t){ return t.repair_hours!=null ? "Работы выполнены ("+t.repair_hours+" ч)" : "Работы ещё не завершены"; } },
+      // "работа выполнена" — по наличию хотя бы одного прикреплённого фото
+      // (см. milestoneRow #3 и maybeAutoComplete), а не по часам в табеле.
+      lit:function(t){ return (state.photos||[]).some(function(p){ return p.ticket_id===t.id; }); },
+      label:function(t){ return (state.photos||[]).some(function(p){ return p.ticket_id===t.id; }) ? "Работа выполнена (есть фото)" : "Работа ещё не выполнена"; } },
     { svg:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="9 2 9 8 15 8"/><path d="M9 13h6"/><path d="M9 17h6"/></svg>',
       lit:function(t){ return !!t.act_signed; },
       label:function(t){ return t.act_signed ? "Акт подписан" : "Акт ещё не подписан"; } }
   ];
-  // Раньше этот ряд иконок показывался прямо в общем списке заявок — по просьбе
-  // Антона убрали оттуда (в общем списке их нельзя ни увидеть детально, ни
-  // "активировать") и теперь он рисуется только в карточке заявки, сразу под
-  // номером — см. renderTicketPanel().
+  // Ряд из 4 иконок хода работ (бригада/материал/работа/акт) — показывается и
+  // в общем списке заявок (только для быстрого визуального статуса, кликнуть
+  // по ним там нельзя — data-action на иконках нет), и в карточке заявки под
+  // номером, где рядом с каждым пунктом уже есть реальные действия (прикрепить
+  // счёт/фото/акт, сменить исполнителя) — см. renderTicketPanel().
   function statusIconsRow(t){
     return h`<span class="status-icons">${STATUS_ICON_DEFS.map(function(def){
       var lit = def.lit(t);
@@ -1172,6 +1205,23 @@
     return h`<div class="row-gap" style="gap:6px;display:flex;flex-direction:column;">${list.map(function(iv){
       return h`<div class="invoice-row" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 10px;border:1px solid var(--line);border-radius:8px;">
         <button type="button" class="btn btn-sm" data-action="invoice-open" data-path="${escapeHtml(iv.file_path)}">${escapeHtml(iv.file_name)}</button>
+      </div>`;
+    }).join("")}</div>`;
+  }
+  // Фотографии по заявке — это же и есть подтверждение того, что "работа
+  // выполнена" (см. milestoneRow #3 и maybeAutoComplete): раньше был отдельный
+  // раздел "Фото" ниже по карточке, теперь он живёт прямо внутри строки
+  // чек-листа "Ход работ", а не отдельно.
+  function milestonePhotoGrid(t){
+    var photos = (state.photos||[]).filter(function(p){return p.ticket_id===t.id;});
+    if(!photos.length) return h`<div class="muted" style="font-size:12.5px;">Фото пока нет.</div>`;
+    return h`<div class="photo-grid">${photos.map(function(p){
+      ensurePhotoUrl(p.file_path);
+      var url = photoUrlCache[p.file_path];
+      var inner = (url && url!=="pending") ? h`<img src="${url}" alt="${escapeHtml(p.file_name)}">` : h`<span class="muted" style="font-size:10.5px;">…</span>`;
+      return h`<div class="photo-thumb" title="${escapeHtml(p.file_name)} · ${escapeHtml(p.uploaded_by||'—')}" data-action="photo-open" data-path="${escapeHtml(p.file_path)}" style="cursor:pointer;">
+        ${inner}
+        <button type="button" class="photo-del" data-action="photo-delete" data-id="${p.id}" data-path="${escapeHtml(p.file_path)}" title="Удалить фото">✕</button>
       </div>`;
     }).join("")}</div>`;
   }
@@ -1389,7 +1439,9 @@
         <tbody>${list.length===0 ? h`<tr><td colspan="5"><div class="empty-state"><b>Заявок нет</b>Добавьте заявку по данным из c-lector.ru.</div></td></tr>` :
           list.map(function(t){ var hotel=hotelById(t.hotel_id); var di=deadlineInfo(t);
             return h`<tr data-open-ticket="${t.id}" ${t.attention_flag?'class="attn-row"':''}>
-              <td class="mono">${attentionBadge(t)}${t.external_ref? escapeHtml(t.external_ref) : '<span class="muted">—</span>'}</td>
+              <td class="mono">${attentionBadge(t)}${t.external_ref? escapeHtml(t.external_ref) : '<span class="muted">—</span>'}
+                <div style="margin-top:4px;">${statusIconsRow(t)}</div>
+              </td>
               <td>
                 <div><span class="ttl">№${hotel.id} ${hotel.name}</span></div>
                 <div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap;">${zoneBadge(t.zone)}${t.demo?' <span class="demo-tag">пример</span>':''}${t.source==='c-lector'?' <span class="source-tag">c-lector</span>':''}</div>
@@ -1765,8 +1817,8 @@
         </div>`;
     }
     var preview = computeImportPreview();
-    var fieldLabel = {external_ref:"Внешний номер (для защиты от дублей)", hotel:"Отель", description:"Описание", group:"Группа критичности (1/2/3)", created_at:"Дата создания", status:"Статус (из c-lector)"};
-    var fieldOrder = ["hotel","description","external_ref","status","group","created_at"];
+    var fieldLabel = {external_ref:"Внешний номер (для защиты от дублей)", hotel:"Отель", description:"Описание", group:"Группа критичности (1/2/3)", created_at:"Дата создания", status:"Статус (из c-lector)", deadline:"Срок устранения (из c-lector)"};
+    var fieldOrder = ["hotel","description","external_ref","status","deadline","group","created_at"];
     return h`
       <div class="row-gap">
         <div class="card card-pad">
@@ -1839,7 +1891,7 @@
           <div class="wo-field"><div class="k">Исполнитель</div><div class="v">${t.assigned_to? escapeHtml(t.assigned_to): "не назначен"}</div></div>
           <div class="wo-field"><div class="k">Срок прибытия</div><div class="v">${t.arrival_deadline? fmtDateShort(t.arrival_deadline): "—"}</div></div>
           <div class="wo-field"><div class="k">Дата регистрации</div><div class="v">${fmtDate(t.created_at)}</div></div>
-          <div class="wo-field"><div class="k">Срок устранения</div><div class="v">${t.resolution_deadline? fmtDate(t.resolution_deadline): "определяется по прибытии"}</div></div>
+          <div class="wo-field"><div class="k">Срок устранения</div><div class="v">${t.resolution_deadline? fmtDate(t.resolution_deadline): "не указан (нет данных c-lector)"}</div></div>
         </div>
         <div class="wo-field"><div class="k">Описание неисправности</div></div>
         <div class="wo-desc">${escapeHtml(t.description)}</div>
@@ -1887,7 +1939,7 @@
           </div>
           ${!di.done ? h`<div class="deadline-box ${di.overdue?'overdue':(di.soon?'soon':'')}">
             <div style="font-weight:600;">${di.label}</div>
-            <div class="helptext" style="margin-top:2px;">${di.kind==='arrival'?'Срок прибытия главного инженера по зоне логистики.':'Срок устранения — 3 рабочих дня с момента прибытия.'}</div>
+            <div class="helptext" style="margin-top:2px;">${di.kind==='arrival'?'Срок прибытия главного инженера по зоне логистики.':'Срок устранения — приходит из c-lector при импорте, платформа его не рассчитывает.'}</div>
             ${t.materials_wait ? h`<div class="helptext" style="margin-top:4px;">Ожидаются материалы (срок поставки: ${fmtDateShort(t.materials_eta)}).</div>` : ""}
           </div>` : ""}
           <div>
@@ -1943,15 +1995,19 @@
                 </form>`
             })}
             ${milestoneRow({
-              done: t.repair_hours!=null,
-              title: t.repair_hours!=null ? "Работа выполнена (" + t.repair_hours + " ч.)" : "Работа ещё не выполнена",
+              done: (state.photos||[]).some(function(p){return p.ticket_id===t.id;}),
+              title: (state.photos||[]).some(function(p){return p.ticket_id===t.id;}) ? "Работа выполнена (есть фото)" : "Работа ещё не выполнена",
               body: h`
-                <div class="actions-row">
+                ${milestonePhotoGrid(t)}
+                <form id="photo-form" data-id="${t.id}" style="margin-top:8px;display:flex;flex-direction:column;gap:6px;">
+                  <input type="file" name="files" accept="image/*" capture="environment" multiple required>
+                  <button class="btn btn-sm" type="submit" style="align-self:flex-start;">Прикрепить фото</button>
+                </form>
+                <div class="actions-row" style="margin-top:10px;">
                   <input type="number" id="repair-hours-input" data-id="${t.id}" min="0" step="0.5" placeholder="Кол-во часов" value="${t.repair_hours!=null?t.repair_hours:''}" style="max-width:160px;">
-                  <span class="helptext">Часы главного инженера на устранение.</span>
+                  <span class="helptext">Часы главного инженера на устранение (для табеля, необязательно).</span>
                   ${feedbackHtml("repair-hours-feedback")}
-                </div>
-                <div class="helptext" style="margin-top:6px;">Фото подтверждения работ — в разделе «Фото» ниже.</div>`
+                </div>`
             })}
             ${milestoneRow({
               done: !!t.act_signed,
@@ -2003,27 +2059,6 @@
               <button class="btn btn-sm" type="submit" style="align-self:flex-start;">Прикрепить счёт</button>
             </form>
             <div class="helptext" style="margin-top:6px;">Счёт автоматически попадает в реестр платежей. Поставщика, сумму и валюту впишите вручную в разделе «Реестр платежей».</div>
-          </div>
-          <div>
-            <div class="section-title">Фото</div>
-            ${(function(){
-              var photos = (state.photos||[]).filter(function(p){return p.ticket_id===t.id;});
-              if(!photos.length) return h`<div class="muted" style="font-size:12.5px;">Фото пока нет.</div>`;
-              return h`<div class="photo-grid">${photos.map(function(p){
-                ensurePhotoUrl(p.file_path);
-                var url = photoUrlCache[p.file_path];
-                var inner = (url && url!=="pending") ? h`<img src="${url}" alt="${escapeHtml(p.file_name)}">` : h`<span class="muted" style="font-size:10.5px;">…</span>`;
-                return h`<div class="photo-thumb" title="${escapeHtml(p.file_name)} · ${escapeHtml(p.uploaded_by||'—')}" data-action="photo-open" data-path="${escapeHtml(p.file_path)}" style="cursor:pointer;">
-                  ${inner}
-                  <button type="button" class="photo-del" data-action="photo-delete" data-id="${p.id}" data-path="${escapeHtml(p.file_path)}" title="Удалить фото">✕</button>
-                </div>`;
-              }).join("")}</div>`;
-            })()}
-            <form id="photo-form" data-id="${t.id}" style="margin-top:10px;display:flex;flex-direction:column;gap:6px;">
-              <input type="file" name="files" accept="image/*" capture="environment" multiple required>
-              <button class="btn btn-sm" type="submit" style="align-self:flex-start;">Добавить фото</button>
-            </form>
-            <div class="helptext" style="margin-top:6px;">Рабочие фото (до/после, подтверждение работ) — не зависят от c-lector и не пропадают при обновлении/повторном импорте.</div>
           </div>
           <div>
             <div class="section-title">Журнал</div>
@@ -2094,7 +2129,7 @@
         <form id="materials-eta-form">
           <div class="modal-body">
             <div class="field"><label>Ожидаемая дата поставки</label><input type="date" name="eta" value="${(t&&t.materials_eta)||todayIso}" required></div>
-            <div class="helptext">Срок устранения по заявке автоматически сдвинется на эту дату.</div>
+            <div class="helptext">Это просто памятка — на срок устранения (он приходит из c-lector) не влияет.</div>
           </div>
           <div class="modal-foot"><button type="button" class="btn" data-close-modal>Отмена</button><button type="submit" class="btn btn-primary">Сохранить</button></div>
         </form>
@@ -2347,7 +2382,7 @@
       var files = pfInput ? Array.from(pfInput.files||[]) : [];
       if(!files.length){ alert("Выберите одну или несколько фотографий."); return; }
       var ticketId2 = e.target.getAttribute("data-id");
-      Promise.all(files.map(function(f){ return uploadPhoto(ticketId2, f); })).then(function(){ e.target.reset(); });
+      Promise.all(files.map(function(f){ return uploadPhoto(ticketId2, f); })).then(function(){ e.target.reset(); maybeAutoComplete(ticketId2); });
     }
     if(e.target.matches(".milestone-attach-form")){
       e.preventDefault();
