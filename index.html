@@ -184,13 +184,20 @@
   .note{ padding:9px 10px; background:var(--surface-2); border-radius:8px; font-size:12.5px; margin-bottom:7px; }
   .note .meta{ color:var(--ink-faint); font-size:11px; margin-bottom:3px; }
   .actions-row{ display:flex; gap:8px; flex-wrap:wrap; }
-  .milestone-row{ display:flex; gap:10px; padding:10px 0; border-top:1px solid var(--line); }
-  .milestone-row:first-child{ border-top:none; padding-top:0; }
-  .milestone-check{ flex:none; width:22px; height:22px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:700; margin-top:1px; }
+  /* "Ход работ" — компактный аккордеон: по умолчанию видна только строка
+     галочка+название+шеврон (1 строка на пункт), тело (формы/списки) — только
+     у раскрытого пункта. Раньше все 4 пункта были всегда полностью раскрыты
+     и раздел растягивался на весь экран. */
+  .milestone-row{ border-top:1px solid var(--line); }
+  .milestone-row:first-child{ border-top:none; }
+  .milestone-hd{ display:flex; align-items:center; gap:8px; padding:7px 2px; cursor:pointer; user-select:none; }
+  .milestone-check{ flex:none; width:20px; height:20px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:700; }
   .milestone-check.done{ background:var(--ok-soft); color:var(--ok); }
   .milestone-check.pending{ background:var(--surface-2); color:var(--ink-faint); }
-  .milestone-body{ flex:1; min-width:0; }
-  .milestone-title{ font-weight:600; font-size:13.5px; margin-bottom:4px; }
+  .milestone-title{ flex:1; min-width:0; font-weight:600; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .milestone-chevron{ flex:none; color:var(--ink-faint); font-size:10px; }
+  .milestone-body{ padding:0 4px 10px 28px; }
+  .line-clamp-2{ display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
 
   /* ---------- modal ---------- */
   .modal-scrim{ position:fixed; inset:0; background:rgba(10,16,22,.4); z-index:30; display:flex; align-items:flex-start; justify-content:center; padding:6vh 20px; overflow-y:auto; }
@@ -587,7 +594,7 @@
     session: null, me: null,           // auth session + own profile row
     authView: "signin", authEmail: "", authError: "",
     tickets: [], profiles: [], parts: [], portfolio: null, invoices: [], photos: [], snapshots: [], crews: [], hotels: [], hotelsLoaded: false,
-    selectedTicketId: null, ticketNotes: [], editingNoteId: null,
+    selectedTicketId: null, ticketNotes: [], editingNoteId: null, milestoneOpen: {}, editingDescShort: false,
     loaded: false,
     importHeaders: [], importRows: [], importMapping: {}, importResult: null, importBusy: false, importFileError: ""
   };
@@ -1189,12 +1196,18 @@
   // одна и та же вёрстка для всех 4 пунктов (бригада/материал/работа/акт),
   // отличаются только галочка-статус, заголовок и произвольное тело (form/список).
   function milestoneRow(opts){
+    // opts.key — уникальный ключ пункта (crew/materials/work/act) для
+    // сворачивания/разворачивания (state.milestoneOpen), opts.done — галочка,
+    // opts.title — заголовок (1 строка, длинный текст обрезается), opts.body —
+    // раскрывающееся содержимое (формы/списки), видно только когда раскрыто.
+    var open = !!(state.milestoneOpen && state.milestoneOpen[opts.key]);
     return h`<div class="milestone-row">
-      <div class="milestone-check ${opts.done?'done':'pending'}">${opts.done?'✓':'○'}</div>
-      <div class="milestone-body">
-        <div class="milestone-title">${opts.title}</div>
-        ${opts.body}
+      <div class="milestone-hd" data-action="toggle-milestone" data-key="${opts.key}">
+        <span class="milestone-check ${opts.done?'done':'pending'}">${opts.done?'✓':'○'}</span>
+        <span class="milestone-title" title="${escapeHtml(opts.title)}">${opts.title}</span>
+        <span class="milestone-chevron">${open?'▾':'▸'}</span>
       </div>
+      ${open ? h`<div class="milestone-body">${opts.body}</div>` : ""}
     </div>`;
   }
   // Список уже прикреплённых к заявке счетов/договоров нужной категории
@@ -1930,13 +1943,87 @@
           </div>
           ${t.attention_flag ? h`<div class="deadline-box overdue" style="margin-top:-4px;"><div style="font-weight:600;">Особое внимание</div>${t.attention_note ? h`<div class="helptext" style="margin-top:2px;">${escapeHtml(t.attention_note)}</div>` : ""}</div>` : ""}
           <div><div class="section-title">Описание</div>
-            <div style="font-size:14.5px;font-weight:600;margin-bottom:6px;">${escapeHtml(displayShort(t))}${!t.description_short?h` <span class="muted" style="font-weight:400;font-size:11px;">(черновик без «воды», не сохранён)</span>`:''}</div>
-            <div style="font-size:13px;color:var(--ink-faint);margin-bottom:10px;">${escapeHtml(t.description)}</div>
-            <label for="desc-short-input">Суть (краткая формулировка)</label>
-            <input type="text" id="desc-short-input" data-id="${t.id}" value="${escapeHtml(t.description_short||autoShortDescription(t.description))}" placeholder="Например: Течь в бойлерной 2 этажа">
-            <div class="helptext">Поле предзаполнено автоматическим черновиком (без ИИ — просто убраны шаблонные фразы вроде «Замечание:», «прошу устранить» и т.п.). Поправьте и сохраните — тогда именно ваша формулировка станет заголовком заявки в списках и реестре.</div>
-            ${feedbackHtml("desc-short-feedback")}
+            <div style="display:flex;align-items:baseline;gap:8px;">
+              <div style="font-size:14.5px;font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(displayShort(t))}">${escapeHtml(displayShort(t))}${!t.description_short?h` <span class="muted" style="font-weight:400;font-size:11px;">(черновик)</span>`:''}</div>
+              <button type="button" class="btn btn-ghost btn-sm" data-action="toggle-desc-edit" data-id="${t.id}" style="padding:2px 8px;flex:none;" title="Изменить формулировку «Сути»">✎</button>
+            </div>
+            <div class="line-clamp-2 muted" style="font-size:12.5px;margin-top:2px;" title="${escapeHtml(t.description)}">${escapeHtml(t.description)}</div>
+            ${state.editingDescShort ? h`
+              <div style="margin-top:6px;">
+                <label for="desc-short-input">Суть (краткая формулировка)</label>
+                <input type="text" id="desc-short-input" data-id="${t.id}" value="${escapeHtml(t.description_short||autoShortDescription(t.description))}" placeholder="Например: Течь в бойлерной 2 этажа">
+                <div class="helptext">Черновик без ИИ (убраны шаблонные фразы вроде «Замечание:», «прошу устранить»). Поправьте и сохраните — эта формулировка станет заголовком заявки в списках и реестре.</div>
+                ${feedbackHtml("desc-short-feedback")}
+              </div>` : ''}
           </div>
+          ${t.status!=="new" ? h`<div>
+            <div class="section-title">Ход работ</div>
+            ${milestoneRow({
+              key: "crew",
+              done: !!t.assigned_to,
+              title: t.assigned_to ? ("Бригада назначена: " + escapeHtml(t.assigned_to)) : "Бригада ещё не назначена",
+              body: h`
+                ${(t.status==="dispatched"||t.status==="onsite") ? h`
+                <div class="actions-row" style="margin-bottom:8px;">
+                  <select id="reassign-select" style="max-width:240px;">
+                    <option value="">Сменить исполнителя…</option>
+                    ${specialists.length ? h`<optgroup label="Главные инженеры">${specialists.map(function(s){return h`<option value="${escapeHtml(s.name||s.email)}" ${t.assigned_to===(s.name||s.email)?'selected':''}>${escapeHtml(s.name||s.email)}</option>`;}).join("")}</optgroup>` : ""}
+                    ${state.crews.length ? h`<optgroup label="Бригады">${state.crews.map(function(c){return h`<option value="Бригада: ${escapeHtml(c.name)}" ${t.assigned_to===("Бригада: "+c.name)?'selected':''}>${escapeHtml(c.name)}</option>`;}).join("")}</optgroup>` : ""}
+                  </select>
+                  <button class="btn btn-sm" data-action="reassign" data-id="${t.id}">Сменить</button>
+                </div>` : ""}
+                ${milestoneInvoiceList(t, "crew")}
+                <form class="milestone-attach-form" data-category="crew" data-id="${t.id}" style="margin-top:8px;display:flex;flex-direction:column;gap:6px;">
+                  <input type="file" name="file" accept="application/pdf,image/*" required>
+                  <button class="btn btn-sm" type="submit" style="align-self:flex-start;">Прикрепить счёт/договор</button>
+                </form>`
+            })}
+            ${milestoneRow({
+              key: "materials",
+              done: !!t.materials_ready,
+              title: t.materials_ready ? "Материал закуплен/получен" : "Материал ещё не закуплен",
+              body: h`
+                <div class="actions-row" style="margin-bottom:8px;">
+                  <button class="btn btn-sm" data-action="materials-ready-toggle" data-id="${t.id}" data-val="${t.materials_ready?'0':'1'}">${t.materials_ready?'✓ Материал закуплен':'Отметить: материал закуплен'}</button>
+                </div>
+                ${milestoneInvoiceList(t, "materials")}
+                <form class="milestone-attach-form" data-category="materials" data-id="${t.id}" style="margin-top:8px;display:flex;flex-direction:column;gap:6px;">
+                  <input type="file" name="file" accept="application/pdf,image/*" required>
+                  <button class="btn btn-sm" type="submit" style="align-self:flex-start;">Прикрепить счёт/договор</button>
+                </form>`
+            })}
+            ${milestoneRow({
+              key: "work",
+              done: (state.photos||[]).some(function(p){return p.ticket_id===t.id;}),
+              title: (state.photos||[]).some(function(p){return p.ticket_id===t.id;}) ? "Работа выполнена (есть фото)" : "Работа ещё не выполнена",
+              body: h`
+                ${milestonePhotoGrid(t)}
+                <form id="photo-form" data-id="${t.id}" style="margin-top:8px;display:flex;flex-direction:column;gap:6px;">
+                  <input type="file" name="files" accept="image/*" capture="environment" multiple required>
+                  <button class="btn btn-sm" type="submit" style="align-self:flex-start;">Прикрепить фото</button>
+                </form>
+                <div class="actions-row" style="margin-top:10px;">
+                  <input type="number" id="repair-hours-input" data-id="${t.id}" min="0" step="0.5" placeholder="Кол-во часов" value="${t.repair_hours!=null?t.repair_hours:''}" style="max-width:160px;">
+                  <span class="helptext">Часы главного инженера на устранение (для табеля, необязательно).</span>
+                  ${feedbackHtml("repair-hours-feedback")}
+                </div>`
+            })}
+            ${milestoneRow({
+              key: "act",
+              done: !!t.act_signed,
+              title: t.act_signed ? "Акт подписан" : "Акт ещё не подписан",
+              body: h`
+                ${t.act_signed ? h`<div class="actions-row" style="margin-bottom:8px;">
+                  <button type="button" class="btn btn-sm" data-action="act-open" data-path="${escapeHtml(t.act_file_path||'')}">${escapeHtml(t.act_file_name||'Файл акта')}</button>
+                  <button type="button" class="btn btn-sm btn-ghost" data-action="act-clear" data-id="${t.id}">Снять отметку</button>
+                </div>` : h`
+                <form id="act-form" data-id="${t.id}" style="display:flex;flex-direction:column;gap:6px;">
+                  <input type="file" name="file" accept="application/pdf,image/*" required>
+                  <button class="btn btn-sm" type="submit" style="align-self:flex-start;">Прикрепить акт</button>
+                </form>`}`
+            })}
+            <div class="helptext" style="margin-top:6px;">Когда все 4 пункта отмечены, заявка автоматически переходит в статус «Выполнено».</div>
+          </div>` : ""}
           ${!di.done ? h`<div class="deadline-box ${di.overdue?'overdue':(di.soon?'soon':'')}">
             <div style="font-weight:600;">${di.label}</div>
             <div class="helptext" style="margin-top:2px;">${di.kind==='arrival'?'Срок прибытия главного инженера по зоне логистики.':'Срок устранения — приходит из c-lector при импорте, платформа его не рассчитывает.'}</div>
@@ -1960,70 +2047,6 @@
               ${(t.status==="closed"||t.status==="rejected") ? h`<button class="btn btn-sm" data-action="reopen" data-id="${t.id}">Переоткрыть</button>`:""}
             </div>
           </div>
-          ${t.status!=="new" ? h`<div>
-            <div class="section-title">Ход работ</div>
-            ${milestoneRow({
-              done: !!t.assigned_to,
-              title: t.assigned_to ? ("Бригада назначена: " + escapeHtml(t.assigned_to)) : "Бригада ещё не назначена",
-              body: h`
-                ${(t.status==="dispatched"||t.status==="onsite") ? h`
-                <div class="actions-row" style="margin-bottom:8px;">
-                  <select id="reassign-select" style="max-width:240px;">
-                    <option value="">Сменить исполнителя…</option>
-                    ${specialists.length ? h`<optgroup label="Главные инженеры">${specialists.map(function(s){return h`<option value="${escapeHtml(s.name||s.email)}" ${t.assigned_to===(s.name||s.email)?'selected':''}>${escapeHtml(s.name||s.email)}</option>`;}).join("")}</optgroup>` : ""}
-                    ${state.crews.length ? h`<optgroup label="Бригады">${state.crews.map(function(c){return h`<option value="Бригада: ${escapeHtml(c.name)}" ${t.assigned_to===("Бригада: "+c.name)?'selected':''}>${escapeHtml(c.name)}</option>`;}).join("")}</optgroup>` : ""}
-                  </select>
-                  <button class="btn btn-sm" data-action="reassign" data-id="${t.id}">Сменить</button>
-                </div>` : ""}
-                ${milestoneInvoiceList(t, "crew")}
-                <form class="milestone-attach-form" data-category="crew" data-id="${t.id}" style="margin-top:8px;display:flex;flex-direction:column;gap:6px;">
-                  <input type="file" name="file" accept="application/pdf,image/*" required>
-                  <button class="btn btn-sm" type="submit" style="align-self:flex-start;">Прикрепить счёт/договор</button>
-                </form>`
-            })}
-            ${milestoneRow({
-              done: !!t.materials_ready,
-              title: t.materials_ready ? "Материал закуплен/получен" : "Материал ещё не закуплен",
-              body: h`
-                <div class="actions-row" style="margin-bottom:8px;">
-                  <button class="btn btn-sm" data-action="materials-ready-toggle" data-id="${t.id}" data-val="${t.materials_ready?'0':'1'}">${t.materials_ready?'✓ Материал закуплен':'Отметить: материал закуплен'}</button>
-                </div>
-                ${milestoneInvoiceList(t, "materials")}
-                <form class="milestone-attach-form" data-category="materials" data-id="${t.id}" style="margin-top:8px;display:flex;flex-direction:column;gap:6px;">
-                  <input type="file" name="file" accept="application/pdf,image/*" required>
-                  <button class="btn btn-sm" type="submit" style="align-self:flex-start;">Прикрепить счёт/договор</button>
-                </form>`
-            })}
-            ${milestoneRow({
-              done: (state.photos||[]).some(function(p){return p.ticket_id===t.id;}),
-              title: (state.photos||[]).some(function(p){return p.ticket_id===t.id;}) ? "Работа выполнена (есть фото)" : "Работа ещё не выполнена",
-              body: h`
-                ${milestonePhotoGrid(t)}
-                <form id="photo-form" data-id="${t.id}" style="margin-top:8px;display:flex;flex-direction:column;gap:6px;">
-                  <input type="file" name="files" accept="image/*" capture="environment" multiple required>
-                  <button class="btn btn-sm" type="submit" style="align-self:flex-start;">Прикрепить фото</button>
-                </form>
-                <div class="actions-row" style="margin-top:10px;">
-                  <input type="number" id="repair-hours-input" data-id="${t.id}" min="0" step="0.5" placeholder="Кол-во часов" value="${t.repair_hours!=null?t.repair_hours:''}" style="max-width:160px;">
-                  <span class="helptext">Часы главного инженера на устранение (для табеля, необязательно).</span>
-                  ${feedbackHtml("repair-hours-feedback")}
-                </div>`
-            })}
-            ${milestoneRow({
-              done: !!t.act_signed,
-              title: t.act_signed ? "Акт подписан" : "Акт ещё не подписан",
-              body: h`
-                ${t.act_signed ? h`<div class="actions-row" style="margin-bottom:8px;">
-                  <button type="button" class="btn btn-sm" data-action="act-open" data-path="${escapeHtml(t.act_file_path||'')}">${escapeHtml(t.act_file_name||'Файл акта')}</button>
-                  <button type="button" class="btn btn-sm btn-ghost" data-action="act-clear" data-id="${t.id}">Снять отметку</button>
-                </div>` : h`
-                <form id="act-form" data-id="${t.id}" style="display:flex;flex-direction:column;gap:6px;">
-                  <input type="file" name="file" accept="application/pdf,image/*" required>
-                  <button class="btn btn-sm" type="submit" style="align-self:flex-start;">Прикрепить акт</button>
-                </form>`}`
-            })}
-            <div class="helptext" style="margin-top:6px;">Когда все 4 пункта отмечены, заявка автоматически переходит в статус «Выполнено».</div>
-          </div>` : ""}
           ${t.status==="onsite" ? h`<div>
             <div class="section-title">Категория (по осмотру)</div>
             <select id="case-select" data-id="${t.id}">
@@ -2228,8 +2251,8 @@
     var t = e.target;
     if(t.closest(".nav-item")) return;
     var openTicket = t.closest("[data-open-ticket]");
-    if(openTicket){ state.selectedTicketId = openTicket.getAttribute("data-open-ticket"); state.editingNoteId = null; renderTicketPanel(); loadNotesFor(state.selectedTicketId); return; }
-    if(t.closest("[data-close-panel]")){ state.selectedTicketId = null; state.editingNoteId = null; renderTicketPanel(); return; }
+    if(openTicket){ state.selectedTicketId = openTicket.getAttribute("data-open-ticket"); state.editingNoteId = null; state.milestoneOpen = {}; state.editingDescShort = false; renderTicketPanel(); loadNotesFor(state.selectedTicketId); return; }
+    if(t.closest("[data-close-panel]")){ state.selectedTicketId = null; state.editingNoteId = null; state.milestoneOpen = {}; state.editingDescShort = false; renderTicketPanel(); return; }
     if(t.matches(".modal-scrim") && t.hasAttribute("data-close-modal")){ closeModal(); return; }
     if(t.hasAttribute("data-close-modal")){ closeModal(); return; }
 
@@ -2298,6 +2321,13 @@
       }
       if(action==="note-edit"){ e.preventDefault(); state.editingNoteId = id; renderTicketPanel(); return; }
       if(action==="note-cancel"){ e.preventDefault(); state.editingNoteId = null; renderTicketPanel(); return; }
+      if(action==="toggle-milestone"){
+        var mkey = actionEl.getAttribute("data-key");
+        state.milestoneOpen = state.milestoneOpen || {};
+        state.milestoneOpen[mkey] = !state.milestoneOpen[mkey];
+        renderTicketPanel(); return;
+      }
+      if(action==="toggle-desc-edit"){ state.editingDescShort = !state.editingDescShort; renderTicketPanel(); return; }
       if(action==="note-delete"){ e.preventDefault(); if(confirm("Удалить запись из журнала?")) deleteNote(id); return; }
       if(action==="crew-delete"){ if(confirm("Удалить бригаду?")) deleteCrew(id); return; }
       if(action==="crew-member-remove"){
