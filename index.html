@@ -127,8 +127,6 @@
   .photo-thumb{ position:relative; width:84px; height:84px; border-radius:8px; border:1px solid var(--line); overflow:hidden; display:flex; align-items:center; justify-content:center; background:var(--surface-3); }
   .photo-thumb img{ width:100%; height:100%; object-fit:cover; display:block; }
   .photo-thumb .photo-del{ position:absolute; top:2px; right:2px; background:rgba(0,0,0,.55); color:#fff; border:none; border-radius:5px; font-size:11px; line-height:1; padding:3px 5px; cursor:pointer; }
-  .zone-list{ display:flex; flex-direction:column; gap:3px; list-style:none; padding:0; margin:0; }
-  .zone-list li{ display:flex; align-items:center; gap:6px; font-size:12.5px; }
   .map-table td, .map-table th{ vertical-align:middle; }
   .import-summary{ display:flex; gap:18px; flex-wrap:wrap; margin:14px 0; }
   .import-summary .stat{ font-size:13px; } .import-summary .stat b{ font-size:18px; display:block; font-family:"IBM Plex Mono",monospace; }
@@ -186,6 +184,13 @@
   .note{ padding:9px 10px; background:var(--surface-2); border-radius:8px; font-size:12.5px; margin-bottom:7px; }
   .note .meta{ color:var(--ink-faint); font-size:11px; margin-bottom:3px; }
   .actions-row{ display:flex; gap:8px; flex-wrap:wrap; }
+  .milestone-row{ display:flex; gap:10px; padding:10px 0; border-top:1px solid var(--line); }
+  .milestone-row:first-child{ border-top:none; padding-top:0; }
+  .milestone-check{ flex:none; width:22px; height:22px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:700; margin-top:1px; }
+  .milestone-check.done{ background:var(--ok-soft); color:var(--ok); }
+  .milestone-check.pending{ background:var(--surface-2); color:var(--ink-faint); }
+  .milestone-body{ flex:1; min-width:0; }
+  .milestone-title{ font-weight:600; font-size:13.5px; margin-bottom:4px; }
 
   /* ---------- modal ---------- */
   .modal-scrim{ position:fixed; inset:0; background:rgba(10,16,22,.4); z-index:30; display:flex; align-items:flex-start; justify-content:center; padding:6vh 20px; overflow-y:auto; }
@@ -325,6 +330,51 @@
   }
   function pluralRu(n, one, few, many){ n = Math.abs(n)%100; var n1=n%10; if(n>10&&n<20) return many; if(n1>1&&n1<5) return few; if(n1===1) return one; return many; }
   function escapeHtml(s){ return String(s==null?"":s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];}); }
+  // Автоматический черновик "Сути" без ИИ (платный API для формулировок раньше
+  // сознательно убрали — "убираем ИИ потому что он просит денег"). Простая
+  // эвристика: срезаем типовые шаблонные вводные фразы и слова-паразиты, которые
+  // c-lector/заявители обычно добавляют в "Замечание" — остаётся более голая
+  // формулировка сути. Это черновик, а не замена ручного ввода: результат просто
+  // предзаполняет поле "Суть" и используется для показа в списке, пока человек не
+  // впишет свою формулировку (тогда её сохранённое значение всегда в приоритете).
+  // ВАЖНО: в JS \b (граница слова) определяется через ASCII \w — кириллические
+  // буквы под \w не попадают, поэтому \bслово\b вокруг русского текста никогда
+  // не совпадает (граница "слово/не-слово" просто не возникает). Мидл-фраза
+  // ниже (пожалуйста/как можно скорее/...) поэтому ищется через явные границы
+  // (начало строки/пробел/запятая ... пробел/запятая/пунктуация/конец строки),
+  // а не через \b.
+  var FILLER_PATTERNS = [
+    /^\s*замечани[ея]\s*[:\-—]*\s*/i,
+    /^\s*проблема\s*[:\-—]*\s*/i,
+    /^\s*жалоба\s*[:\-—]*\s*/i,
+    /^\s*описание\s*[:\-—]*\s*/i,
+    /^\s*суть\s+заявки\s*[:\-—]*\s*/i,
+    /^\s*(убедительно\s+)?прошу\s+(вас\s*,?\s+)?/i,
+    /^\s*просьба\s+/i,
+    /^\s*требуется\s+/i,
+    /^\s*необходимо\s+/i,
+    /(^|[\s,])(пожалуйста|как можно скорее|в кратчайшие сроки|срочно|по возможности)[,]?(?=[\s,.!?]|$)/gi,
+    /\s*,?\s*устраните\s*,?\s*пожалуйста\s*[.!]*\s*$/i,
+    /\s+устранить\s*[.!]*\s*$/i
+  ];
+  function autoShortDescription(desc){
+    var s = String(desc||"");
+    FILLER_PATTERNS.forEach(function(re, i){
+      // индекс 9 (список слов-паразитов) сохраняет захваченную ведущую границу
+      // (начало строки/пробел/запятая) через $1 — убираем только само слово.
+      s = s.replace(re, function(m, g1){ return (i===9) ? (g1||"") : ""; });
+    });
+    s = s.replace(/\s{2,}/g, " ");
+    s = s.replace(/\s+([.,!?])/g, "$1");   // "слово ." -> "слово."
+    s = s.replace(/,\s*([.!?])/g, "$1");   // "слово, ." -> "слово."
+    s = s.replace(/^[\s,;:\-—]+/, "");     // осиротевшая пунктуация в начале
+    s = s.trim();
+    if(!s) return String(desc||"").trim();
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  }
+  // То, что реально показываем как "Суть" — ручная формулировка в приоритете,
+  // иначе черновик без "воды" по эвристике выше.
+  function displayShort(t){ return (t && t.description_short) || autoShortDescription(t && t.description); }
   function workOrderNo(t){ var d=new Date(t.created_at||Date.now()); var ds=d.getFullYear()+String(d.getMonth()+1).padStart(2,"0")+String(d.getDate()).padStart(2,"0"); return "НЗ-"+ds+"-"+(t.id||"").replace(/-/g,"").slice(-4).toUpperCase(); }
 
   /* ============================== ИМПОРТ ИЗ C-LECTOR ==============================
@@ -631,7 +681,12 @@
   // здесь стояло автораспознавание поставщика/суммы/валюты через ИИ (Anthropic
   // Claude), но эту автоматику отключили (платный API), так что все эти поля
   // заполняются вручную прямо в разделе «Реестр платежей».
-  function uploadInvoice(ticketId, file){
+  // category: null (обычный счёт из общего раздела "Счета") | "crew" (счёт/договор
+  // за бригаду/подрядчика) | "materials" (счёт/договор за материалы) — привязывает
+  // файл к конкретному пункту чек-листа хода работ в карточке заявки. В «Реестре
+  // платежей» показываются ВСЕ счета независимо от категории — категория нужна
+  // только для группировки внутри карточки заявки.
+  function uploadInvoice(ticketId, file, category){
     var path = ticketId + "/" + Date.now() + "_" + file.name.replace(/[^\w.\-]+/g,"_");
     return readFileAsBuffer(file).then(function(buf){
       return sb.storage.from("invoices").upload(path, buf, {contentType: file.type || "application/octet-stream"});
@@ -639,7 +694,7 @@
       if(res.error) throw res.error;
       return sb.from("invoices").insert({
         ticket_id: ticketId, file_path: path, file_name: file.name,
-        supplier: null, amount: null, currency: null,
+        supplier: null, amount: null, currency: null, category: category||null,
         uploaded_by: myLabel(), in_registry: true, added_to_registry_at: new Date().toISOString(),
         extra: { responsible: myLabel() }
       });
@@ -841,6 +896,15 @@
   function assignSpecialist(id, name){
     sb.from("tickets").update({assigned_to:name, status:"dispatched"}).eq("id",id).then(function(){
       addNote(id, "Назначен главный инженер: "+name+".");
+      maybeAutoComplete(id);
+    });
+  }
+  // Смена исполнителя уже назначенной заявки (в отличие от assignSpecialist выше,
+  // не трогает status/дедлайны — те уже отсчитываются от прибытия/устранения).
+  function reassignSpecialist(id, name){
+    sb.from("tickets").update({assigned_to:name}).eq("id",id).then(function(){
+      addNote(id, "Исполнитель изменён на: "+name+".");
+      maybeAutoComplete(id);
     });
   }
   function markArrived(id){
@@ -858,6 +922,56 @@
   function setMaterialsReady(id, val){
     sb.from("tickets").update({materials_ready:val}).eq("id",id).then(function(){
       addNote(id, val ? "Материалы закуплены/получены." : "Отметка «материалы закуплены» снята.");
+      if(val) maybeAutoComplete(id);
+    });
+  }
+  // Акт — четвёртый пункт чек-листа хода работ. В отличие от трёх остальных,
+  // хранится отдельным полем (act_signed), а не выводится из статуса заявки —
+  // иначе автопереход "все 4 пункта -> статус Выполнено" ниже был бы замкнут сам
+  // на себя (акт делался бы условием статуса closed, а сам получался бы из него).
+  function uploadActFile(ticketId, file){
+    var path = ticketId + "/act_" + Date.now() + "_" + file.name.replace(/[^\w.\-]+/g,"_");
+    return readFileAsBuffer(file).then(function(buf){
+      return sb.storage.from("invoices").upload(path, buf, {contentType: file.type || "application/octet-stream"});
+    }).then(function(res){
+      if(res.error) throw res.error;
+      return sb.from("tickets").update({act_signed:true, act_file_path:path, act_file_name:file.name}).eq("id", ticketId);
+    }).then(function(){
+      addNote(ticketId, "Акт подписан, файл прикреплён: "+file.name+".");
+      maybeAutoComplete(ticketId);
+    }).catch(function(err){
+      alert("Не удалось загрузить акт: " + (err&&err.message?err.message:err));
+    });
+  }
+  function clearActSigned(id){
+    if(!confirm("Снять отметку «акт подписан»? Прикреплённый файл акта останется доступным по ссылке, но перестанет учитываться как подтверждение.")) return;
+    sb.from("tickets").update({act_signed:false}).eq("id",id).then(function(){
+      addNote(id, "Отметка «акт подписан» снята.");
+    });
+  }
+  function openActFile(path){
+    sb.storage.from("invoices").createSignedUrl(path, 3600).then(function(res){
+      if(res.data && res.data.signedUrl) window.open(res.data.signedUrl, "_blank");
+      else alert("Не удалось открыть файл акта.");
+    });
+  }
+  // Автопереход "в работе -> выполнено": как только у заявки одновременно
+  // назначен исполнитель, закуплены материалы, вписаны часы устранения и
+  // подписан акт — статус сам становится "Закрыта", без дополнительных условий
+  // (по решению Антона — категория "Гарантийный/Негарантийный/Необоснованный"
+  // для этого НЕ обязательна, хотя обычно нужна для оплаты по Регламенту, поэтому
+  // если она не заполнена — обращаем на это внимание отдельной записью в журнале).
+  // Тянем свежую строку заявки напрямую из базы (а не из state.tickets), чтобы не
+  // зависеть от того, успел ли уже прийти realtime-апдейт к этому моменту.
+  function maybeAutoComplete(id){
+    sb.from("tickets").select("*").eq("id", id).maybeSingle().then(function(res){
+      var t = res.data; if(!t) return;
+      if(t.status==="closed" || t.status==="rejected") return;
+      var allDone = !!t.assigned_to && !!t.materials_ready && t.repair_hours!=null && !!t.act_signed;
+      if(!allDone) return;
+      sb.from("tickets").update({status:"closed", closed_at:new Date().toISOString()}).eq("id",id).then(function(){
+        addNote(id, "Все 4 пункта выполнены (бригада, материал, работа, акт) — статус автоматически изменён на «Закрыта»."+(!t.case_type?" Категория по осмотру не указана — заполните её для расчёта оплаты по Регламенту.":""));
+      });
     });
   }
   // Ручная пометка "особое внимание" — например, когда заявкой заинтересовался
@@ -1025,14 +1139,41 @@
       lit:function(t){ return t.repair_hours!=null; },
       label:function(t){ return t.repair_hours!=null ? "Работы выполнены ("+t.repair_hours+" ч)" : "Работы ещё не завершены"; } },
     { svg:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="9 2 9 8 15 8"/><path d="M9 13h6"/><path d="M9 17h6"/></svg>',
-      lit:function(t){ return t.status==="closed"; },
-      label:function(t){ return t.status==="closed" ? "Акт/наряд-задание готовы" : "Акт ещё не готов (заявка не закрыта)"; } }
+      lit:function(t){ return !!t.act_signed; },
+      label:function(t){ return t.act_signed ? "Акт подписан" : "Акт ещё не подписан"; } }
   ];
+  // Раньше этот ряд иконок показывался прямо в общем списке заявок — по просьбе
+  // Антона убрали оттуда (в общем списке их нельзя ни увидеть детально, ни
+  // "активировать") и теперь он рисуется только в карточке заявки, сразу под
+  // номером — см. renderTicketPanel().
   function statusIconsRow(t){
     return h`<span class="status-icons">${STATUS_ICON_DEFS.map(function(def){
       var lit = def.lit(t);
       return h`<span class="status-icon${lit?' lit':''}" title="${escapeHtml(def.label(t))}">${def.svg}</span>`;
     }).join("")}</span>`;
+  }
+  // Строка чек-листа "Ход работ" в карточке заявки (см. renderTicketPanel):
+  // одна и та же вёрстка для всех 4 пунктов (бригада/материал/работа/акт),
+  // отличаются только галочка-статус, заголовок и произвольное тело (form/список).
+  function milestoneRow(opts){
+    return h`<div class="milestone-row">
+      <div class="milestone-check ${opts.done?'done':'pending'}">${opts.done?'✓':'○'}</div>
+      <div class="milestone-body">
+        <div class="milestone-title">${opts.title}</div>
+        ${opts.body}
+      </div>
+    </div>`;
+  }
+  // Список уже прикреплённых к заявке счетов/договоров нужной категории
+  // (crew | materials) — используется в чек-листе "Ход работ".
+  function milestoneInvoiceList(t, category){
+    var list = (state.invoices||[]).filter(function(iv){ return iv.ticket_id===t.id && iv.category===category; });
+    if(!list.length) return h`<div class="muted" style="font-size:12.5px;">Файлов пока нет.</div>`;
+    return h`<div class="row-gap" style="gap:6px;display:flex;flex-direction:column;">${list.map(function(iv){
+      return h`<div class="invoice-row" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 10px;border:1px solid var(--line);border-radius:8px;">
+        <button type="button" class="btn btn-sm" data-action="invoice-open" data-path="${escapeHtml(iv.file_path)}">${escapeHtml(iv.file_name)}</button>
+      </div>`;
+    }).join("")}</div>`;
   }
   // Ручная пометка "особое внимание" — например, заявкой заинтересовался
   // руководитель или заказчик. В отличие от 4 иконок хода работ выше, эта
@@ -1114,7 +1255,7 @@
                 return h`<tr data-open-ticket="${t.id}" ${t.attention_flag?'class="attn-row"':''}>
                   <td class="mono">${attentionBadge(t)}${t.external_ref? escapeHtml(t.external_ref) : '<span class="muted">—</span>'}</td>
                   <td><span class="ttl">№${hotel.id} ${hotel.name}</span> ${zoneBadge(t.zone)}</td>
-                  <td>${escapeHtml(t.description_short||t.description).slice(0,54)}${(t.description_short||t.description).length>54?"…":""}</td>
+                  <td>${escapeHtml(displayShort(t)).slice(0,54)}${displayShort(t).length>54?"…":""}</td>
                   <td>${t.external_status? externalStatusPill(t.external_status): statusPill(t.status)}</td>
                   <td style="${di.overdue?'color:var(--crit);font-weight:600;':(di.soon?'color:var(--warn);font-weight:600;':'')}">${di.label}</td>
                 </tr>`; }).join("")}
@@ -1164,21 +1305,36 @@
     // из-за того, что они попадают под "закрыто по умолчанию".
     var list = (f.showClosed || f.statusList.length) ? baseFiltered.slice() : baseFiltered.filter(function(t){ return !isTicketDone(t); });
     var hiddenClosedCount = baseFiltered.length - list.length;
-    var sortField = f.sort && f.sort.field;
-    var sortDir = (f.sort && f.sort.dir) || "asc";
+    // По умолчанию (пока человек не кликнул ни один заголовок) список отсортирован
+    // по номеру заявки по убыванию — самые новые/последние заявки сверху. Как
+    // только кликнули по какому-то столбцу — дальше работает обычное переключение
+    // возрастание/убывание по клику (см. обработчик data-action="sort-tickets").
+    var sortField = (f.sort && f.sort.field) || "ref";
+    var sortDir = (f.sort && f.sort.dir) || "desc";
     function sortVal(t, field){
       var hotel = hotelById(t.hotel_id);
       if(field==="ref") return t.external_ref || "";
       if(field==="hotel") return hotel ? hotel.name : "";
-      if(field==="desc") return t.description_short || t.description || "";
+      if(field==="desc") return displayShort(t);
       if(field==="status") return ticketStatusLabel(t);
       if(field==="deadline"){ var di=deadlineInfo(t); return di.ms==null ? Infinity : di.ms; }
       return "";
     }
+    // Номера заявок из c-lector — по сути числа, но хранятся строкой, поэтому
+    // обычное сравнение строк расставило бы "10" раньше "9". Сравниваем как числа,
+    // если оба значения похожи на число, иначе — обычным сравнением строк.
+    function numericAwareCompare(a, b){
+      var sa = String(a), sb = String(b);
+      var na = sa.match(/^-?\d+(\.\d+)?$/), nb = sb.match(/^-?\d+(\.\d+)?$/);
+      if(na && nb) return parseFloat(sa) - parseFloat(sb);
+      return sa.localeCompare(sb, "ru");
+    }
     if(sortField){
       list = list.slice().sort(function(a,b){
         var va = sortVal(a, sortField), vb = sortVal(b, sortField);
-        var cmp = (typeof va==="number" || typeof vb==="number") ? ((va||0)-(vb||0)) : String(va).localeCompare(String(vb), "ru");
+        var cmp;
+        if(sortField==="ref") cmp = numericAwareCompare(va, vb);
+        else cmp = (typeof va==="number" || typeof vb==="number") ? ((va||0)-(vb||0)) : String(va).localeCompare(String(vb), "ru");
         return sortDir==="desc" ? -cmp : cmp;
       });
     }
@@ -1190,7 +1346,7 @@
     var header = ["№ c-lector","Отель","Описание","Статус","Исполнитель","Срок","Особое внимание"];
     var rows = list.map(function(t){
       var hotel = hotelById(t.hotel_id); var di = deadlineInfo(t);
-      return [ t.external_ref||"", hotel?("№"+hotel.id+" "+hotel.name):"", t.description_short||t.description||"", ticketStatusLabel(t), t.assigned_to||"", di.label, t.attention_flag?("Да"+(t.attention_note?": "+t.attention_note:"")):"" ];
+      return [ t.external_ref||"", hotel?("№"+hotel.id+" "+hotel.name):"", displayShort(t), ticketStatusLabel(t), t.assigned_to||"", di.label, t.attention_flag?("Да"+(t.attention_note?": "+t.attention_note:"")):"" ];
     });
     var ws = XLSX.utils.aoa_to_sheet([header].concat(rows));
     ws["!cols"] = header.map(function(){ return {wch:22}; });
@@ -1238,34 +1394,27 @@
                 <div><span class="ttl">№${hotel.id} ${hotel.name}</span></div>
                 <div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap;">${zoneBadge(t.zone)}${t.demo?' <span class="demo-tag">пример</span>':''}${t.source==='c-lector'?' <span class="source-tag">c-lector</span>':''}</div>
               </td>
-              <td>${escapeHtml(t.description_short||t.description).slice(0,60)}${(t.description_short||t.description).length>60?"…":""}</td>
-              <td>${t.external_status? externalStatusPill(t.external_status): statusPill(t.status)} ${statusIconsRow(t)}</td>
+              <td>${escapeHtml(displayShort(t)).slice(0,60)}${displayShort(t).length>60?"…":""}</td>
+              <td>${t.external_status? externalStatusPill(t.external_status): statusPill(t.status)}</td>
               <td style="${di.overdue?'color:var(--crit);font-weight:600;':(di.soon?'color:var(--warn);font-weight:600;':'')}">${di.label}</td>
             </tr>`; }).join("")}
         </tbody></table></div></div>`;
   }
 
-  // Зоны раньше показывались как компактные подписи "З1 З2 З3" — но кириллическая
-  // "З" визуально почти неотличима от цифры "3" в большинстве шрифтов, из-за чего
-  // это читалось как непонятные "31 32 33". Показываем зоны отдельным списком
-  // (по просьбе Антона — "буллетами") с полным словом "Зона N".
-  function zoneList(m, editable){
-    return h`<ul class="zone-list">${[1,2,3].map(function(z){
-      var checked = (m.zones||[]).indexOf(z)>-1;
-      if(!editable) return checked ? h`<li>· Зона ${z}</li>` : "";
-      return h`<li><label style="display:flex;align-items:center;gap:6px;margin:0;"><input type="checkbox" data-profile-zone="${m.id}" value="${z}" ${checked?'checked':''}> Зона ${z}</label></li>`;
-    }).join("")}${(!editable && !(m.zones||[]).length) ? '<li class="muted">—</li>' : ""}</ul>`;
-  }
+  // Раньше здесь был отдельный столбец "Зоны" с чекбоксами (1/2/3) на каждого
+  // сотрудника — по просьбе Антона убран целиком: непонятный функционал, никак
+  // не влиявший на реальную логику зон/сроков (та использует зону отеля/заявки,
+  // а не зоны профиля).
   function viewTeam(){
     var owner = isOwner();
     return h`
       <div class="two-col">
         <div class="card card-pad">
           <div class="section-title">Сотрудники, вошедшие в систему</div>
-          ${!owner ? h`<div class="helptext" style="margin-bottom:10px;">Роль, зоны и удаление сотрудников редактирует только руководитель службы.</div>` : ""}
+          ${!owner ? h`<div class="helptext" style="margin-bottom:10px;">Роль и удаление сотрудников редактирует только руководитель службы.</div>` : ""}
           ${state.profiles.length===0 ? h`<div class="empty-state"><b>Пока никто не входил</b>Поделитесь ссылкой на это приложение с коллегами.</div>` : h`
           <div class="table-wrap"><table>
-            <thead><tr><th>Имя</th><th>Почта</th><th>Роль</th><th>Зоны</th><th>Статус</th>${owner?h`<th></th>`:''}</tr></thead>
+            <thead><tr><th>Имя</th><th>Почта</th><th>Роль</th><th>Статус</th>${owner?h`<th></th>`:''}</tr></thead>
             <tbody>${state.profiles.map(function(m){
               var isSelf = state.me && m.id===state.me.id;
               return h`<tr>
@@ -1276,7 +1425,6 @@
                     ${Object.keys(ROLE_LABEL).map(function(r){return h`<option value="${r}" ${m.role===r?'selected':''}>${ROLE_LABEL[r]}</option>`;}).join("")}
                   </select>` : escapeHtml(ROLE_LABEL[m.role]||m.role)}
                 </td>
-                <td>${zoneList(m, owner)}</td>
                 <td>${owner
                   ? h`<button class="btn btn-sm ${m.active===false?'':'btn-ghost'}" data-action="profile-toggle-active" data-id="${m.id}" data-val="${m.active===false?1:0}">${m.active===false?'Включить':'Активен'}</button>`
                   : h`<span class="pill ${m.active===false?'pill-neutral':'pill-ok'}">${m.active===false?'Отключён':'Активен'}</span>`}</td>
@@ -1284,7 +1432,7 @@
               </tr>`;
             }).join("")}</tbody>
           </table></div>`}
-          <div class="helptext" style="margin-top:12px;">Новые коллеги появляются здесь автоматически после первого входа по ссылке — сразу назначьте им роль и зоны.</div>
+          <div class="helptext" style="margin-top:12px;">Новые коллеги появляются здесь автоматически после первого входа по ссылке — сразу назначьте им роль.</div>
         </div>
         <div class="card card-pad">
           <div class="section-title">Пригласить коллегу</div>
@@ -1718,7 +1866,8 @@
         <div class="panel-head">
           <div>
             ${t.external_ref ? h`<div class="mono" style="font-weight:700;font-size:18px;color:var(--accent);">№ ${escapeHtml(t.external_ref)}</div>` : ""}
-            <div style="font-weight:700;font-size:16px;${t.external_ref?'margin-top:2px;':''}">№${hotel.id} ${hotel.name} ${t.demo?'<span class="demo-tag">пример</span>':''} ${t.source==='c-lector'?'<span class="source-tag">c-lector</span>':''}</div>
+            <div style="margin-top:4px;">${statusIconsRow(t)}</div>
+            <div style="font-weight:700;font-size:16px;margin-top:6px;">№${hotel.id} ${hotel.name} ${t.demo?'<span class="demo-tag">пример</span>':''} ${t.source==='c-lector'?'<span class="source-tag">c-lector</span>':''}</div>
             <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;">${zoneBadge(t.zone)} ${groupPill(t.ticket_group)} ${t.external_status? externalStatusPill(t.external_status): statusPill(t.status)} ${t.external_status? internalStageTag(t.status): ''} ${t.attention_flag?attentionBadge(t):''}</div>
           </div>
           <button class="btn btn-ghost panel-close" data-close-panel>✕</button>
@@ -1729,11 +1878,11 @@
           </div>
           ${t.attention_flag ? h`<div class="deadline-box overdue" style="margin-top:-4px;"><div style="font-weight:600;">Особое внимание</div>${t.attention_note ? h`<div class="helptext" style="margin-top:2px;">${escapeHtml(t.attention_note)}</div>` : ""}</div>` : ""}
           <div><div class="section-title">Описание</div>
-            ${t.description_short ? h`<div style="font-size:14.5px;font-weight:600;margin-bottom:6px;">${escapeHtml(t.description_short)}</div>` : ""}
-            <div style="font-size:13px;${t.description_short?'color:var(--ink-faint);':''}margin-bottom:10px;">${escapeHtml(t.description)}</div>
+            <div style="font-size:14.5px;font-weight:600;margin-bottom:6px;">${escapeHtml(displayShort(t))}${!t.description_short?h` <span class="muted" style="font-weight:400;font-size:11px;">(черновик без «воды», не сохранён)</span>`:''}</div>
+            <div style="font-size:13px;color:var(--ink-faint);margin-bottom:10px;">${escapeHtml(t.description)}</div>
             <label for="desc-short-input">Суть (краткая формулировка)</label>
-            <input type="text" id="desc-short-input" data-id="${t.id}" value="${escapeHtml(t.description_short||'')}" placeholder="Например: Течь в бойлерной 2 этажа">
-            <div class="helptext">Суть заполняется вручную (без ИИ) — как только вы её впишете, она станет заголовком заявки в списках и реестре вместо полного текста из c-lector.</div>
+            <input type="text" id="desc-short-input" data-id="${t.id}" value="${escapeHtml(t.description_short||autoShortDescription(t.description))}" placeholder="Например: Течь в бойлерной 2 этажа">
+            <div class="helptext">Поле предзаполнено автоматическим черновиком (без ИИ — просто убраны шаблонные фразы вроде «Замечание:», «прошу устранить» и т.п.). Поправьте и сохраните — тогда именно ваша формулировка станет заголовком заявки в списках и реестре.</div>
             ${feedbackHtml("desc-short-feedback")}
           </div>
           ${!di.done ? h`<div class="deadline-box ${di.overdue?'overdue':(di.soon?'soon':'')}">
@@ -1754,12 +1903,71 @@
               ${t.status==="dispatched" ? h`<button class="btn btn-primary btn-sm" data-action="arrived" data-id="${t.id}">Отметить прибытие</button>`:""}
               ${t.status==="onsite" ? h`<button class="btn btn-sm" data-action="materials" data-id="${t.id}">Нужны материалы…</button>
                 <button class="btn btn-primary btn-sm" data-action="close" data-id="${t.id}" ${!t.case_type?'disabled':''}>Закрыть заявку</button>`:""}
-              ${(t.status==="dispatched"||t.status==="onsite") ? h`<button class="btn btn-sm" data-action="materials-ready-toggle" data-id="${t.id}" data-val="${t.materials_ready?'0':'1'}">${t.materials_ready?'✓ Материал закуплен':'Отметить: материал закуплен'}</button>` : ""}
               ${t.assigned_to ? h`<a class="btn btn-sm" href="#/workorder/${t.id}">Наряд-задание</a>` : ""}
               ${(t.status==="dispatched"||t.status==="onsite") ? h`<button class="btn btn-sm btn-danger" data-action="reject" data-id="${t.id}">Отклонить</button>`:""}
               ${(t.status==="closed"||t.status==="rejected") ? h`<button class="btn btn-sm" data-action="reopen" data-id="${t.id}">Переоткрыть</button>`:""}
             </div>
           </div>
+          ${t.status!=="new" ? h`<div>
+            <div class="section-title">Ход работ</div>
+            ${milestoneRow({
+              done: !!t.assigned_to,
+              title: t.assigned_to ? ("Бригада назначена: " + escapeHtml(t.assigned_to)) : "Бригада ещё не назначена",
+              body: h`
+                ${(t.status==="dispatched"||t.status==="onsite") ? h`
+                <div class="actions-row" style="margin-bottom:8px;">
+                  <select id="reassign-select" style="max-width:240px;">
+                    <option value="">Сменить исполнителя…</option>
+                    ${specialists.length ? h`<optgroup label="Главные инженеры">${specialists.map(function(s){return h`<option value="${escapeHtml(s.name||s.email)}" ${t.assigned_to===(s.name||s.email)?'selected':''}>${escapeHtml(s.name||s.email)}</option>`;}).join("")}</optgroup>` : ""}
+                    ${state.crews.length ? h`<optgroup label="Бригады">${state.crews.map(function(c){return h`<option value="Бригада: ${escapeHtml(c.name)}" ${t.assigned_to===("Бригада: "+c.name)?'selected':''}>${escapeHtml(c.name)}</option>`;}).join("")}</optgroup>` : ""}
+                  </select>
+                  <button class="btn btn-sm" data-action="reassign" data-id="${t.id}">Сменить</button>
+                </div>` : ""}
+                ${milestoneInvoiceList(t, "crew")}
+                <form class="milestone-attach-form" data-category="crew" data-id="${t.id}" style="margin-top:8px;display:flex;flex-direction:column;gap:6px;">
+                  <input type="file" name="file" accept="application/pdf,image/*" required>
+                  <button class="btn btn-sm" type="submit" style="align-self:flex-start;">Прикрепить счёт/договор</button>
+                </form>`
+            })}
+            ${milestoneRow({
+              done: !!t.materials_ready,
+              title: t.materials_ready ? "Материал закуплен/получен" : "Материал ещё не закуплен",
+              body: h`
+                <div class="actions-row" style="margin-bottom:8px;">
+                  <button class="btn btn-sm" data-action="materials-ready-toggle" data-id="${t.id}" data-val="${t.materials_ready?'0':'1'}">${t.materials_ready?'✓ Материал закуплен':'Отметить: материал закуплен'}</button>
+                </div>
+                ${milestoneInvoiceList(t, "materials")}
+                <form class="milestone-attach-form" data-category="materials" data-id="${t.id}" style="margin-top:8px;display:flex;flex-direction:column;gap:6px;">
+                  <input type="file" name="file" accept="application/pdf,image/*" required>
+                  <button class="btn btn-sm" type="submit" style="align-self:flex-start;">Прикрепить счёт/договор</button>
+                </form>`
+            })}
+            ${milestoneRow({
+              done: t.repair_hours!=null,
+              title: t.repair_hours!=null ? "Работа выполнена (" + t.repair_hours + " ч.)" : "Работа ещё не выполнена",
+              body: h`
+                <div class="actions-row">
+                  <input type="number" id="repair-hours-input" data-id="${t.id}" min="0" step="0.5" placeholder="Кол-во часов" value="${t.repair_hours!=null?t.repair_hours:''}" style="max-width:160px;">
+                  <span class="helptext">Часы главного инженера на устранение.</span>
+                  ${feedbackHtml("repair-hours-feedback")}
+                </div>
+                <div class="helptext" style="margin-top:6px;">Фото подтверждения работ — в разделе «Фото» ниже.</div>`
+            })}
+            ${milestoneRow({
+              done: !!t.act_signed,
+              title: t.act_signed ? "Акт подписан" : "Акт ещё не подписан",
+              body: h`
+                ${t.act_signed ? h`<div class="actions-row" style="margin-bottom:8px;">
+                  <button type="button" class="btn btn-sm" data-action="act-open" data-path="${escapeHtml(t.act_file_path||'')}">${escapeHtml(t.act_file_name||'Файл акта')}</button>
+                  <button type="button" class="btn btn-sm btn-ghost" data-action="act-clear" data-id="${t.id}">Снять отметку</button>
+                </div>` : h`
+                <form id="act-form" data-id="${t.id}" style="display:flex;flex-direction:column;gap:6px;">
+                  <input type="file" name="file" accept="application/pdf,image/*" required>
+                  <button class="btn btn-sm" type="submit" style="align-self:flex-start;">Прикрепить акт</button>
+                </form>`}`
+            })}
+            <div class="helptext" style="margin-top:6px;">Когда все 4 пункта отмечены, заявка автоматически переходит в статус «Выполнено».</div>
+          </div>` : ""}
           ${t.status==="onsite" ? h`<div>
             <div class="section-title">Категория (по осмотру)</div>
             <select id="case-select" data-id="${t.id}">
@@ -1779,14 +1987,6 @@
             <div class="kv"><span class="k">Прибыл</span><span class="v">${t.arrived_at? fmtDateShort(t.arrived_at):'—'}</span></div>
             <div class="kv"><span class="k">Категория</span><span class="v">${t.case_type? CASE_LABEL[t.case_type]:'—'}</span></div>
             <div class="kv"><span class="k">Наряд-задание</span><span class="v mono">${workOrderNo(t)}</span></div>
-          </div>
-          <div>
-            <div class="section-title">Табель — часы на устранение</div>
-            <div class="actions-row">
-              <input type="number" id="repair-hours-input" data-id="${t.id}" min="0" step="0.5" placeholder="Кол-во часов" value="${t.repair_hours!=null?t.repair_hours:''}" style="max-width:160px;">
-              <span class="helptext">Заполняет главный инженер по факту устранения.</span>
-              ${feedbackHtml("repair-hours-feedback")}
-            </div>
           </div>
           <div>
             <div class="section-title">Счета</div>
@@ -1881,6 +2081,29 @@
     document.getElementById("me-signout").addEventListener("click", function(){ closeModal(); signOut(); });
   }
 
+  // Раньше дата ожидаемой поставки материалов вводилась через prompt() обычным
+  // текстом ("ГГГГ-ММ-ДД") — по просьбе Антона заменили на настоящий выпадающий
+  // календарь (тот же <input type="date">, что уже использовался в снимке
+  // портфеля выше).
+  function openMaterialsEtaModal(ticketId){
+    var t = state.tickets.find(function(x){return x.id===ticketId;});
+    var todayIso = new Date().toISOString().slice(0,10);
+    openModal(h`
+      <div class="modal" data-stop style="width:380px;">
+        <div class="modal-head"><h2>Ожидание материалов</h2><button class="btn btn-ghost" data-close-modal>✕</button></div>
+        <form id="materials-eta-form">
+          <div class="modal-body">
+            <div class="field"><label>Ожидаемая дата поставки</label><input type="date" name="eta" value="${(t&&t.materials_eta)||todayIso}" required></div>
+            <div class="helptext">Срок устранения по заявке автоматически сдвинется на эту дату.</div>
+          </div>
+          <div class="modal-foot"><button type="button" class="btn" data-close-modal>Отмена</button><button type="submit" class="btn btn-primary">Сохранить</button></div>
+        </form>
+      </div>`);
+    document.getElementById("materials-eta-form").addEventListener("submit", function(e){
+      e.preventDefault(); var fd=new FormData(e.target); var d=fd.get("eta");
+      if(d){ setMaterialsEta(ticketId, d); closeModal(); }
+    });
+  }
   function openPortfolioModal(){
     var pf = state.portfolio || {by_hotel:{}, snapshot_date:new Date().toISOString().slice(0,10)};
     var fields = ["total","submitted","inWork","overdue","done","rejected"];
@@ -1999,9 +2222,16 @@
         if(!name){ alert("Выберите исполнителя из списка (назначьте роль в «Команде» или создайте бригаду в «Бригадах», если список пуст)."); return; }
         assignSpecialist(id,name); return;
       }
+      if(action==="reassign"){
+        var rsel=document.getElementById("reassign-select"); var rname=rsel&&rsel.value;
+        if(!rname){ alert("Выберите нового исполнителя из списка."); return; }
+        reassignSpecialist(id,rname); return;
+      }
       if(action==="arrived") return markArrived(id);
-      if(action==="materials"){ var d=prompt("Ожидаемая дата поставки материалов (ГГГГ-ММ-ДД):"); if(d) setMaterialsEta(id,d); return; }
+      if(action==="materials") return openMaterialsEtaModal(id);
       if(action==="materials-ready-toggle") return setMaterialsReady(id, actionEl.getAttribute("data-val")==="1");
+      if(action==="act-open") return openActFile(actionEl.getAttribute("data-path"));
+      if(action==="act-clear") return clearActSigned(id);
       if(action==="close") return closeTicket(id);
       if(action==="reject"){ var reason=prompt("Причина отклонения (необязательно):")||""; return rejectTicket(id,reason); }
       if(action==="reopen") return reopenTicket(id);
@@ -2082,7 +2312,8 @@
     if(e.target.id==="case-select") setCaseType(e.target.getAttribute("data-id"), e.target.value);
     if(e.target.id==="repair-hours-input"){
       var rh = e.target.value===""?null:Number(e.target.value);
-      saveTicketField(e.target.getAttribute("data-id"), {repair_hours: rh}, "repair-hours-feedback");
+      var rhId = e.target.getAttribute("data-id");
+      saveTicketField(rhId, {repair_hours: rh}, "repair-hours-feedback").then(function(){ if(rh!=null) maybeAutoComplete(rhId); });
     }
     if(e.target.id==="desc-short-input"){
       saveTicketField(e.target.getAttribute("data-id"), {description_short: e.target.value.trim()||null}, "desc-short-feedback");
@@ -2090,15 +2321,6 @@
     if(e.target.matches("[data-crew-rename]")) renameCrew(e.target.getAttribute("data-crew-rename"), e.target.value);
     if(e.target.matches("[data-part-qty]")) updatePartQty(e.target.getAttribute("data-part-qty"), e.target.value);
     if(e.target.matches("[data-profile-role]")){ if(!isOwner()) return; updateProfile(e.target.getAttribute("data-profile-role"), {role:e.target.value}); }
-    if(e.target.matches("[data-profile-zone]")){
-      if(!isOwner()) return;
-      var pid = e.target.getAttribute("data-profile-zone");
-      var m = state.profiles.find(function(p){return p.id===pid;});
-      var zones = (m&&m.zones)? m.zones.slice() : [];
-      var z = Number(e.target.value);
-      if(e.target.checked){ if(zones.indexOf(z)===-1) zones.push(z); } else { zones = zones.filter(function(x){return x!==z;}); }
-      updateProfile(pid, {zones:zones});
-    }
   });
 
   document.addEventListener("submit", function(e){
@@ -2126,6 +2348,23 @@
       if(!files.length){ alert("Выберите одну или несколько фотографий."); return; }
       var ticketId2 = e.target.getAttribute("data-id");
       Promise.all(files.map(function(f){ return uploadPhoto(ticketId2, f); })).then(function(){ e.target.reset(); });
+    }
+    if(e.target.matches(".milestone-attach-form")){
+      e.preventDefault();
+      var mfInput = e.target.querySelector("input[type=file]");
+      var mfile = mfInput && mfInput.files && mfInput.files[0];
+      if(!mfile){ alert("Выберите файл счёта или договора."); return; }
+      var mTicketId = e.target.getAttribute("data-id");
+      var mCategory = e.target.getAttribute("data-category");
+      uploadInvoice(mTicketId, mfile, mCategory).then(function(){ e.target.reset(); });
+    }
+    if(e.target.id==="act-form"){
+      e.preventDefault();
+      var afInput = e.target.querySelector("input[type=file]");
+      var afile = afInput && afInput.files && afInput.files[0];
+      if(!afile){ alert("Выберите файл акта."); return; }
+      var actTicketId = e.target.getAttribute("data-id");
+      uploadActFile(actTicketId, afile).then(function(){ e.target.reset(); });
     }
     if(e.target.id==="part-form"){
       e.preventDefault(); var fd3=new FormData(e.target); if(!fd3.get("name")) return;
