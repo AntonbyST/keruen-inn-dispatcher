@@ -94,6 +94,7 @@
   .card{ background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); }
   .card-pad{ padding:18px 20px; }
   .section-title{ font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-faint); font-weight:600; margin:0 0 12px; }
+  .info-dot{ display:inline-flex; align-items:center; justify-content:center; width:15px; height:15px; border-radius:50%; background:var(--surface-3); border:1px solid var(--line); color:var(--ink-faint); font-size:10px; font-weight:700; font-style:italic; font-family:Georgia,'Times New Roman',serif; text-transform:none; letter-spacing:normal; cursor:help; flex:none; margin-left:5px; user-select:none; vertical-align:middle; }
   .grid-kpi{ display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:14px; margin-bottom:22px; }
   .kpi{ padding:16px 18px; }
   .kpi-label{ font-size:11.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-faint); font-weight:600; }
@@ -124,9 +125,11 @@
   tr.attn-row{ background:var(--crit-soft); }
   tr.attn-row:hover{ filter:brightness(0.97); }
   .photo-grid{ display:flex; flex-wrap:wrap; gap:8px; }
+  .photo-item{ display:flex; flex-direction:column; align-items:center; gap:3px; width:84px; }
   .photo-thumb{ position:relative; width:84px; height:84px; border-radius:8px; border:1px solid var(--line); overflow:hidden; display:flex; align-items:center; justify-content:center; background:var(--surface-3); }
   .photo-thumb img{ width:100%; height:100%; object-fit:cover; display:block; }
   .photo-thumb .photo-del{ position:absolute; top:2px; right:2px; background:rgba(0,0,0,.55); color:#fff; border:none; border-radius:5px; font-size:11px; line-height:1; padding:3px 5px; cursor:pointer; }
+  .photo-date{ font-size:10.5px; color:var(--ink-faint); line-height:1.2; }
   .map-table td, .map-table th{ vertical-align:middle; }
   .import-summary{ display:flex; gap:18px; flex-wrap:wrap; margin:14px 0; }
   .import-summary .stat{ font-size:13px; } .import-summary .stat b{ font-size:18px; display:block; font-family:"IBM Plex Mono",monospace; }
@@ -356,6 +359,10 @@
     if(n1===1) return forms[0];
     return forms[2];
   }
+  // Маленькая иконка "i" в кружочке с пояснением по наведению (title) — для
+  // случаев, когда текст пояснения важен, но не должен быть виден постоянно
+  // и создавать визуальный шум (см. "Ход работ" в карточке заявки).
+  function infoTip(text){ return h`<span class="info-dot" title="${escapeHtml(text)}">i</span>`; }
   function addHours(iso, h){ var d=new Date(iso); d.setHours(d.getHours()+h); return d.toISOString(); }
   function addBusinessDays(iso, n){
     var d = new Date(iso); var added=0;
@@ -761,6 +768,7 @@
   // файл к конкретному пункту чек-листа хода работ в карточке заявки. В «Реестре
   // платежей» показываются ВСЕ счета независимо от категории — категория нужна
   // только для группировки внутри карточки заявки.
+  var INVOICE_CATEGORY_LABEL = { crew:"Бригада", materials:"Материал" };
   function uploadInvoice(ticketId, file, category){
     var path = ticketId + "/" + Date.now() + "_" + file.name.replace(/[^\w.\-]+/g,"_");
     return readFileAsBuffer(file).then(function(buf){
@@ -773,6 +781,8 @@
         uploaded_by: myLabel(), in_registry: true, added_to_registry_at: new Date().toISOString(),
         extra: { responsible: myLabel() }
       });
+    }).then(function(){
+      addNote(ticketId, "Прикреплён файл («"+(INVOICE_CATEGORY_LABEL[category]||"Счета")+"»): "+file.name+".");
     }).catch(function(err){
       alert("Не удалось загрузить счёт: " + (err&&err.message?err.message:err));
     });
@@ -785,9 +795,12 @@
   }
   function deleteInvoice(invoiceId, path){
     if(!confirm("Удалить этот файл?")) return;
+    var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
     sb.storage.from("invoices").remove([path]).then(function(){
       return sb.from("invoices").delete().eq("id", invoiceId);
-    }).then(function(){});
+    }).then(function(){
+      if(iv) addNote(iv.ticket_id, "Удалён файл («"+(INVOICE_CATEGORY_LABEL[iv.category]||"Счета")+"»): "+iv.file_name+".");
+    });
   }
 
   // Фото по заявке — рабочий инструмент (до/после, подтверждение выполненных
@@ -802,17 +815,21 @@
       return sb.storage.from("ticket-photos").upload(path, buf, {contentType: file.type || "application/octet-stream"});
     }).then(function(res){
       if(res.error) throw res.error;
-      return sb.from("ticket_photos").insert({ ticket_id: ticketId, file_path: path, file_name: file.name, uploaded_by: myLabel() });
+      return sb.from("ticket_photos").insert({ ticket_id: ticketId, file_path: path, file_name: file.name, uploaded_by: myLabel(), uploaded_at: new Date().toISOString() });
+    }).then(function(){
+      addNote(ticketId, "Прикреплено фото: "+file.name+".");
     }).catch(function(err){
       alert("Не удалось загрузить фото: " + (err&&err.message?err.message:err));
     });
   }
   function deletePhoto(photoId, path){
     if(!confirm("Удалить это фото?")) return;
+    var ph = (state.photos||[]).find(function(x){ return x.id===photoId; });
     sb.storage.from("ticket-photos").remove([path]).then(function(){
       return sb.from("ticket_photos").delete().eq("id", photoId);
     }).then(function(){
       delete photoUrlCache[path];
+      if(ph) addNote(ph.ticket_id, "Удалено фото: "+ph.file_name+".");
     });
   }
   // Бакет с фото приватный, поэтому для показа миниатюр нужна временная
@@ -874,15 +891,25 @@
       render();
     });
   }
-  function loadNotesFor(ticketId){
+  var notesChannelTicketId = null;
+  function fetchNotes(ticketId){
     sb.from("ticket_notes").select("*").eq("ticket_id", ticketId).order("created_at",{ascending:true}).then(function(res){
       state.ticketNotes = res.data || [];
       renderTicketPanel();
     });
+  }
+  function loadNotesFor(ticketId){
+    fetchNotes(ticketId);
+    // подписываемся на realtime только один раз на заявку — раньше здесь при
+    // каждом вызове (в т.ч. из самого realtime-колбэка) пересоздавалась новая
+    // подписка, а старая не всегда успевала быть снята, что при активной
+    // работе с журналом (много записей подряд) плодило дублирующиеся каналы.
+    if(notesChannelTicketId === ticketId) return;
     if(notesChannel) sb.removeChannel(notesChannel);
+    notesChannelTicketId = ticketId;
     notesChannel = sb.channel("notes-"+ticketId).on("postgres_changes",
       {event:"*", schema:"public", table:"ticket_notes", filter:"ticket_id=eq."+ticketId},
-      function(){ loadNotesFor(ticketId); }
+      function(){ fetchNotes(ticketId); }
     ).subscribe();
   }
 
@@ -929,22 +956,26 @@
 
   /* ============================== DEADLINES ============================== */
   function deadlineInfo(t){
+    // label — с пояснением ("Прибытие к…"/"Устранение к…"), используется там,
+    // где колонка/поле само по себе не называется "Срок" (карточка заявки,
+    // экспорт). dateLabel — голая дата без пояснения, для колонки "Срок" в
+    // списках (там пояснение излишне, только дата).
     var now = Date.now();
-    if(t.status==="closed" || t.status==="rejected") return {label:"—", overdue:false, done:true};
+    if(t.status==="closed" || t.status==="rejected") return {label:"—", dateLabel:"—", overdue:false, done:true};
     if(t.status==="new" || t.status==="dispatched"){
       var ms = new Date(t.arrival_deadline).getTime()-now;
-      return {label:"Прибытие к "+fmtDateShort(t.arrival_deadline), overdue: ms<0, soon: ms>0 && ms<4*3600*1000, ms:ms, kind:"arrival"};
+      return {label:"Прибытие к "+fmtDateShort(t.arrival_deadline), dateLabel:fmtDateShort(t.arrival_deadline), overdue: ms<0, soon: ms>0 && ms<4*3600*1000, ms:ms, kind:"arrival"};
     }
     if(t.status==="onsite"){
       // Срок устранения теперь берётся ТОЛЬКО из данных c-lector (колонка при
       // импорте) — платформа сама его больше не считает и не сдвигает. Если
       // в c-lector этот срок не указан/не сопоставлен при импорте, честно
       // показываем, что данных нет, а не подставляем свою дату.
-      if(!t.resolution_deadline) return {label:"Срок не указан (нет данных c-lector)", overdue:false, kind:"resolution"};
+      if(!t.resolution_deadline) return {label:"Срок не указан (нет данных c-lector)", dateLabel:"Срок не указан", overdue:false, kind:"resolution"};
       var ms2 = new Date(t.resolution_deadline).getTime()-now;
-      return {label:"Устранение к "+fmtDate(t.resolution_deadline), overdue: ms2<0, soon: ms2>0 && ms2<24*3600*1000, ms:ms2, kind:"resolution"};
+      return {label:"Устранение к "+fmtDate(t.resolution_deadline), dateLabel:fmtDateShort(t.resolution_deadline), overdue: ms2<0, soon: ms2>0 && ms2<24*3600*1000, ms:ms2, kind:"resolution"};
     }
-    return {label:"—", overdue:false};
+    return {label:"—", dateLabel:"—", overdue:false};
   }
   // ВАЖНО: раньше здесь проверялся только внутренний t.status ("closed"/"rejected"),
   // без учёта реального статуса из c-lector (t.external_status, например
@@ -977,7 +1008,16 @@
   // ручного создания заявки в платформе больше нет, так как источник один.
   function myLabel(){ return (state.me && (state.me.name||state.me.email)) || "—"; }
   function addNote(ticketId, text){
-    return sb.from("ticket_notes").insert({ticket_id:ticketId, author:myLabel(), note_text:text});
+    // не полагаемся только на realtime-канал notes-* (может запаздывать или не
+    // сработать, если для ticket_notes republication/RLS настроены не так, как
+    // для остальных таблиц) — как только запись реально сохранена, сразу же
+    // перезапрашиваем журнал открытой заявки, чтобы запись гарантированно
+    // появилась в интерфейсе немедленно.
+    return sb.from("ticket_notes").insert({ticket_id:ticketId, author:myLabel(), note_text:text}).then(function(res){
+      if(res && res.error){ console.error("addNote failed:", res.error); }
+      else if(state.selectedTicketId===ticketId){ loadNotesFor(ticketId); }
+      return res;
+    });
   }
   function assignSpecialist(id, name){
     sb.from("tickets").update({assigned_to:name, status:"dispatched"}).eq("id",id).then(function(){
@@ -1120,21 +1160,11 @@
       addNote(id, val ? ("Поставлена пометка «особое внимание»."+(note?" "+note:"")) : "Пометка «особое внимание» снята.");
     });
   }
-  function closeTicket(id){
-    sb.from("tickets").update({status:"closed", closed_at:new Date().toISOString()}).eq("id",id).then(function(){
-      addNote(id, "Заявка закрыта, акт об устранении подписан.");
-    });
-  }
-  function rejectTicket(id, reason){
-    sb.from("tickets").update({status:"rejected", closed_at:new Date().toISOString(), case_type:"unfounded"}).eq("id",id).then(function(){
-      addNote(id, "Заявка отклонена."+(reason?" Причина: "+reason:""));
-    });
-  }
-  function reopenTicket(id){
-    sb.from("tickets").update({status:"onsite", closed_at:null}).eq("id",id).then(function(){
-      addNote(id, "Заявка переоткрыта.");
-    });
-  }
+  // Ручного закрытия/отклонения/переоткрытия заявки в приложении больше нет
+  // (по решению Антона) — заявка закрывается либо автоматически, когда
+  // выполнены все 4 пункта "Ход работ" (см. maybeAutoComplete выше), либо
+  // когда следующая выгрузка из c-lector.ru покажет её закрытой/отклонённой
+  // (t.external_status — см. isTicketDone/isActive).
   function clearDemo(){
     sb.from("tickets").delete().eq("demo", true).then(function(){});
   }
@@ -1170,11 +1200,14 @@
     return h`<span id="${id}" class="helptext mono" style="color:${f.ok?'var(--ok)':'var(--crit)'};">${escapeHtml(f.text)}</span>`;
   }
   function saveWithFeedback(promise, feedbackElId){
+    // возвращает true/false (сохранилось или нет) — используется вызывающим
+    // кодом, чтобы не писать в журнал запись об "изменении", если сохранение
+    // на самом деле не удалось.
     return promise.then(function(res){
       if(res && res.error){
         if(feedbackElId){ fieldFeedback[feedbackElId] = {text:"Ошибка: "+res.error.message, ok:false}; render(); }
         else alert("Не удалось сохранить: "+res.error.message);
-        return;
+        return false;
       }
       if(feedbackElId){
         fieldFeedback[feedbackElId] = {text:"Сохранено", ok:true};
@@ -1183,10 +1216,12 @@
           if(fieldFeedback[feedbackElId] && fieldFeedback[feedbackElId].text==="Сохранено"){ delete fieldFeedback[feedbackElId]; render(); }
         }, 2000);
       }
+      return true;
     }).catch(function(err){
       var msg = err && err.message ? err.message : String(err);
       if(feedbackElId){ fieldFeedback[feedbackElId] = {text:"Ошибка: "+msg, ok:false}; render(); }
       else alert("Не удалось сохранить: "+msg);
+      return false;
     });
   }
   function saveTicketField(id, patch, feedbackElId){ return saveWithFeedback(sb.from("tickets").update(patch).eq("id", id), feedbackElId); }
@@ -1372,9 +1407,12 @@
       ensurePhotoUrl(p.file_path);
       var url = photoUrlCache[p.file_path];
       var inner = (url && url!=="pending") ? h`<img src="${url}" alt="${escapeHtml(p.file_name)}">` : h`<span class="muted" style="font-size:10.5px;">…</span>`;
-      return h`<div class="photo-thumb" title="${escapeHtml(p.file_name)} · ${escapeHtml(p.uploaded_by||'—')}" data-action="photo-open" data-path="${escapeHtml(p.file_path)}" style="cursor:pointer;">
-        ${inner}
-        <button type="button" class="photo-del" data-action="photo-delete" data-id="${p.id}" data-path="${escapeHtml(p.file_path)}" title="Удалить фото">✕</button>
+      return h`<div class="photo-item">
+        <div class="photo-thumb" title="${escapeHtml(p.file_name)} · ${escapeHtml(p.uploaded_by||'—')} · ${escapeHtml(fmtDate(p.uploaded_at))}" data-action="photo-open" data-path="${escapeHtml(p.file_path)}" style="cursor:pointer;">
+          ${inner}
+          <button type="button" class="photo-del" data-action="photo-delete" data-id="${p.id}" data-path="${escapeHtml(p.file_path)}" title="Удалить фото">✕</button>
+        </div>
+        <div class="photo-date">${escapeHtml(fmtDateShort(p.uploaded_at))}</div>
       </div>`;
     }).join("")}</div>`;
   }
@@ -1428,13 +1466,12 @@
     var closedWeek = closedSinceLastWeek();
     var group1Active = active.filter(function(t){ return t.ticket_group===1; });
     var demoCount = state.tickets.filter(function(t){return t.demo;}).length;
-    // Заявки с ручной пометкой "особое внимание" всегда идут первыми в этом виджете,
-    // независимо от срока — иначе флаг от руководителя/заказчика мог бы затеряться
-    // за более срочными по дедлайну заявками.
-    var attention = active.slice().sort(function(a,b){
-      if(!!b.attention_flag !== !!a.attention_flag) return (b.attention_flag?1:0)-(a.attention_flag?1:0);
+    // "Требуют внимания" — строго заявки с ручной пометкой "особое внимание"
+    // (руководитель/заказчик заинтересовался), а не вообще все активные заявки
+    // по сроку — иначе виджет было не отличить от обычного списка заявок.
+    var attention = active.filter(function(t){ return !!t.attention_flag; }).sort(function(a,b){
       var da=deadlineInfo(a), dbi=deadlineInfo(b); var ma=da.ms==null?Infinity:da.ms, mb=dbi.ms==null?Infinity:dbi.ms; return ma-mb;
-    }).slice(0,6);
+    });
     var byZone = {1:0,2:0,3:0}; active.forEach(function(t){ if(t.zone) byZone[t.zone]=(byZone[t.zone]||0)+1; });
     var pf = state.portfolio; var pfTotal = {total:0,submitted:0,inWork:0,overdue:0,done:0,rejected:0};
     if(pf && pf.by_hotel){ Object.keys(pf.by_hotel).forEach(function(k){ var r=pf.by_hotel[k]; Object.keys(pfTotal).forEach(function(f){ pfTotal[f]+=(r[f]||0); }); }); }
@@ -1452,7 +1489,7 @@
         <div class="two-col">
           <div class="card card-pad">
             <div class="section-title">Требуют внимания</div>
-            ${attention.length===0 ? h`<div class="empty-state"><b>Нет активных заявок</b>Загрузите заявки в разделе «Импорт из c-lector».</div>` : h`
+            ${attention.length===0 ? h`<div class="empty-state"><b>Нет заявок с пометкой «особое внимание»</b>Пометка ставится вручную в карточке заявки.</div>` : h`
             <div class="table-wrap"><table><thead><tr><th>№ c-lector</th><th>Отель</th><th>Описание</th><th>Статус</th><th>Срок</th></tr></thead><tbody>
               ${attention.map(function(t){ var hotel=hotelById(t.hotel_id); var di=deadlineInfo(t);
                 return h`<tr data-open-ticket="${t.id}" ${t.attention_flag?'class="attn-row"':''}>
@@ -1460,7 +1497,7 @@
                   <td><span class="ttl">№${hotel.id} ${hotel.name}</span> ${zoneBadge(t.zone)}</td>
                   <td>${escapeHtml(displayShort(t)).slice(0,54)}${displayShort(t).length>54?"…":""}</td>
                   <td>${t.external_status? externalStatusPill(t.external_status): statusPill(t.status)}</td>
-                  <td style="${di.overdue?'color:var(--crit);font-weight:600;':(di.soon?'color:var(--warn);font-weight:600;':'')}">${di.label}</td>
+                  <td style="${di.overdue?'color:var(--crit);font-weight:600;':(di.soon?'color:var(--warn);font-weight:600;':'')}" title="${escapeHtml(di.label)}">${di.dateLabel}</td>
                 </tr>`; }).join("")}
             </tbody></table></div>`}
           </div>
@@ -1601,7 +1638,7 @@
               </td>
               <td>${escapeHtml(displayShort(t)).slice(0,60)}${displayShort(t).length>60?"…":""}</td>
               <td>${t.external_status? externalStatusPill(t.external_status): statusPill(t.status)}</td>
-              <td style="${di.overdue?'color:var(--crit);font-weight:600;':(di.soon?'color:var(--warn);font-weight:600;':'')}">${di.label}</td>
+              <td style="${di.overdue?'color:var(--crit);font-weight:600;':(di.soon?'color:var(--warn);font-weight:600;':'')}" title="${escapeHtml(di.label)}">${di.dateLabel}</td>
             </tr>`; }).join("")}
         </tbody></table></div></div>`;
   }
@@ -2063,7 +2100,7 @@
   /* ============================== TICKET PANEL ============================== */
   function renderTicketPanel(){
     var root = document.getElementById("overlay-root");
-    if(!state.selectedTicketId){ root.innerHTML=""; if(notesChannel){ sb.removeChannel(notesChannel); notesChannel=null; } return; }
+    if(!state.selectedTicketId){ root.innerHTML=""; if(notesChannel){ sb.removeChannel(notesChannel); notesChannel=null; notesChannelTicketId=null; } return; }
     var t = state.tickets.find(function(x){return x.id===state.selectedTicketId;});
     if(!t){ root.innerHTML=""; return; }
     var hotel = hotelById(t.hotel_id); var di = deadlineInfo(t);
@@ -2080,7 +2117,6 @@
                 <span style="font-size:12px;color:var(--ink-faint);font-weight:600;white-space:nowrap;">· ${t.zone? ("Зона "+escapeHtml(String(t.zone))) : "стройка"}</span>
               </span>
               <span style="display:flex;align-items:center;gap:6px;flex:none;">
-                ${t.attention_flag?attentionBadge(t):''}
                 ${t.external_status? externalStatusPill(t.external_status): statusPill(t.status)}
               </span>
             </div>
@@ -2090,16 +2126,16 @@
           <button class="btn btn-ghost panel-close" data-close-panel>✕</button>
         </div>
         <div class="panel-body">
-          <div class="actions-row">
+          <div class="actions-row" style="align-items:center;">
             <button class="btn btn-sm ${t.attention_flag?'btn-danger':''}" data-action="attention-toggle" data-id="${t.id}" data-val="${t.attention_flag?'0':'1'}">${t.attention_flag?'Снять пометку «особое внимание»':'Пометить: особое внимание'}</button>
+            ${t.attention_flag && t.attention_note ? h`<span class="muted" style="font-size:12.5px;">${escapeHtml(t.attention_note)}</span>` : ""}
           </div>
-          ${t.attention_flag ? h`<div class="deadline-box overdue" style="margin-top:-4px;"><div style="font-weight:600;">Особое внимание</div>${t.attention_note ? h`<div class="helptext" style="margin-top:2px;">${escapeHtml(t.attention_note)}</div>` : ""}</div>` : ""}
           <div><div class="section-title">Описание</div>
             <div style="display:flex;align-items:baseline;gap:8px;">
               <div style="font-size:14.5px;font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(displayShort(t))}">${escapeHtml(displayShort(t))}${!t.description_short?h` <span class="muted" style="font-weight:400;font-size:11px;">(черновик)</span>`:''}</div>
               <button type="button" class="btn btn-ghost btn-sm" data-action="toggle-desc-edit" data-id="${t.id}" style="padding:2px 8px;flex:none;" title="Изменить формулировку «Сути»">✎</button>
             </div>
-            <div class="line-clamp-2 muted" style="font-size:12.5px;margin-top:2px;" title="${escapeHtml(t.description)}">${escapeHtml(t.description)}</div>
+            <div class="muted" style="font-size:12.5px;margin-top:2px;white-space:pre-wrap;">${escapeHtml(t.description)}</div>
             ${state.editingDescShort ? h`
               <div style="margin-top:6px;">
                 <label for="desc-short-input">Суть (краткая формулировка)</label>
@@ -2109,7 +2145,7 @@
               </div>` : ''}
           </div>
           <div>
-            <div class="section-title">Ход работ</div>
+            <div class="section-title">Ход работ ${infoTip("Значок пункта можно отметить кликом вручную (для случаев, когда что-то по факту сделано, а подтверждения в системе нет) — кроме случаев, когда пункт уже выполнен реальным действием (назначен исполнитель, приложено фото, прикреплён файл акта): тогда значок просто показывает это и вручную не снимается. В обоих случаях тот же значок сразу подсвечивается вверху карточки, у номера заявки. Когда отмечены все 4 пункта, заявка автоматически переходит в статус «Выполнено».")}</div>
             ${(function(){
               var crewFiles = invoicesFor(t, "crew").length;
               var materialsFiles = invoicesFor(t, "materials").length;
@@ -2136,6 +2172,15 @@
                   ${crewFiles ? h`<span class="milestone-meta">${crewFiles} ${ruPlural(crewFiles,["файл","файла","файлов"])}</span>` : ""}
                   ${milestoneAttachControl({cls:"ms-quick-attach", id:t.id, category:"crew", accept:"application/pdf,image/*", multiple:true, title:"Прикрепить счёт/договор (можно сразу несколько)"})}`,
                 body: h`
+                  ${t.status==="new" ? h`
+                  <div class="actions-row" style="margin-bottom:8px;">
+                    <select id="assign-select" style="max-width:240px;">
+                      <option value="">Выбрать исполнителя…</option>
+                      ${specialists.length ? h`<optgroup label="Главные инженеры">${specialists.map(function(s){return h`<option value="${escapeHtml(s.name||s.email)}">${escapeHtml(s.name||s.email)}</option>`;}).join("")}</optgroup>` : ""}
+                      ${state.crews.length ? h`<optgroup label="Бригады">${state.crews.map(function(c){return h`<option value="Бригада: ${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`;}).join("")}</optgroup>` : ""}
+                    </select>
+                    <button class="btn btn-primary btn-sm" data-action="assign" data-id="${t.id}">Назначить</button>
+                  </div>` : ""}
                   ${(t.status==="dispatched"||t.status==="onsite") ? h`
                   <div class="actions-row" style="margin-bottom:8px;">
                     <select id="reassign-select" style="max-width:240px;">
@@ -2144,7 +2189,9 @@
                       ${state.crews.length ? h`<optgroup label="Бригады">${state.crews.map(function(c){return h`<option value="Бригада: ${escapeHtml(c.name)}" ${t.assigned_to===("Бригада: "+c.name)?'selected':''}>${escapeHtml(c.name)}</option>`;}).join("")}</optgroup>` : ""}
                     </select>
                     <button class="btn btn-sm" data-action="reassign" data-id="${t.id}">Сменить</button>
+                    ${t.status==="dispatched" ? h`<button class="btn btn-sm" data-action="arrived" data-id="${t.id}">Отметить прибытие</button>` : ""}
                   </div>` : ""}
+                  ${t.assigned_to ? h`<div class="actions-row" style="margin-bottom:8px;"><a class="btn btn-sm" href="#/workorder/${t.id}">Наряд-задание</a></div>` : ""}
                   ${crewManual && !crewReal ? h`<div class="helptext" style="margin-bottom:8px;">Отмечено вручную, без назначения в приложении.</div>` : ""}
                   ${milestoneInvoiceList(t, "crew")}`
               })}
@@ -2159,6 +2206,7 @@
                   ${materialsFiles ? h`<span class="milestone-meta">${materialsFiles} ${ruPlural(materialsFiles,["файл","файла","файлов"])}</span>` : ""}
                   ${milestoneAttachControl({cls:"ms-quick-attach", id:t.id, category:"materials", accept:"application/pdf,image/*", multiple:true, title:"Прикрепить счёт/накладную (можно сразу несколько)"})}`,
                 body: h`
+                  ${t.status==="onsite" ? h`<div class="actions-row" style="margin-bottom:8px;"><button class="btn btn-sm" data-action="materials" data-id="${t.id}">Нужны материалы…</button></div>` : ""}
                   ${milestoneInvoiceList(t, "materials")}`
               })}
               ${milestoneRow({
@@ -2194,31 +2242,12 @@
                   </div>` : (actDone ? h`<div class="helptext">Отмечено вручную, без файла.</div>` : h`<div class="muted" style="font-size:12.5px;">Акт ещё не прикреплён.</div>`)
               })}`;
             })()}
-            <div class="helptext" style="margin-top:6px;">Значок пункта можно отметить кликом вручную (для случаев, когда что-то по факту сделано, а подтверждения в системе нет) — кроме случаев, когда пункт уже выполнен реальным действием (назначен исполнитель, приложено фото, прикреплён файл акта): тогда значок просто показывает это и вручную не снимается. В обоих случаях тот же значок сразу подсвечивается вверху карточки, у номера заявки. Когда отмечены все 4 пункта, заявка автоматически переходит в статус «Выполнено».</div>
           </div>
           ${!di.done ? h`<div class="deadline-box ${di.overdue?'overdue':(di.soon?'soon':'')}">
             <div style="font-weight:600;">${di.label}</div>
             <div class="helptext" style="margin-top:2px;">${di.kind==='arrival'?'Срок прибытия главного инженера по зоне логистики.':'Срок устранения — приходит из c-lector при импорте, платформа его не рассчитывает.'}</div>
             ${t.materials_wait ? h`<div class="helptext" style="margin-top:4px;">Ожидаются материалы (срок поставки: ${fmtDateShort(t.materials_eta)}).</div>` : ""}
           </div>` : ""}
-          <div>
-            <div class="section-title">Действия</div>
-            <div class="actions-row">
-              ${t.status==="new" ? h`
-                <select id="assign-select" style="max-width:240px;">
-                  <option value="">Выбрать исполнителя…</option>
-                  ${specialists.length ? h`<optgroup label="Главные инженеры">${specialists.map(function(s){return h`<option value="${escapeHtml(s.name||s.email)}">${escapeHtml(s.name||s.email)}</option>`;}).join("")}</optgroup>` : ""}
-                  ${state.crews.length ? h`<optgroup label="Бригады">${state.crews.map(function(c){return h`<option value="Бригада: ${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`;}).join("")}</optgroup>` : ""}
-                </select>
-                <button class="btn btn-primary btn-sm" data-action="assign" data-id="${t.id}">Назначить</button>` : ""}
-              ${t.status==="dispatched" ? h`<button class="btn btn-primary btn-sm" data-action="arrived" data-id="${t.id}">Отметить прибытие</button>`:""}
-              ${t.status==="onsite" ? h`<button class="btn btn-sm" data-action="materials" data-id="${t.id}">Нужны материалы…</button>
-                <button class="btn btn-primary btn-sm" data-action="close" data-id="${t.id}" ${!t.case_type?'disabled':''}>Закрыть заявку</button>`:""}
-              ${t.assigned_to ? h`<a class="btn btn-sm" href="#/workorder/${t.id}">Наряд-задание</a>` : ""}
-              ${(t.status==="dispatched"||t.status==="onsite") ? h`<button class="btn btn-sm btn-danger" data-action="reject" data-id="${t.id}">Отклонить</button>`:""}
-              ${(t.status==="closed"||t.status==="rejected") ? h`<button class="btn btn-sm" data-action="reopen" data-id="${t.id}">Переоткрыть</button>`:""}
-            </div>
-          </div>
           ${t.status==="onsite" ? h`<div>
             <div class="section-title">Категория (по осмотру)</div>
             <select id="case-select" data-id="${t.id}">
@@ -2227,7 +2256,7 @@
               <option value="nonwarranty" ${t.case_type==='nonwarranty'?'selected':''}>Негарантийный случай</option>
               <option value="unfounded" ${t.case_type==='unfounded'?'selected':''}>Необоснованная заявка</option>
             </select>
-            <div class="helptext">Нужна для закрытия заявки — влияет на оплату по Регламенту (п.5.1–5.4).</div>
+            <div class="helptext">Влияет на расчёт оплаты по Регламенту (п.5.1–5.4).</div>
           </div>` : ""}
           <div>
             <div class="section-title">Карточка заявки</div>
@@ -2455,9 +2484,6 @@
       if(action==="act-signed-toggle") return setActSigned(id, actionEl.getAttribute("data-val")==="1");
       if(action==="act-open") return openActFile(actionEl.getAttribute("data-path"));
       if(action==="act-clear") return clearActSigned(id);
-      if(action==="close") return closeTicket(id);
-      if(action==="reject"){ var reason=prompt("Причина отклонения (необязательно):")||""; return rejectTicket(id,reason); }
-      if(action==="reopen") return reopenTicket(id);
       if(action==="invoice-open") return openInvoiceFile(actionEl.getAttribute("data-path"));
       if(action==="invoice-delete") return deleteInvoice(id, actionEl.getAttribute("data-path"));
       if(action==="registry-export") return exportRegistryExcel();
@@ -2544,10 +2570,18 @@
     if(e.target.id==="repair-hours-input"){
       var rh = e.target.value===""?null:Number(e.target.value);
       var rhId = e.target.getAttribute("data-id");
-      saveTicketField(rhId, {repair_hours: rh}, "repair-hours-feedback").then(function(){ if(rh!=null) maybeAutoComplete(rhId); });
+      saveTicketField(rhId, {repair_hours: rh}, "repair-hours-feedback").then(function(ok){
+        if(!ok) return;
+        if(rh!=null) maybeAutoComplete(rhId);
+        addNote(rhId, rh!=null ? ("Указаны часы главного инженера на устранение: "+rh+".") : "Часы главного инженера на устранение сброшены.");
+      });
     }
     if(e.target.id==="desc-short-input"){
-      saveTicketField(e.target.getAttribute("data-id"), {description_short: e.target.value.trim()||null}, "desc-short-feedback");
+      var dsId = e.target.getAttribute("data-id"), dsVal = e.target.value.trim()||null;
+      saveTicketField(dsId, {description_short: dsVal}, "desc-short-feedback").then(function(ok){
+        if(!ok) return;
+        addNote(dsId, dsVal ? ("Изменена формулировка «Сути»: "+dsVal) : "Формулировка «Сути» очищена.");
+      });
     }
     if(e.target.matches("[data-crew-rename]")) renameCrew(e.target.getAttribute("data-crew-rename"), e.target.value);
     if(e.target.matches("[data-part-qty]")) updatePartQty(e.target.getAttribute("data-part-qty"), e.target.value);
