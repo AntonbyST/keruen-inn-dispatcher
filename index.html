@@ -424,6 +424,31 @@
     for(var i=0;i<hlist.length;i++){ var hn = normalizeForMatch(hlist[i].name); if(hn && (n.indexOf(hn)>-1 || hn.indexOf(n)>-1)) return hlist[i]; }
     return null;
   }
+  // Даты из выгрузки c-lector приходят в привычном для СНГ формате ДД.MM.ГГГГ
+  // (иногда через "/", иногда с временем через пробел) — родной JS Date() либо
+  // вообще не распознаёт точечный разделитель (Invalid Date), либо для
+  // "09/01/2026" молча читает его как ММ/ДД/ГГГГ (американский порядок), что
+  // для нашего формата даёт неверную дату без единой ошибки на экране (именно
+  // так "16.09" от c-lector могло стать совсем другим числом после импорта).
+  // Разбираем день.месяц.год явно; всё остальное (ISO "2026-09-16" и то, что
+  // уже пришло валидным ISO-таймстампом) отдаём встроенному парсеру — там
+  // порядок компонентов однозначен.
+  function parseCLectorDate(raw){
+    var s = String(raw==null?"":raw).trim();
+    if(!s) return null;
+    var m = s.match(/^(\d{1,2})[.\/](\d{1,2})[.\/](\d{2,4})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+    if(m){
+      var day = Number(m[1]), month = Number(m[2]), year = Number(m[3]);
+      if(year<100) year += 2000;
+      if(month>=1 && month<=12 && day>=1 && day<=31){
+        var d = new Date(Date.UTC(year, month-1, day, m[4]?Number(m[4]):0, m[5]?Number(m[5]):0, m[6]?Number(m[6]):0));
+        if(!isNaN(d.getTime())) return d;
+      }
+      return null; // похоже на дату, но день/месяц вне диапазона — не гадаем
+    }
+    var d2 = new Date(s);
+    return isNaN(d2.getTime()) ? null : d2;
+  }
   function parseDelimited(text){
     var lines = String(text||"").split(/\r\n|\r|\n/).filter(function(l){ return l.trim()!==""; });
     if(!lines.length) return {headers:[], rows:[]};
@@ -519,7 +544,8 @@
       var extRef = get("external_ref"), hotelName = get("hotel"), desc = get("description"), groupRaw = get("group"), dateRaw = get("created_at"), statusRaw = get("status"), deadlineRaw = get("deadline");
       // "Срок устранения" считаем только тем, что реально пришло из c-lector —
       // никакой локальной подмены/расчёта; не распозналась дата — оставляем пусто.
-      var deadlineIso = deadlineRaw && !isNaN(new Date(deadlineRaw).getTime()) ? new Date(deadlineRaw).toISOString() : null;
+      var deadlineParsed = parseCLectorDate(deadlineRaw);
+      var deadlineIso = deadlineParsed ? deadlineParsed.toISOString() : null;
       var hotel = matchHotelByName(hotelName);
       var existingTicket = hasExt && extRef ? existingRefs[extRef] : null;
       var isDupe = !!existingTicket;
@@ -552,7 +578,8 @@
 
     var payloads = toInsert.map(function(r){
       var g = Number(r.groupRaw); if([1,2,3].indexOf(g)===-1) g = 2;
-      var createdAt = r.dateRaw && !isNaN(new Date(r.dateRaw).getTime()) ? new Date(r.dateRaw).toISOString() : now;
+      var createdDate = parseCLectorDate(r.dateRaw);
+      var createdAt = createdDate ? createdDate.toISOString() : now;
       return {
         hotel_id: r.hotel.id, zone: r.hotel.zone, ticket_group: g,
         description: r.description,
@@ -988,6 +1015,28 @@
       if(val) maybeAutoComplete(id);
     });
   }
+  // Ручные флажки "Бригада"/"Работа" — для случаев, когда что-то по факту уже
+  // сделано (например, замечание устранили на месте), а формального
+  // подтверждения в системе нет и заводить его прямо сейчас смысла нет
+  // (никто не назначал бригаду через приложение, фото никто не сделал).
+  // В отличие от реальных признаков (t.assigned_to / наличие фото), этот
+  // флажок не появляется на кнопке "Назначить"/в разделе "Действия" — это
+  // отдельная, чисто визуальная отметка "выполнено", доступная только через
+  // клик по значку пункта в "Ход работ" (см. milestoneRow в renderTicketPanel),
+  // и только пока нет настоящего признака (тогда значок вместо этого просто
+  // показывает реальное состояние и не кликабелен).
+  function setCrewManualDone(id, val){
+    sb.from("tickets").update({crew_manual_done:val}).eq("id",id).then(function(){
+      addNote(id, val ? "Бригада отмечена выполненной вручную (без назначения в приложении)." : "Ручная отметка «бригада» снята.");
+      if(val) maybeAutoComplete(id);
+    });
+  }
+  function setWorkManualDone(id, val){
+    sb.from("tickets").update({work_manual_done:val}).eq("id",id).then(function(){
+      addNote(id, val ? "Работа отмечена выполненной вручную (без фото)." : "Ручная отметка «работа» снята.");
+      if(val) maybeAutoComplete(id);
+    });
+  }
   // Акт — четвёртый пункт чек-листа хода работ. В отличие от трёх остальных,
   // хранится отдельным полем (act_signed), а не выводится из статуса заявки —
   // иначе автопереход "все 4 пункта -> статус Выполнено" ниже был бы замкнут сам
@@ -1007,9 +1056,23 @@
     });
   }
   function clearActSigned(id){
-    if(!confirm("Снять отметку «акт подписан»? Прикреплённый файл акта останется доступным по ссылке, но перестанет учитываться как подтверждение.")) return;
+    var t = state.tickets.find(function(x){return x.id===id;});
+    var msg = (t && t.act_file_path)
+      ? "Снять отметку «акт подписан»? Прикреплённый файл акта останется доступным по ссылке, но перестанет учитываться как подтверждение."
+      : "Снять ручную отметку «акт подписан»?";
+    if(!confirm(msg)) return;
     sb.from("tickets").update({act_signed:false}).eq("id",id).then(function(){
       addNote(id, "Отметка «акт подписан» снята.");
+    });
+  }
+  // Быстрая ручная отметка "акт подписан" прямо по клику на значок пункта
+  // (см. setCrewManualDone/setWorkManualDone выше) — доступна только пока файл
+  // акта не прикреплён; как только файл есть, снимать отметку нужно через
+  // кнопку "Снять отметку" внутри пункта (clearActSigned, с подтверждением).
+  function setActSigned(id, val){
+    sb.from("tickets").update({act_signed:val}).eq("id",id).then(function(){
+      addNote(id, val ? "Акт отмечен подписанным вручную (без файла)." : "Ручная отметка «акт» снята.");
+      if(val) maybeAutoComplete(id);
     });
   }
   function openActFile(path){
@@ -1037,7 +1100,13 @@
       var t = results[0].data; if(!t) return;
       var photos = results[1].data || [];
       if(t.status==="closed" || t.status==="rejected") return;
-      var allDone = !!t.assigned_to && !!t.materials_ready && photos.length>0 && !!t.act_signed;
+      // Каждый из 4 пунктов теперь может быть выполнен либо реальным действием
+      // (назначена бригада / есть фото / прикреплён файл акта), либо вручную
+      // отмечен как выполненный (см. crew_manual_done/work_manual_done и
+      // act_signed без файла — setCrewManualDone/setWorkManualDone/setActSigned)
+      // для случаев, когда что-то по факту сделано, а подтверждения в системе
+      // нет. "Материал" — как и раньше, всегда просто ручной флажок.
+      var allDone = (!!t.assigned_to || !!t.crew_manual_done) && !!t.materials_ready && (photos.length>0 || !!t.work_manual_done) && !!t.act_signed;
       if(!allDone) return;
       sb.from("tickets").update({status:"closed", closed_at:new Date().toISOString()}).eq("id",id).then(function(){
         addNote(id, "Все 4 пункта выполнены (бригада, материал, работа, акт) — статус автоматически изменён на «Закрыта»."+(!t.case_type?" Категория по осмотру не указана — заполните её для расчёта оплаты по Регламенту.":""));
@@ -1200,19 +1269,20 @@
   // остальные три используют уже существующие поля заявки.
   var STATUS_ICON_DEFS = [
     { svg:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 0-5.6 5.6L2 19l3 3 7.1-7.1a4 4 0 0 0 5.6-5.6l-2.5 2.5-2-2 2.5-2.5z"/></svg>',
-      lit:function(t){ return !!t.assigned_to; },
-      label:function(t){ return t.assigned_to ? "Бригада назначена: "+t.assigned_to : "Бригада ещё не назначена"; } },
+      lit:function(t){ return !!t.assigned_to || !!t.crew_manual_done; },
+      label:function(t){ return t.assigned_to ? "Бригада назначена: "+t.assigned_to : (t.crew_manual_done ? "Бригада отмечена вручную" : "Бригада ещё не назначена"); } },
     { svg:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg>',
       lit:function(t){ return !!t.materials_ready; },
       label:function(t){ return t.materials_ready ? "Материал закуплен" : "Материал ещё не закуплен"; } },
     { svg:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>',
       // "работа выполнена" — по наличию хотя бы одного прикреплённого фото
-      // (см. milestoneRow #3 и maybeAutoComplete), а не по часам в табеле.
-      lit:function(t){ return (state.photos||[]).some(function(p){ return p.ticket_id===t.id; }); },
-      label:function(t){ return (state.photos||[]).some(function(p){ return p.ticket_id===t.id; }) ? "Работа выполнена (есть фото)" : "Работа ещё не выполнена"; } },
+      // (см. milestoneRow #3 и maybeAutoComplete), либо по ручной отметке
+      // work_manual_done, когда фото по факту не сделали.
+      lit:function(t){ return (state.photos||[]).some(function(p){ return p.ticket_id===t.id; }) || !!t.work_manual_done; },
+      label:function(t){ return (state.photos||[]).some(function(p){ return p.ticket_id===t.id; }) ? "Работа выполнена (есть фото)" : (t.work_manual_done ? "Работа отмечена вручную (без фото)" : "Работа ещё не выполнена"); } },
     { svg:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="9 2 9 8 15 8"/><path d="M9 13h6"/><path d="M9 17h6"/></svg>',
       lit:function(t){ return !!t.act_signed; },
-      label:function(t){ return t.act_signed ? "Акт подписан" : "Акт ещё не подписан"; } }
+      label:function(t){ return t.act_signed ? (t.act_file_path? "Акт подписан" : "Акт отмечен вручную (без файла)") : "Акт ещё не подписан"; } }
   ];
   // Ряд из 4 иконок хода работ (бригада/материал/работа/акт) — показывается и
   // в общем списке заявок (только для быстрого визуального статуса, кликнуть
@@ -1249,12 +1319,16 @@
     // opts.key — уникальный ключ пункта (crew/materials/work/act) для
     // сворачивания/разворачивания (state.milestoneOpen), opts.done — галочка,
     // opts.icon — svg пункта (см. MS_ICON), opts.clickable — если true, клик по
-    // иконке сразу переключает opts.toggleAction/toggleId/toggleVal (сейчас
-    // только у "Материал" — это единственный пункт, где "выполнено" — это
-    // просто ручной флажок, а не результат реального действия вроде назначения
-    // бригады/фото/подписи акта), opts.title — заголовок (1 строка, длинный
-    // текст обрезается), opts.meta — счётчик файлов/кнопка "прикрепить" (видны
-    // всегда), opts.body — раскрывающееся содержимое, видно только когда раскрыто.
+    // иконке сразу переключает opts.toggleAction/toggleId/toggleVal. "Материал"
+    // всегда кликабелен (это просто ручной флажок). У "Бригада"/"Работа"/"Акт"
+    // иконка кликабельна только пока нет реального подтверждения (назначение/
+    // фото/файл акта) — так можно вручную отметить пункт выполненным, если по
+    // факту сделано, а подтверждения в системе нет; как только реальное
+    // подтверждение появляется, иконка становится статичной (см. crewReal/
+    // workReal/actHasFile в блоке "Ход работ"), opts.title — заголовок (1 строка,
+    // длинный текст обрезается), opts.meta — счётчик файлов/кнопка "прикрепить"
+    // (видны всегда), opts.body — раскрывающееся содержимое, видно только когда
+    // раскрыто.
     var open = !!(state.milestoneOpen && state.milestoneOpen[opts.key]);
     var iconTag = opts.clickable
       ? h`<button type="button" class="milestone-icon${opts.done?' done':''}" data-action="${opts.toggleAction}" data-id="${opts.toggleId}" data-val="${opts.toggleVal}" title="${opts.done?'Снять отметку':'Отметить выполненным'}">${opts.icon}</button>`
@@ -1926,7 +2000,7 @@
           </div>
         </div>
         <div class="card"><div class="table-wrap"><table class="map-table">
-          <thead><tr><th>Отель</th><th>Описание</th><th>Внешний №</th><th>Статус c-lector</th><th>Импорт</th></tr></thead>
+          <thead><tr><th>Отель</th><th>Описание</th><th>Внешний №</th><th>Статус c-lector</th><th>Срок</th><th>Импорт</th></tr></thead>
           <tbody>${preview.rows.slice(0,25).map(function(r){
             var importPillMap = {
               "new":'<span class="pill pill-ok">Новая</span>',
@@ -1934,11 +2008,15 @@
               "no-hotel":'<span class="pill pill-crit">Отель не найден</span>',
               "empty":'<span class="pill pill-neutral">Нет описания</span>'
             };
+            var deadlineCell = !r.deadlineRaw ? '<span class="muted">—</span>'
+              : (r.deadlineIso ? escapeHtml(fmtDateShort(r.deadlineIso))
+                : h`<span class="pill pill-crit" title="${escapeHtml("Не удалось разобрать дату: "+r.deadlineRaw)}">Не распознан: ${escapeHtml(r.deadlineRaw)}</span>`);
             return h`<tr>
               <td>${r.hotel? ('№'+r.hotel.id+' '+escapeHtml(r.hotel.name)) : h`<span class="muted">${escapeHtml(r.hotelName)||'—'}</span>`}</td>
               <td>${escapeHtml((r.description||"").slice(0,60))}</td>
               <td class="mono muted">${escapeHtml(r.extRef||"—")}</td>
               <td>${r.statusRaw? escapeHtml(r.statusRaw) : '<span class="muted">—</span>'}</td>
+              <td>${deadlineCell}</td>
               <td>${importPillMap[r.status]}</td>
             </tr>`;
           }).join("")}</tbody>
@@ -2036,13 +2114,24 @@
               var crewFiles = invoicesFor(t, "crew").length;
               var materialsFiles = invoicesFor(t, "materials").length;
               var photoCount = (state.photos||[]).filter(function(p){return p.ticket_id===t.id;}).length;
-              var workDone = photoCount>0;
+              // Каждый пункт (кроме "Материал", который всегда просто ручной
+              // флажок) может быть выполнен либо реальным действием (Real),
+              // либо вручную (Manual) — см. setCrewManualDone/setWorkManualDone/
+              // setActSigned. Пока реального признака нет, значок кликабелен и
+              // ставит ручную отметку; как только появляется реальный признак,
+              // значок показывает его и вручную больше не переключается (нельзя
+              // руками "отменить" настоящее назначение/фото/файл акта).
+              var crewReal = !!t.assigned_to, crewManual = !!t.crew_manual_done, crewDone = crewReal||crewManual;
+              var workReal = photoCount>0, workManual = !!t.work_manual_done, workDone = workReal||workManual;
+              var actHasFile = !!t.act_file_path, actDone = !!t.act_signed;
               return h`
               ${milestoneRow({
                 key: "crew",
                 icon: MS_ICON.crew,
-                done: !!t.assigned_to,
-                title: t.assigned_to ? ("Бригада назначена: " + escapeHtml(t.assigned_to)) : "Бригада ещё не назначена",
+                done: crewDone,
+                clickable: !crewReal,
+                toggleAction: "crew-manual-toggle", toggleId: t.id, toggleVal: crewManual?'0':'1',
+                title: crewReal ? ("Бригада назначена: " + escapeHtml(t.assigned_to)) : (crewManual ? "Бригада отмечена вручную" : "Бригада ещё не назначена"),
                 meta: h`
                   ${crewFiles ? h`<span class="milestone-meta">${crewFiles} ${ruPlural(crewFiles,["файл","файла","файлов"])}</span>` : ""}
                   ${milestoneAttachControl({cls:"ms-quick-attach", id:t.id, category:"crew", accept:"application/pdf,image/*", multiple:true, title:"Прикрепить счёт/договор (можно сразу несколько)"})}`,
@@ -2056,6 +2145,7 @@
                     </select>
                     <button class="btn btn-sm" data-action="reassign" data-id="${t.id}">Сменить</button>
                   </div>` : ""}
+                  ${crewManual && !crewReal ? h`<div class="helptext" style="margin-bottom:8px;">Отмечено вручную, без назначения в приложении.</div>` : ""}
                   ${milestoneInvoiceList(t, "crew")}`
               })}
               ${milestoneRow({
@@ -2075,13 +2165,16 @@
                 key: "work",
                 icon: MS_ICON.work,
                 done: workDone,
-                title: workDone ? "Работа выполнена (есть фото)" : "Работа ещё не выполнена",
+                clickable: !workReal,
+                toggleAction: "work-manual-toggle", toggleId: t.id, toggleVal: workManual?'0':'1',
+                title: workReal ? "Работа выполнена (есть фото)" : (workManual ? "Работа отмечена вручную (без фото)" : "Работа ещё не выполнена"),
                 meta: h`
                   ${photoCount ? h`<span class="milestone-meta">${photoCount} фото</span>` : ""}
                   ${milestoneAttachControl({cls:"ms-quick-photo", id:t.id, accept:"image/*", multiple:true, title:"Прикрепить фото"})}`,
                 body: h`
-                  ${milestonePhotoGrid(t)}
-                  <div class="actions-row" style="margin-top:10px;">
+                  ${workManual && !workReal ? h`<div class="helptext" style="margin-bottom:8px;">Отмечено вручную, без фото.</div>` : ""}
+                  ${photoCount ? h`<div class="helptext" style="margin-bottom:8px;">Фото — см. раздел «Фото» ниже.</div>` : ""}
+                  <div class="actions-row" style="margin-top:0;">
                     <input type="number" id="repair-hours-input" data-id="${t.id}" min="0" step="0.5" placeholder="Кол-во часов" value="${t.repair_hours!=null?t.repair_hours:''}" style="max-width:160px;">
                     <span class="helptext">Часы главного инженера на устранение (для табеля, необязательно).</span>
                     ${feedbackHtml("repair-hours-feedback")}
@@ -2090,16 +2183,18 @@
               ${milestoneRow({
                 key: "act",
                 icon: MS_ICON.act,
-                done: !!t.act_signed,
-                title: t.act_signed ? "Акт подписан" : "Акт ещё не подписан",
-                meta: t.act_signed ? "" : milestoneAttachControl({cls:"ms-quick-act", id:t.id, accept:"application/pdf,image/*", title:"Прикрепить акт"}),
-                body: t.act_signed ? h`<div class="actions-row">
+                done: actDone,
+                clickable: !actHasFile,
+                toggleAction: "act-signed-toggle", toggleId: t.id, toggleVal: actDone?'0':'1',
+                title: actDone ? (actHasFile ? "Акт подписан" : "Акт отмечен вручную (без файла)") : "Акт ещё не подписан",
+                meta: actHasFile ? "" : milestoneAttachControl({cls:"ms-quick-act", id:t.id, accept:"application/pdf,image/*", title:"Прикрепить акт"}),
+                body: actHasFile ? h`<div class="actions-row">
                     <button type="button" class="btn btn-sm" data-action="act-open" data-path="${escapeHtml(t.act_file_path||'')}">${escapeHtml(t.act_file_name||'Файл акта')}</button>
                     <button type="button" class="btn btn-sm btn-ghost" data-action="act-clear" data-id="${t.id}">Снять отметку</button>
-                  </div>` : h`<div class="muted" style="font-size:12.5px;">Акт ещё не прикреплён.</div>`
+                  </div>` : (actDone ? h`<div class="helptext">Отмечено вручную, без файла.</div>` : h`<div class="muted" style="font-size:12.5px;">Акт ещё не прикреплён.</div>`)
               })}`;
             })()}
-            <div class="helptext" style="margin-top:6px;">Значок «Материал» можно отметить кликом; «Бригада», «Работа» и «Акт» отмечаются сами, как только сделано реальное действие (назначен исполнитель, приложено фото, подписан акт) — в обоих случаях тот же значок сразу подсвечивается вверху карточки, у номера заявки. Когда отмечены все 4 пункта, заявка автоматически переходит в статус «Выполнено».</div>
+            <div class="helptext" style="margin-top:6px;">Значок пункта можно отметить кликом вручную (для случаев, когда что-то по факту сделано, а подтверждения в системе нет) — кроме случаев, когда пункт уже выполнен реальным действием (назначен исполнитель, приложено фото, прикреплён файл акта): тогда значок просто показывает это и вручную не снимается. В обоих случаях тот же значок сразу подсвечивается вверху карточки, у номера заявки. Когда отмечены все 4 пункта, заявка автоматически переходит в статус «Выполнено».</div>
           </div>
           ${!di.done ? h`<div class="deadline-box ${di.overdue?'overdue':(di.soon?'soon':'')}">
             <div style="font-weight:600;">${di.label}</div>
@@ -2143,21 +2238,12 @@
             <div class="kv"><span class="k">Наряд-задание</span><span class="v mono">${workOrderNo(t)}</span></div>
           </div>
           <div>
-            <div class="section-title">Счета</div>
-            ${(state.invoices||[]).filter(function(iv){return iv.ticket_id===t.id;}).length===0 ? h`<div class="muted" style="font-size:12.5px;">Счетов пока нет.</div>` : h`
-            <div class="row-gap" style="gap:8px;">${(state.invoices||[]).filter(function(iv){return iv.ticket_id===t.id;}).map(function(iv){
-              return h`<div class="invoice-row" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 10px;border:1px solid var(--line);border-radius:8px;">
-                <button type="button" class="btn btn-sm" data-action="invoice-open" data-path="${escapeHtml(iv.file_path)}">${escapeHtml(iv.file_name)}</button>
-                <span class="muted" style="font-size:12.5px;">${iv.supplier?escapeHtml(iv.supplier):'—'}${iv.amount!=null?(' · '+iv.amount+' '+(iv.currency||'')):''}</span>
-                <span class="pill pill-ok">В реестре</span>
-                <button type="button" class="btn btn-sm btn-ghost btn-danger" style="margin-left:auto;" data-action="invoice-delete" data-id="${iv.id}" data-path="${escapeHtml(iv.file_path)}" title="Удалить файл">✕</button>
-              </div>`;
-            }).join("")}</div>`}
-            <form id="invoice-form" data-id="${t.id}" style="margin-top:10px;display:flex;flex-direction:column;gap:6px;">
-              <input type="file" name="file" accept="application/pdf,image/*" required>
-              <button class="btn btn-sm" type="submit" style="align-self:flex-start;">Прикрепить счёт</button>
-            </form>
-            <div class="helptext" style="margin-top:6px;">Счёт автоматически попадает в реестр платежей. Поставщика, сумму и валюту впишите вручную в разделе «Реестр платежей».</div>
+            <div class="section-title">Фото</div>
+            ${milestonePhotoGrid(t)}
+            <label class="btn btn-sm" style="margin-top:10px;position:relative;overflow:hidden;align-self:flex-start;display:inline-flex;width:fit-content;">
+              Прикрепить фото
+              <input type="file" class="ms-quick-photo" data-id="${t.id}" accept="image/*" capture="environment" multiple style="position:absolute;inset:0;opacity:0;cursor:pointer;">
+            </label>
           </div>
           <div>
             <div class="section-title">Журнал</div>
@@ -2364,6 +2450,9 @@
       if(action==="arrived") return markArrived(id);
       if(action==="materials") return openMaterialsEtaModal(id);
       if(action==="materials-ready-toggle") return setMaterialsReady(id, actionEl.getAttribute("data-val")==="1");
+      if(action==="crew-manual-toggle") return setCrewManualDone(id, actionEl.getAttribute("data-val")==="1");
+      if(action==="work-manual-toggle") return setWorkManualDone(id, actionEl.getAttribute("data-val")==="1");
+      if(action==="act-signed-toggle") return setActSigned(id, actionEl.getAttribute("data-val")==="1");
       if(action==="act-open") return openActFile(actionEl.getAttribute("data-path"));
       if(action==="act-clear") return clearActSigned(id);
       if(action==="close") return closeTicket(id);
@@ -2499,13 +2588,6 @@
       var noteId = e.target.getAttribute("data-note-id");
       if(newText){ updateNote(noteId, newText).then(function(){ state.editingNoteId=null; }); }
       else { state.editingNoteId=null; renderTicketPanel(); }
-    }
-    if(e.target.id==="invoice-form"){
-      e.preventDefault(); var ifd=new FormData(e.target);
-      var file = ifd.get("file");
-      if(!file || !file.name){ alert("Выберите файл счёта (PDF или фото)."); return; }
-      var ticketId = e.target.getAttribute("data-id");
-      uploadInvoice(ticketId, file).then(function(){ e.target.reset(); });
     }
     if(e.target.id==="part-form"){
       e.preventDefault(); var fd3=new FormData(e.target); if(!fd3.get("name")) return;
