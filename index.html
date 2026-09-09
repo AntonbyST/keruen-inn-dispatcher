@@ -116,6 +116,7 @@
   .zone-badge{ display:inline-flex; align-items:center; padding:2px 8px; border-radius:6px; border:1px solid var(--line); font-size:11px; font-weight:600; color:var(--ink-soft); }
   .demo-tag{ background:var(--warn-soft); color:var(--warn); font-size:10px; padding:1px 6px; border-radius:5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; }
   .source-tag{ background:var(--accent-soft); color:var(--accent); font-size:10px; padding:1px 6px; border-radius:5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; }
+  .clector-sync-badge{ display:inline-block; margin-top:5px; background:var(--warn-soft); color:var(--warn); font-size:10.5px; font-weight:600; padding:2px 7px; border-radius:5px; white-space:nowrap; }
   .status-icons{ display:inline-flex; align-items:center; gap:4px; vertical-align:middle; }
   .status-icon{ width:18px; height:18px; display:inline-flex; align-items:center; justify-content:center; color:var(--ink-faint); opacity:.4; transition:opacity .15s ease, color .15s ease, filter .15s ease; cursor:default; }
   .status-icon svg{ width:14px; height:14px; display:block; }
@@ -124,6 +125,10 @@
   .attn-badge svg{ width:15px; height:15px; display:block; }
   tr.attn-row{ background:var(--crit-soft); }
   tr.attn-row:hover{ filter:brightness(0.97); }
+  .attn-toggle-btn{ color:var(--ink-faint); opacity:.55; }
+  .attn-toggle-btn svg{ display:block; }
+  .attn-toggle-btn:hover{ opacity:1; }
+  .attn-toggle-btn.is-active{ color:var(--crit); opacity:1; filter:drop-shadow(0 0 3px var(--crit)); }
   .photo-grid{ display:flex; flex-wrap:wrap; gap:8px; }
   .photo-item{ display:flex; flex-direction:column; align-items:center; gap:3px; width:84px; }
   .photo-thumb{ position:relative; width:84px; height:84px; border-radius:8px; border:1px solid var(--line); overflow:hidden; display:flex; align-items:center; justify-content:center; background:var(--surface-3); }
@@ -1187,6 +1192,21 @@
       if(val) maybeAutoComplete(id);
     });
   }
+  // Фото-доказательство к Акту (category:"act", см. actPhotoGrid/uploadPhoto
+  // выше) само по себе подтверждает, что акт есть — по просьбе Антона это
+  // должно сразу переводить пункт "Акт" в "акт имеется", без отдельного клика
+  // по значку. Если акт уже подписан (файлом или вручную) — трогать нечего.
+  function markActConfirmedByPhoto(id){
+    var t = state.tickets.find(function(x){return x.id===id;});
+    if(t && t.act_signed) return;
+    var patch = {act_signed:true};
+    patchTicketLocal(id, patch);
+    renderTicketPanel();
+    sb.from("tickets").update(patch).eq("id",id).then(function(){
+      addNote(id, "Акт отмечен подписанным автоматически — прикреплено фото-доказательство.");
+      maybeAutoComplete(id);
+    });
+  }
   function openActFile(path){
     sb.storage.from("invoices").createSignedUrl(path, 3600).then(function(res){
       if(res.data && res.data.signedUrl) window.open(res.data.signedUrl, "_blank");
@@ -1230,6 +1250,41 @@
     patchTicketLocal(id, patch);
     sb.from("tickets").update(patch).eq("id",id).then(function(){
       addNote(id, val ? ("Поставлена пометка «особое внимание»."+(note?" "+note:"")) : "Пометка «особое внимание» снята.");
+    });
+  }
+  // Пометка "дубль" — заявка по факту та же поломка, что уже заведена под
+  // другим номером c-lector (частая ситуация при повторной выгрузке/повторном
+  // обращении жильца). Ищем целевую заявку по её номеру c-lector (external_ref)
+  // среди уже загруженных — самый надёжный признак, который знает диспетчер,
+  // не открывая саму заявку. Заявку саму на себя дублем не делаем.
+  function findTicketByRef(ref){
+    var needle = String(ref||"").trim();
+    if(!needle) return null;
+    return (state.tickets||[]).find(function(x){ return x.external_ref && String(x.external_ref).trim()===needle; }) || null;
+  }
+  function setDuplicateOf(id){
+    var t = state.tickets.find(function(x){return x.id===id;});
+    var ref = prompt("Номер заявки c-lector, которую дублирует эта заявка (например, "+"123"+"):", "");
+    if(ref==null) return;
+    ref = ref.trim();
+    if(!ref) return;
+    var target = findTicketByRef(ref);
+    if(!target){ alert("Заявка с номером c-lector «"+ref+"» не найдена среди загруженных."); return; }
+    if(target.id===id){ alert("Заявка не может дублировать сама себя."); return; }
+    var patch = {duplicate_of_ticket_id: target.id};
+    patchTicketLocal(id, patch);
+    renderTicketPanel();
+    sb.from("tickets").update(patch).eq("id",id).then(function(){
+      addNote(id, "Отмечена как дубль заявки № "+(target.external_ref||target.id)+".");
+    });
+  }
+  function clearDuplicateOf(id){
+    if(!confirm("Снять пометку «дубль»?")) return;
+    var patch = {duplicate_of_ticket_id:null};
+    patchTicketLocal(id, patch);
+    renderTicketPanel();
+    sb.from("tickets").update(patch).eq("id",id).then(function(){
+      addNote(id, "Пометка «дубль» снята.");
     });
   }
   // Ручного закрытия/отклонения/переоткрытия заявки в приложении больше нет
@@ -1395,7 +1450,12 @@
       label:function(t){ return t.work_manual_done ? "Работа отмечена выполненной" : "Работа ещё не выполнена"; } },
     { svg:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="9 2 9 8 15 8"/><path d="M9 13h6"/><path d="M9 17h6"/></svg>',
       lit:function(t){ return !!t.act_signed; },
-      label:function(t){ return t.act_signed ? (t.act_file_path? "Акт подписан" : "Акт отмечен вручную (без файла)") : "Акт ещё не подписан"; } }
+      label:function(t){
+        if(!t.act_signed) return "Акт ещё не подписан";
+        if(t.act_file_path) return "Акт подписан";
+        var hasActPhoto = (state.photos||[]).some(function(p){ return p.ticket_id===t.id && p.category==="act"; });
+        return hasActPhoto ? "Акт подтверждён по фото-доказательству" : "Акт отмечен вручную (без файла)";
+      } }
   ];
   // Ряд из 4 иконок хода работ (бригада/материал/работа/акт) — показывается и
   // в общем списке заявок (только для быстрого визуального статуса, кликнуть
@@ -1542,6 +1602,24 @@
     return h`<span class="attn-badge" title="${escapeHtml(title)}">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>
     </span>`;
+  }
+  // Акт подписан (файлом, вручную или по фото — см. act_signed), но статус в
+  // самом c-lector.ru приложение изменить не может (нет обратной записи) —
+  // поэтому в списке заявок нужна явная напоминалка диспетчеру. Показываем
+  // только для заявок из c-lector (у ручных заявок нет внешнего статуса,
+  // менять там нечего).
+  function clectorSyncBadge(t){
+    if(!t.act_signed || t.source!=='c-lector') return "";
+    return h`<div class="clector-sync-badge" title="Акт подписан — не забудьте изменить статус этой заявки на сайте c-lector.ru">⟳ изменить статус в c-lector</div>`;
+  }
+  // Показывает, какую заявку дублирует текущая (см. setDuplicateOf выше) — в
+  // списке заявок, рядом с номером, чтобы диспетчер сразу видел, что по этой
+  // поломке уже есть другая заявка в работе.
+  function duplicateBadge(t){
+    if(!t.duplicate_of_ticket_id) return "";
+    var dup = (state.tickets||[]).find(function(x){return x.id===t.duplicate_of_ticket_id;});
+    var label = dup ? (dup.external_ref ? ("№"+dup.external_ref) : "заявки") : "заявки (не найдена)";
+    return h`<div class="muted" style="font-size:11px;margin-top:3px;">Дубль ${escapeHtml(label)}</div>`;
   }
 
   /* ============================== AUTH SCREEN ============================== */
@@ -1746,6 +1824,7 @@
             return h`<tr data-open-ticket="${t.id}" ${t.attention_flag?'class="attn-row"':''}>
               <td class="mono">${attentionBadge(t)}${t.external_ref? escapeHtml(t.external_ref) : '<span class="muted">—</span>'}
                 <div style="margin-top:4px;">${statusIconsRow(t)}</div>
+                ${duplicateBadge(t)}
               </td>
               <td>
                 <div><span class="ttl">№${hotel.id} ${hotel.name}</span></div>
@@ -1753,7 +1832,7 @@
                 <div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap;">${zoneBadge(t.zone)}${t.demo?' <span class="demo-tag">пример</span>':''}${t.source==='c-lector'?' <span class="source-tag">c-lector</span>':''}</div>
               </td>
               <td><div class="line-clamp-2" style="max-width:360px;" title="${escapeHtml(displayShort(t))}">${escapeHtml(displayShort(t))}</div></td>
-              <td>${t.external_status? externalStatusPill(t.external_status): statusPill(t.status)}</td>
+              <td>${t.external_status? externalStatusPill(t.external_status): statusPill(t.status)}${clectorSyncBadge(t)}</td>
               <td style="${di.overdue?'color:var(--crit);font-weight:600;':(di.soon?'color:var(--warn);font-weight:600;':'')}" title="${escapeHtml(di.label)}">${di.dateLabel}</td>
             </tr>`; }).join("")}
         </tbody></table></div></div>`;
@@ -2231,6 +2310,9 @@
             <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
               <span style="display:flex;align-items:baseline;gap:6px;min-width:0;overflow:hidden;">
                 ${t.external_ref ? h`<span class="mono" style="font-weight:700;font-size:18px;color:var(--accent);white-space:nowrap;">№ ${escapeHtml(t.external_ref)}</span>` : ""}
+                <button type="button" class="btn btn-ghost btn-sm attn-toggle-btn ${t.attention_flag?'is-active':''}" data-action="attention-toggle" data-id="${t.id}" data-val="${t.attention_flag?'0':'1'}" style="padding:2px 5px;flex:none;" title="${escapeHtml(t.attention_flag?('Особое внимание'+(t.attention_note?': '+t.attention_note:'')+' — нажмите, чтобы снять'):'Пометить: особое внимание')}">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>
+                </button>
                 <span style="font-size:12px;color:var(--ink-faint);font-weight:600;white-space:nowrap;">· ${t.zone? ("Зона "+escapeHtml(String(t.zone))) : "стройка"}</span>
               </span>
               <span style="display:flex;align-items:center;gap:6px;flex:none;">
@@ -2239,14 +2321,11 @@
             </div>
             <div style="margin-top:8px;">${statusIconsRow(t)}</div>
             <div style="font-weight:700;font-size:16px;margin-top:8px;">№${hotel.id} ${hotel.name}${t.location ? h` <span class="muted" style="font-weight:400;">— ${escapeHtml(t.location)}</span>` : ""} ${t.demo?'<span class="demo-tag">пример</span>':''} ${t.source==='c-lector'?'<span class="source-tag">c-lector</span>':''}</div>
+            ${t.attention_flag && t.attention_note ? h`<div class="muted" style="font-size:12px;margin-top:4px;">⚑ ${escapeHtml(t.attention_note)}</div>` : ""}
           </div>
           <button class="btn btn-ghost panel-close" data-close-panel>✕</button>
         </div>
         <div class="panel-body">
-          <div class="actions-row" style="align-items:center;">
-            <button class="btn btn-sm ${t.attention_flag?'btn-danger':''}" data-action="attention-toggle" data-id="${t.id}" data-val="${t.attention_flag?'0':'1'}">${t.attention_flag?'Снять пометку «особое внимание»':'Пометить: особое внимание'}</button>
-            ${t.attention_flag && t.attention_note ? h`<span class="muted" style="font-size:12.5px;">${escapeHtml(t.attention_note)}</span>` : ""}
-          </div>
           <div><div class="section-title">Описание</div>
             <div style="display:flex;align-items:baseline;gap:8px;">
               <div style="font-size:14.5px;font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(displayShort(t))}">${escapeHtml(displayShort(t))}${!t.description_short?h` <span class="muted" style="font-weight:400;font-size:11px;">(черновик)</span>`:''}</div>
@@ -2260,6 +2339,16 @@
                 <div class="helptext">Черновик без ИИ (убраны шаблонные фразы вроде «Замечание:», «прошу устранить»). Поправьте и сохраните — эта формулировка станет заголовком заявки в списках и реестре.</div>
                 ${feedbackHtml("desc-short-feedback")}
               </div>` : ''}
+          </div>
+          <div class="actions-row" style="align-items:center;">
+            ${(function(){
+              if(!t.duplicate_of_ticket_id) return h`<button type="button" class="btn btn-ghost btn-sm" data-action="duplicate-set" data-id="${t.id}">Пометить как дубль…</button>`;
+              var dup = state.tickets.find(function(x){return x.id===t.duplicate_of_ticket_id;});
+              var dupLabel = dup ? (dup.external_ref ? ("№ "+escapeHtml(dup.external_ref)) : escapeHtml(dup.id)) : "заявки (не найдена в списке)";
+              return h`<span class="pill pill-warn">Дубль ${dupLabel}</span>
+                ${dup ? h`<button type="button" class="btn btn-ghost btn-sm" data-open-ticket="${dup.id}">Открыть</button>` : ""}
+                <button type="button" class="btn btn-ghost btn-sm" data-action="duplicate-clear" data-id="${t.id}">Снять пометку</button>`;
+            })()}
           </div>
           <div>
             <div class="section-title">Ход работ ${infoTip("Значок пункта можно отметить кликом вручную (для случаев, когда что-то по факту сделано, а подтверждения в системе нет) — кроме случаев, когда пункт уже выполнен реальным действием (назначен исполнитель, прикреплён файл акта): тогда значок просто показывает это и вручную не снимается. «Материал» и «Работа» — всегда ручные флажки. В обоих случаях тот же значок сразу подсвечивается вверху карточки, у номера заявки. Когда отмечены все 4 пункта, заявка автоматически переходит в статус «Выполнено».")}</div>
@@ -2351,7 +2440,7 @@
                 done: actDone,
                 clickable: !actHasFile,
                 toggleAction: "act-signed-toggle", toggleId: t.id, toggleVal: actDone?'0':'1',
-                title: actDone ? (actHasFile ? "Акт подписан" : "Акт отмечен вручную (без файла)") : "Акт ещё не подписан",
+                title: actDone ? (actHasFile ? "Акт подписан" : (actPhotoCount ? "Акт подтверждён по фото-доказательству" : "Акт отмечен вручную (без файла)")) : "Акт ещё не подписан",
                 meta: h`
                   ${actPhotoCount ? h`<span class="milestone-meta">${actPhotoCount} фото</span>` : ""}
                   ${actHasFile ? "" : milestoneAttachControl({cls:"ms-quick-act", id:t.id, accept:"application/pdf,image/*", title:"Прикрепить акт"})}`,
@@ -2359,7 +2448,7 @@
                   ${actHasFile ? h`<div class="actions-row" style="margin-bottom:8px;">
                     <button type="button" class="btn btn-sm" data-action="act-open" data-path="${escapeHtml(t.act_file_path||'')}">${escapeHtml(t.act_file_name||'Файл акта')}</button>
                     <button type="button" class="btn btn-sm btn-ghost" data-action="act-clear" data-id="${t.id}">Снять отметку</button>
-                  </div>` : (actDone ? h`<div class="helptext" style="margin-bottom:8px;">Отмечено вручную, без файла.</div>` : h`<div class="muted" style="font-size:12.5px;margin-bottom:8px;">Акт ещё не прикреплён.</div>`)}
+                  </div>` : (actDone ? h`<div class="helptext" style="margin-bottom:8px;">${actPhotoCount ? "Подтверждён фото-доказательством (ниже), без файла акта." : "Отмечено вручную, без файла."}</div>` : h`<div class="muted" style="font-size:12.5px;margin-bottom:8px;">Акт ещё не прикреплён.</div>`)}
                   <div class="helptext" style="margin-bottom:6px;">Фото-доказательства выполненной работы (отдельно от замечаний в разделе «Фото» ниже):</div>
                   ${actPhotoGrid(t)}
                   <label class="btn btn-sm" style="margin-top:8px;position:relative;overflow:hidden;align-self:flex-start;display:inline-flex;width:fit-content;">
@@ -2643,6 +2732,12 @@
       if(action==="note-edit"){ e.preventDefault(); state.editingNoteId = id; renderTicketPanel(); return; }
       if(action==="note-cancel"){ e.preventDefault(); state.editingNoteId = null; renderTicketPanel(); return; }
       if(action==="toggle-milestone"){
+        // Кнопка "прикрепить" (скрепка, milestoneAttachControl) лежит внутри той
+        // же строки milestone-hd, у которой стоит data-action="toggle-milestone" —
+        // без этой проверки клик по скрепке (выбор файла) заодно сворачивал/
+        // разворачивал пункт чек-листа, потому что клик всплывает до ближайшего
+        // предка с data-action, а сама скрепка своего data-action не имеет.
+        if(t.closest(".milestone-attach-btn")) return;
         var mkey = actionEl.getAttribute("data-key");
         state.milestoneOpen = state.milestoneOpen || {};
         state.milestoneOpen[mkey] = !state.milestoneOpen[mkey];
@@ -2672,6 +2767,8 @@
         var note = turnOn ? (prompt("Комментарий (необязательно) — например, кто обратил внимание:")||"") : "";
         return setAttentionFlag(id, turnOn, note);
       }
+      if(action==="duplicate-set") return setDuplicateOf(id);
+      if(action==="duplicate-clear") return clearDuplicateOf(id);
       if(action==="photo-open") return openPhotoFile(actionEl.getAttribute("data-path"));
       if(action==="photo-delete"){ deletePhoto(id, actionEl.getAttribute("data-path")); return; }
       if(action==="hotel-add"){
@@ -2738,7 +2835,7 @@
       var qapFiles = Array.from(e.target.files||[]);
       if(!qapFiles.length) return;
       var qapId = e.target.getAttribute("data-id");
-      Promise.all(qapFiles.map(function(f){ return uploadPhoto(qapId, f, "act"); })).then(function(){ e.target.value=""; });
+      Promise.all(qapFiles.map(function(f){ return uploadPhoto(qapId, f, "act"); })).then(function(){ e.target.value=""; markActConfirmedByPhoto(qapId); });
       return;
     }
     if(e.target.matches(".ms-quick-act")){
