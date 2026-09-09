@@ -484,6 +484,11 @@
       // заголовки вида "Плановая дата устранения" содержат "дата" и были бы
       // перехвачены created_at, если бы deadline проверялся позже.
       deadline: /срок|дедлайн|due|планов.*(дат|заверш|исполнен)|устранени.*до|дата.*устранен/i,
+      // "локация" — номер комнаты/этаж/помещение внутри отеля, где именно
+      // поломка (по просьбе Антона: без этого непонятно, куда в отеле идти).
+      // Без "номер" в паттерне — иначе пересекается с external_ref ("Номер
+      // заявки"), который проверяется раньше и претендует на любой "номер".
+      location: /локац|комнат|этаж|помещен|location|room/i,
       group: /групп|критич|приоритет/i,
       created_at: /дата|созда|подач|created/i,
       description: /описан|замечан|проблем|суть|заявк/i
@@ -548,7 +553,7 @@
     var existingRefs = {}; state.tickets.forEach(function(t){ if(t.external_ref) existingRefs[t.external_ref]=t; });
     var out = state.importRows.map(function(row){
       var get = function(field){ var idx = m[field]; return (idx!=="" && idx!=null) ? (row[Number(idx)]||"").trim() : ""; };
-      var extRef = get("external_ref"), hotelName = get("hotel"), desc = get("description"), groupRaw = get("group"), dateRaw = get("created_at"), statusRaw = get("status"), deadlineRaw = get("deadline");
+      var extRef = get("external_ref"), hotelName = get("hotel"), desc = get("description"), groupRaw = get("group"), dateRaw = get("created_at"), statusRaw = get("status"), deadlineRaw = get("deadline"), locationRaw = get("location");
       // "Срок устранения" считаем только тем, что реально пришло из c-lector —
       // никакой локальной подмены/расчёта; не распозналась дата — оставляем пусто.
       var deadlineParsed = parseCLectorDate(deadlineRaw);
@@ -557,9 +562,12 @@
       var existingTicket = hasExt && extRef ? existingRefs[extRef] : null;
       var isDupe = !!existingTicket;
       var deadlineChanged = isDupe && deadlineRaw && deadlineIso !== (existingTicket.resolution_deadline||null);
-      var willUpdateStatus = isDupe && ((statusRaw && existingTicket.external_status !== statusRaw) || deadlineChanged);
+      // location тоже считаем "изменением" при повторном импорте — так задним
+      // числом подтянется и у заявок, загруженных ещё до появления этого поля.
+      var locationChanged = isDupe && locationRaw && locationRaw !== (existingTicket.location||"");
+      var willUpdateStatus = isDupe && ((statusRaw && existingTicket.external_status !== statusRaw) || deadlineChanged || locationChanged);
       var status = !desc ? "empty" : (!hotel ? "no-hotel" : (isDupe ? "dupe" : "new"));
-      return { extRef:extRef, hotelName:hotelName, hotel:hotel, description:desc, groupRaw:groupRaw, dateRaw:dateRaw, statusRaw:statusRaw, deadlineRaw:deadlineRaw, deadlineIso:deadlineIso, existingTicket:existingTicket, willUpdateStatus:willUpdateStatus, status:status };
+      return { extRef:extRef, hotelName:hotelName, hotel:hotel, description:desc, groupRaw:groupRaw, dateRaw:dateRaw, statusRaw:statusRaw, deadlineRaw:deadlineRaw, deadlineIso:deadlineIso, location:locationRaw, existingTicket:existingTicket, willUpdateStatus:willUpdateStatus, status:status };
     });
     var counts = {total:out.length, "new":0, dupe:0, "no-hotel":0, empty:0, statusUpdate:0};
     out.forEach(function(r){ counts[r.status]++; if(r.willUpdateStatus) counts.statusUpdate++; });
@@ -593,6 +601,7 @@
         status:"new", created_by: myLabel()+" (импорт c-lector)", created_at: createdAt,
         arrival_deadline: r.hotel.zone ? addHours(createdAt, ZONE_HOURS[r.hotel.zone]) : null,
         resolution_deadline: r.deadlineIso,
+        location: r.location || null,
         external_ref: r.extRef || null, external_status: r.statusRaw || null, source:"c-lector", demo:false
       };
     });
@@ -601,9 +610,12 @@
     // его сама не считает) — частичный upsert (только id + пара полей) упал бы
     // на NOT NULL полях (hotel_id, description и т.п.), так как Postgres
     // проверяет их при построении INSERT-строки ещё до ON CONFLICT DO UPDATE.
+    // location тоже подтягиваем повторно, если в файле она есть, — так задним
+    // числом заполнится и у заявок, импортированных до появления этого поля.
     var updatePayloads = toUpdate.map(function(r){
       var patch = { external_status: r.statusRaw };
       if(r.deadlineRaw) patch.resolution_deadline = r.deadlineIso;
+      if(r.location) patch.location = r.location;
       return Object.assign({}, r.existingTicket, patch);
     });
 
@@ -1686,10 +1698,10 @@
   function exportTicketsExcel(){
     if(typeof XLSX==="undefined" || !XLSX.utils){ alert("Модуль Excel не загрузился (возможно, заблокирован интернет/VPN) — обновите страницу и попробуйте снова."); return; }
     var list = getFilteredTicketsList().list;
-    var header = ["№ c-lector","Отель","Описание","Статус","Исполнитель","Срок","Особое внимание"];
+    var header = ["№ c-lector","Отель","Локация","Описание","Статус","Исполнитель","Срок","Особое внимание"];
     var rows = list.map(function(t){
       var hotel = hotelById(t.hotel_id); var di = deadlineInfo(t);
-      return [ t.external_ref||"", hotel?("№"+hotel.id+" "+hotel.name):"", displayShort(t), ticketStatusLabel(t), t.assigned_to||"", di.label, t.attention_flag?("Да"+(t.attention_note?": "+t.attention_note:"")):"" ];
+      return [ t.external_ref||"", hotel?("№"+hotel.id+" "+hotel.name):"", t.location||"", displayShort(t), ticketStatusLabel(t), t.assigned_to||"", di.label, t.attention_flag?("Да"+(t.attention_note?": "+t.attention_note:"")):"" ];
     });
     var ws = XLSX.utils.aoa_to_sheet([header].concat(rows));
     ws["!cols"] = header.map(function(){ return {wch:22}; });
@@ -1737,6 +1749,7 @@
               </td>
               <td>
                 <div><span class="ttl">№${hotel.id} ${hotel.name}</span></div>
+                ${t.location ? h`<div class="muted" style="font-size:11.5px;margin-top:2px;">${escapeHtml(t.location)}</div>` : ""}
                 <div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap;">${zoneBadge(t.zone)}${t.demo?' <span class="demo-tag">пример</span>':''}${t.source==='c-lector'?' <span class="source-tag">c-lector</span>':''}</div>
               </td>
               <td><div class="line-clamp-2" style="max-width:360px;" title="${escapeHtml(displayShort(t))}">${escapeHtml(displayShort(t))}</div></td>
@@ -2110,8 +2123,8 @@
         </div>`;
     }
     var preview = computeImportPreview();
-    var fieldLabel = {external_ref:"Внешний номер (для защиты от дублей)", hotel:"Отель", description:"Описание", group:"Группа критичности (1/2/3)", created_at:"Дата создания", status:"Статус (из c-lector)", deadline:"Срок устранения (из c-lector)"};
-    var fieldOrder = ["hotel","description","external_ref","status","deadline","group","created_at"];
+    var fieldLabel = {external_ref:"Внешний номер (для защиты от дублей)", hotel:"Отель", description:"Описание", group:"Группа критичности (1/2/3)", created_at:"Дата создания", status:"Статус (из c-lector)", deadline:"Срок устранения (из c-lector)", location:"Локация/комната (необязательно)"};
+    var fieldOrder = ["hotel","description","location","external_ref","status","deadline","group","created_at"];
     return h`
       <div class="row-gap">
         <div class="card card-pad">
@@ -2184,6 +2197,7 @@
         <div class="wo-grid">
           ${t.external_ref ? h`<div class="wo-field"><div class="k">№ c-lector</div><div class="v mono">${escapeHtml(t.external_ref)}</div></div>` : ""}
           <div class="wo-field"><div class="k">Объект</div><div class="v">№${hotel.id} ${hotel.name}${hotel.zone?(' · Зона '+hotel.zone):''}</div></div>
+          ${t.location ? h`<div class="wo-field"><div class="k">Локация</div><div class="v">${escapeHtml(t.location)}</div></div>` : ""}
           <div class="wo-field"><div class="k">Категория</div><div class="v">${GROUP_LABEL[t.ticket_group]}</div></div>
           <div class="wo-field"><div class="k">Исполнитель</div><div class="v">${t.assigned_to? escapeHtml(t.assigned_to): "не назначен"}</div></div>
           <div class="wo-field"><div class="k">Срок прибытия</div><div class="v">${t.arrival_deadline? fmtDateShort(t.arrival_deadline): "—"}</div></div>
@@ -2224,7 +2238,7 @@
               </span>
             </div>
             <div style="margin-top:8px;">${statusIconsRow(t)}</div>
-            <div style="font-weight:700;font-size:16px;margin-top:8px;">№${hotel.id} ${hotel.name} ${t.demo?'<span class="demo-tag">пример</span>':''} ${t.source==='c-lector'?'<span class="source-tag">c-lector</span>':''}</div>
+            <div style="font-weight:700;font-size:16px;margin-top:8px;">№${hotel.id} ${hotel.name}${t.location ? h` <span class="muted" style="font-weight:400;">— ${escapeHtml(t.location)}</span>` : ""} ${t.demo?'<span class="demo-tag">пример</span>':''} ${t.source==='c-lector'?'<span class="source-tag">c-lector</span>':''}</div>
           </div>
           <button class="btn btn-ghost panel-close" data-close-panel>✕</button>
         </div>
@@ -2313,6 +2327,7 @@
                   ${milestoneAttachControl({cls:"ms-quick-attach", id:t.id, category:"materials", accept:"application/pdf,image/*", multiple:true, title:"Прикрепить счёт/накладную (можно сразу несколько)"})}`,
                 body: h`
                   ${t.status==="onsite" ? h`<div class="actions-row" style="margin-bottom:8px;"><button class="btn btn-sm" data-action="materials" data-id="${t.id}">Нужны материалы…</button></div>` : ""}
+                  ${t.materials_wait ? h`<div class="helptext" style="margin-bottom:8px;">Ожидаются материалы (срок поставки: ${fmtDateShort(t.materials_eta)}).</div>` : ""}
                   ${milestoneInvoiceList(t, "materials")}`
               })}
               ${milestoneRow({
@@ -2354,11 +2369,6 @@
               })}`;
             })()}
           </div>
-          ${!di.done ? h`<div class="deadline-box ${di.overdue?'overdue':(di.soon?'soon':'')}">
-            <div style="font-weight:600;">${di.label}</div>
-            <div class="helptext" style="margin-top:2px;">${di.kind==='arrival'?'Срок прибытия главного инженера по зоне логистики.':'Срок устранения — приходит из c-lector при импорте, платформа его не рассчитывает.'}</div>
-            ${t.materials_wait ? h`<div class="helptext" style="margin-top:4px;">Ожидаются материалы (срок поставки: ${fmtDateShort(t.materials_eta)}).</div>` : ""}
-          </div>` : ""}
           ${t.status==="onsite" ? h`<div>
             <div class="section-title">Категория (по осмотру)</div>
             <select id="case-select" data-id="${t.id}">
@@ -2375,6 +2385,7 @@
             <div class="kv"><span class="k">Зарегистрирована</span><span class="v">${fmtDate(t.created_at).split(" ")[0]}</span></div>
             <div class="kv"><span class="k">Исполнитель</span><span class="v">${t.assigned_to? escapeHtml(t.assigned_to):'—'}</span></div>
             <div class="kv"><span class="k">Категория</span><span class="v">${t.case_type? CASE_LABEL[t.case_type]:'—'}</span></div>
+            <div class="kv"><span class="k">Срок устранения</span><span class="v" style="${(!di.done && t.resolution_deadline && new Date(t.resolution_deadline).getTime()<Date.now())?'color:var(--crit);font-weight:600;':''}">${t.resolution_deadline? fmtDate(t.resolution_deadline): "не указан (нет данных c-lector)"}</span></div>
             <div class="kv"><span class="k">Наряд-задание</span><span class="v mono">${workOrderNo(t)}</span></div>
           </div>
           ${legacyInvoiceSection(t)}
@@ -2558,6 +2569,12 @@
     if(t.closest("[data-close-panel]")){ state.selectedTicketId = null; state.editingNoteId = null; state.milestoneOpen = {}; state.editingDescShort = false; renderTicketPanel(); return; }
     if(t.matches(".modal-scrim") && t.hasAttribute("data-close-modal")){ closeModal(); return; }
     if(t.hasAttribute("data-close-modal")){ closeModal(); return; }
+    // Кнопка "Удалить" в "Склад ЗИП" — раньше эта проверка ошибочно лежала
+    // внутри блока data-action ниже (t.closest("[data-action]")), а у самой
+    // кнопки нет атрибута data-action (только data-part-remove), поэтому клик
+    // по ней никогда не долетал до этой проверки и позиция не удалялась.
+    var partRemoveEl = t.closest("[data-part-remove]");
+    if(partRemoveEl){ if(confirm("Удалить позицию склада?")) removePart(partRemoveEl.getAttribute("data-part-remove")); return; }
 
     if(t.id==="import-parse-btn"){
       var ta = document.getElementById("import-paste"); var parsed = parseDelimited(ta?ta.value:"");
@@ -2657,8 +2674,6 @@
       }
       if(action==="photo-open") return openPhotoFile(actionEl.getAttribute("data-path"));
       if(action==="photo-delete"){ deletePhoto(id, actionEl.getAttribute("data-path")); return; }
-      var partRemove = actionEl.getAttribute("data-part-remove");
-      if(partRemove){ if(confirm("Удалить позицию склада?")) removePart(partRemove); return; }
       if(action==="hotel-add"){
         var hform = document.getElementById("hotel-form");
         var hfd = new FormData(hform);
