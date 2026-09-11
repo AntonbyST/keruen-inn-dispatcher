@@ -117,6 +117,16 @@
   .demo-tag{ background:var(--warn-soft); color:var(--warn); font-size:10px; padding:1px 6px; border-radius:5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; }
   .source-tag{ background:var(--accent-soft); color:var(--accent); font-size:10px; padding:1px 6px; border-radius:5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; }
   .clector-sync-badge{ display:inline-block; margin-top:5px; background:var(--warn-soft); color:var(--warn); font-size:10.5px; font-weight:600; padding:2px 7px; border-radius:5px; white-space:nowrap; }
+  /* Компактные чекбоксы-фильтры по 4 пунктам чек-листа — сидят прямо в
+     заголовке колонки "№ c-lector", ровно над строкой значков в каждой
+     строке (statusIconsRow), поэтому занимают минимум места и не требуют
+     отдельной строки фильтров сверху. */
+  .tag-filter-row{ display:flex; gap:3px; margin-top:5px; }
+  .tag-filter-chip{ position:relative; display:inline-flex; align-items:center; justify-content:center; width:19px; height:19px; border-radius:5px; border:1px solid var(--line); color:var(--ink-faint); cursor:pointer; background:var(--surface); }
+  .tag-filter-chip svg{ width:11px; height:11px; display:block; }
+  .tag-filter-chip input{ position:absolute; inset:0; opacity:0; margin:0; cursor:pointer; }
+  .tag-filter-chip:hover{ border-color:var(--accent-line); }
+  .tag-filter-chip.active{ background:var(--accent-soft); border-color:var(--accent-line); color:var(--accent); }
   .status-icons{ display:inline-flex; align-items:center; gap:4px; vertical-align:middle; }
   .status-icon{ width:18px; height:18px; display:inline-flex; align-items:center; justify-content:center; color:var(--ink-faint); opacity:.4; transition:opacity .15s ease, color .15s ease, filter .15s ease; cursor:default; }
   .status-icon svg{ width:14px; height:14px; display:block; }
@@ -320,7 +330,7 @@
   var ROLE_NAV = {
     dispatcher: null,
     head: null,
-    specialist: ["dashboard","tickets","map","team"],
+    specialist: ["dashboard","tickets","map","team","systemdefects"],
     warehouse: ["dashboard","parts","team"],
     finance: ["dashboard","registry","team"]
   };
@@ -494,6 +504,11 @@
       // Без "номер" в паттерне — иначе пересекается с external_ref ("Номер
       // заявки"), который проверяется раньше и претендует на любой "номер".
       location: /локац|комнат|этаж|помещен|location|room/i,
+      // "гарантия/не гарантия" — по решению Антона это поле для заявок из
+      // c-lector теперь ЦЕЛИКОМ приходит из выгрузки (см. guessCaseTypeFromText/
+      // "Категория" в карточке заявки ниже) — диспетчер его больше не трогает
+      // руками для таких заявок.
+      case_type: /гаранти|warranty/i,
       group: /групп|критич|приоритет/i,
       created_at: /дата|созда|подач|created/i,
       description: /описан|замечан|проблем|суть|заявк/i
@@ -549,6 +564,18 @@
       });
     }
   }
+  // Текст ячейки c-lector в колонке "гарантия" -> наш внутренний код категории.
+  // Не распознали текст (опечатка/непривычная формулировка) -> null, и тогда
+  // commitImport НЕ трогает уже сохранённое значение (см. ниже) — лучше
+  // оставить как есть, чем затереть категорию мусором из-за нераспознанного текста.
+  function guessCaseTypeFromText(raw){
+    var s = String(raw||"").trim().toLowerCase();
+    if(!s) return null;
+    if(/необоснован/.test(s)) return "unfounded";
+    if(/не\s*гаранти|негаранти/.test(s)) return "nonwarranty";
+    if(/гаранти/.test(s)) return "warranty";
+    return null;
+  }
   function computeImportPreview(){
     var m = state.importMapping;
     var hasExt = m.external_ref!=="" && m.external_ref!=null;
@@ -558,11 +585,12 @@
     var existingRefs = {}; state.tickets.forEach(function(t){ if(t.external_ref) existingRefs[t.external_ref]=t; });
     var out = state.importRows.map(function(row){
       var get = function(field){ var idx = m[field]; return (idx!=="" && idx!=null) ? (row[Number(idx)]||"").trim() : ""; };
-      var extRef = get("external_ref"), hotelName = get("hotel"), desc = get("description"), groupRaw = get("group"), dateRaw = get("created_at"), statusRaw = get("status"), deadlineRaw = get("deadline"), locationRaw = get("location");
+      var extRef = get("external_ref"), hotelName = get("hotel"), desc = get("description"), groupRaw = get("group"), dateRaw = get("created_at"), statusRaw = get("status"), deadlineRaw = get("deadline"), locationRaw = get("location"), caseTypeRaw = get("case_type");
       // "Срок устранения" считаем только тем, что реально пришло из c-lector —
       // никакой локальной подмены/расчёта; не распозналась дата — оставляем пусто.
       var deadlineParsed = parseCLectorDate(deadlineRaw);
       var deadlineIso = deadlineParsed ? deadlineParsed.toISOString() : null;
+      var caseTypeParsed = guessCaseTypeFromText(caseTypeRaw);
       var hotel = matchHotelByName(hotelName);
       var existingTicket = hasExt && extRef ? existingRefs[extRef] : null;
       var isDupe = !!existingTicket;
@@ -570,9 +598,13 @@
       // location тоже считаем "изменением" при повторном импорте — так задним
       // числом подтянется и у заявок, загруженных ещё до появления этого поля.
       var locationChanged = isDupe && locationRaw && locationRaw !== (existingTicket.location||"");
-      var willUpdateStatus = isDupe && ((statusRaw && existingTicket.external_status !== statusRaw) || deadlineChanged || locationChanged);
+      // так же и "гарантия/не гарантия" — но только когда текст РАСПОЗНАН
+      // (caseTypeParsed не null), иначе нераспознанный текст мог бы затереть
+      // уже сохранённую категорию при повторном импорте.
+      var caseTypeChanged = isDupe && caseTypeParsed && caseTypeParsed !== (existingTicket.case_type||null);
+      var willUpdateStatus = isDupe && ((statusRaw && existingTicket.external_status !== statusRaw) || deadlineChanged || locationChanged || caseTypeChanged);
       var status = !desc ? "empty" : (!hotel ? "no-hotel" : (isDupe ? "dupe" : "new"));
-      return { extRef:extRef, hotelName:hotelName, hotel:hotel, description:desc, groupRaw:groupRaw, dateRaw:dateRaw, statusRaw:statusRaw, deadlineRaw:deadlineRaw, deadlineIso:deadlineIso, location:locationRaw, existingTicket:existingTicket, willUpdateStatus:willUpdateStatus, status:status };
+      return { extRef:extRef, hotelName:hotelName, hotel:hotel, description:desc, groupRaw:groupRaw, dateRaw:dateRaw, statusRaw:statusRaw, deadlineRaw:deadlineRaw, deadlineIso:deadlineIso, location:locationRaw, caseTypeRaw:caseTypeRaw, caseTypeParsed:caseTypeParsed, existingTicket:existingTicket, willUpdateStatus:willUpdateStatus, status:status };
     });
     var counts = {total:out.length, "new":0, dupe:0, "no-hotel":0, empty:0, statusUpdate:0};
     out.forEach(function(r){ counts[r.status]++; if(r.willUpdateStatus) counts.statusUpdate++; });
@@ -607,6 +639,7 @@
         arrival_deadline: r.hotel.zone ? addHours(createdAt, ZONE_HOURS[r.hotel.zone]) : null,
         resolution_deadline: r.deadlineIso,
         location: r.location || null,
+        case_type: r.caseTypeParsed || null,
         external_ref: r.extRef || null, external_status: r.statusRaw || null, source:"c-lector", demo:false
       };
     });
@@ -621,6 +654,10 @@
       var patch = { external_status: r.statusRaw };
       if(r.deadlineRaw) patch.resolution_deadline = r.deadlineIso;
       if(r.location) patch.location = r.location;
+      // "Категория" для заявок из c-lector — только распознанным значением (см.
+      // guessCaseTypeFromText/caseTypeParsed выше), иначе можно случайно
+      // затереть уже сохранённую категорию нераспознанным текстом.
+      if(r.caseTypeParsed) patch.case_type = r.caseTypeParsed;
       return Object.assign({}, r.existingTicket, patch);
     });
 
@@ -1213,6 +1250,65 @@
       else alert("Не удалось открыть файл акта.");
     });
   }
+  // Табель на выполненные работы — по просьбе Антона живёт внутри пункта
+  // "Акт" (см. milestoneRow key:"act" ниже), а не отдельным пунктом чек-листа.
+  // Два взаимоисключающих варианта: свой файл табеля НА ЭТУ заявку, либо
+  // отметка "табель учтён в заявке №..." — когда один табель закрывает сразу
+  // несколько заявок и незачем дублировать файл в каждой.
+  function uploadTimesheetFile(ticketId, file){
+    var path = ticketId + "/timesheet_" + Date.now() + "_" + file.name.replace(/[^\w.\-]+/g,"_");
+    var patch = {timesheet_file_path:path, timesheet_file_name:file.name, timesheet_ref_ticket_id:null};
+    return readFileAsBuffer(file).then(function(buf){
+      return sb.storage.from("invoices").upload(path, buf, {contentType: file.type || "application/octet-stream"});
+    }).then(function(res){
+      if(res.error) throw res.error;
+      patchTicketLocal(ticketId, patch);
+      renderTicketPanel();
+      return sb.from("tickets").update(patch).eq("id", ticketId);
+    }).then(function(){
+      addNote(ticketId, "Прикреплён табель: "+file.name+".");
+    }).catch(function(err){
+      alert("Не удалось загрузить табель: " + (err&&err.message?err.message:err));
+    });
+  }
+  function clearTimesheetFile(id){
+    if(!confirm("Удалить прикреплённый табель?")) return;
+    var patch = {timesheet_file_path:null, timesheet_file_name:null};
+    patchTicketLocal(id, patch);
+    renderTicketPanel();
+    sb.from("tickets").update(patch).eq("id",id).then(function(){
+      addNote(id, "Табель удалён.");
+    });
+  }
+  function openTimesheetFile(path){
+    sb.storage.from("invoices").createSignedUrl(path, 3600).then(function(res){
+      if(res.data && res.data.signedUrl) window.open(res.data.signedUrl, "_blank");
+      else alert("Не удалось открыть файл табеля.");
+    });
+  }
+  function setTimesheetRef(id){
+    var ref = prompt("Номер заявки c-lector, в которой учтён табель на эту заявку:", "");
+    if(ref==null) return;
+    ref = ref.trim();
+    if(!ref) return;
+    var target = findTicketByRef(ref);
+    if(!target){ alert("Заявка с номером c-lector «"+ref+"» не найдена среди загруженных."); return; }
+    if(target.id===id){ alert("Заявка не может ссылаться сама на себя."); return; }
+    var patch = {timesheet_ref_ticket_id: target.id, timesheet_file_path:null, timesheet_file_name:null};
+    patchTicketLocal(id, patch);
+    renderTicketPanel();
+    sb.from("tickets").update(patch).eq("id",id).then(function(){
+      addNote(id, "Табель на эту заявку учтён в заявке № "+(target.external_ref||target.id)+".");
+    });
+  }
+  function clearTimesheetRef(id){
+    var patch = {timesheet_ref_ticket_id:null};
+    patchTicketLocal(id, patch);
+    renderTicketPanel();
+    sb.from("tickets").update(patch).eq("id",id).then(function(){
+      addNote(id, "Отметка «табель учтён в другой заявке» снята.");
+    });
+  }
   // Автопереход "в работе -> выполнено": как только у заявки одновременно
   // назначен исполнитель, закуплены материалы, вписаны часы устранения и
   // подписан акт — статус сам становится "Закрыта", без дополнительных условий
@@ -1285,6 +1381,26 @@
     renderTicketPanel();
     sb.from("tickets").update(patch).eq("id",id).then(function(){
       addNote(id, "Пометка «дубль» снята.");
+    });
+  }
+  // "Системный брак" — название задаётся вручную в карточке (текстовое поле с
+  // подсказкой уже введённых названий через <datalist>, чтобы не плодить
+  // варианты написания одного и того же брака) — см. viewSystemDefects ниже,
+  // где заявки группируются по этому названию в отдельном разделе меню.
+  function distinctSystemDefectNames(){
+    var seen = {}; var out = [];
+    (state.tickets||[]).forEach(function(t){
+      var n = t.system_defect_name;
+      if(n && !seen[n]){ seen[n]=true; out.push(n); }
+    });
+    return out.sort(function(a,b){ return a.localeCompare(b,"ru"); });
+  }
+  function clearSystemDefectName(id){
+    var patch = {system_defect_name:null};
+    patchTicketLocal(id, patch);
+    renderTicketPanel();
+    sb.from("tickets").update(patch).eq("id",id).then(function(){
+      addNote(id, "Пометка «системный брак» снята.");
     });
   }
   // Ручного закрытия/отклонения/переоткрытия заявки в приложении больше нет
@@ -1433,13 +1549,13 @@
   // Иконка "материал закуплен" опирается на новое поле t.materials_ready —
   // остальные три используют уже существующие поля заявки.
   var STATUS_ICON_DEFS = [
-    { svg:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 0-5.6 5.6L2 19l3 3 7.1-7.1a4 4 0 0 0 5.6-5.6l-2.5 2.5-2-2 2.5-2.5z"/></svg>',
+    { key:'crew', svg:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 0-5.6 5.6L2 19l3 3 7.1-7.1a4 4 0 0 0 5.6-5.6l-2.5 2.5-2-2 2.5-2.5z"/></svg>',
       lit:function(t){ return !!t.assigned_to || !!t.crew_manual_done; },
       label:function(t){ return t.assigned_to ? "Бригада назначена: "+t.assigned_to : (t.crew_manual_done ? "Бригада отмечена вручную" : "Бригада ещё не назначена"); } },
-    { svg:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg>',
+    { key:'materials', svg:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg>',
       lit:function(t){ return !!t.materials_ready; },
       label:function(t){ return t.materials_ready ? "Материал закуплен" : "Материал ещё не закуплен"; } },
-    { svg:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>',
+    { key:'work', svg:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>',
       // "работа выполнена" — раньше срабатывала по наличию ЛЮБОГО фото в общей
       // галерее "Фото", но с разделением "Фото" (замечания) и фото-доказательств
       // к Акту (см. actPhotoGrid/uploadPhoto ниже) это перестало иметь смысл:
@@ -1448,7 +1564,7 @@
       // ручной флажок (work_manual_done) — как "Материал".
       lit:function(t){ return !!t.work_manual_done; },
       label:function(t){ return t.work_manual_done ? "Работа отмечена выполненной" : "Работа ещё не выполнена"; } },
-    { svg:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="9 2 9 8 15 8"/><path d="M9 13h6"/><path d="M9 17h6"/></svg>',
+    { key:'act', svg:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="9 2 9 8 15 8"/><path d="M9 13h6"/><path d="M9 17h6"/></svg>',
       lit:function(t){ return !!t.act_signed; },
       label:function(t){
         if(!t.act_signed) return "Акт ещё не подписан";
@@ -1456,6 +1572,17 @@
         var hasActPhoto = (state.photos||[]).some(function(p){ return p.ticket_id===t.id && p.category==="act"; });
         return hasActPhoto ? "Акт подтверждён по фото-доказательству" : "Акт отмечен вручную (без файла)";
       } }
+  ];
+  // Быстрый доступ к пункту чек-листа по ключу — нужен для фильтра по тегам в
+  // списке заявок (см. TAG_FILTER_DEFS/getFilteredTicketsList ниже), чтобы не
+  // дублировать логику "готово/не готово" из STATUS_ICON_DEFS ещё раз.
+  var STATUS_ICON_BY_KEY = {};
+  STATUS_ICON_DEFS.forEach(function(def){ STATUS_ICON_BY_KEY[def.key] = def; });
+  var TAG_FILTER_DEFS = [
+    { key:'crew', title:'Показать заявки без назначенной бригады' },
+    { key:'materials', title:'Показать заявки без закупленного материала' },
+    { key:'work', title:'Показать заявки, где работа не отмечена выполненной' },
+    { key:'act', title:'Показать заявки без подписанного акта' }
   ];
   // Ряд из 4 иконок хода работ (бригада/материал/работа/акт) — показывается и
   // в общем списке заявок (только для быстрого визуального статуса, кликнуть
@@ -1608,8 +1735,14 @@
   // поэтому в списке заявок нужна явная напоминалка диспетчеру. Показываем
   // только для заявок из c-lector (у ручных заявок нет внешнего статуса,
   // менять там нечего).
+  // Гаснет не по внутреннему статусу заявки (он может стать "closed" сам,
+  // автопереходом — см. maybeAutoComplete), а только когда САМ c-lector при
+  // следующей выгрузке подтвердит, что статус там уже поменяли (см.
+  // isClosedExternalStatus выше) — иначе напоминалка теряет смысл: она именно
+  // про то, что приложение не может записать статус обратно в c-lector.ru.
   function clectorSyncBadge(t){
     if(!t.act_signed || t.source!=='c-lector') return "";
+    if(isClosedExternalStatus(t.external_status)) return "";
     return h`<div class="clector-sync-badge" title="Акт подписан — не забудьте изменить статус этой заявки на сайте c-lector.ru">⟳ изменить статус в c-lector</div>`;
   }
   // Показывает, какую заявку дублирует текущая (см. setDuplicateOf выше) — в
@@ -1720,12 +1853,23 @@
   function getFilteredTicketsList(){
     var f = state.filters || {statusList:[], zone:"", hotel:"", q:"", showClosed:false, attentionOnly:false};
     if(!f.statusList) f.statusList = [];
+    if(!f.tagFilters) f.tagFilters = {};
+    // Активные ключи чек-листа (бригада/материал/работа/акт) из компактных
+    // чекбоксов над колонкой "№ c-lector" (см. TAG_FILTER_DEFS/viewTickets) —
+    // логика "ИЛИ": показываем заявку, если ХОТЯ БЫ один отмеченный пункт у
+    // неё ещё не закрыт (так удобнее искать всё, что просело хоть по одному
+    // фронту, а не только заявки, у которых просели сразу все выбранные).
+    var activeTagKeys = Object.keys(f.tagFilters).filter(function(k){ return f.tagFilters[k]; });
     var q = normalizeForMatch(f.q||"");
     var baseFiltered = state.tickets.filter(function(t){
       if(f.attentionOnly && !t.attention_flag) return false;
       if(f.statusList.length && f.statusList.indexOf(ticketStatusLabel(t))===-1) return false;
       if(f.zone && String(t.zone)!==f.zone) return false;
       if(f.hotel && String(t.hotel_id)!==f.hotel) return false;
+      if(activeTagKeys.length){
+        var missesSelected = activeTagKeys.some(function(key){ var def = STATUS_ICON_BY_KEY[key]; return def && !def.lit(t); });
+        if(!missesSelected) return false;
+      }
       if(q){
         var hay = normalizeForMatch((t.description||"")+" "+(t.description_short||"")+" "+(t.external_ref||""));
         if(hay.indexOf(q)===-1) return false;
@@ -1801,6 +1945,23 @@
       var active = sortField===field;
       return h`<th data-action="sort-tickets" data-field="${field}" style="cursor:pointer;user-select:none;" title="Сортировать">${label}${active?(sortDir==="asc"?" ▲":" ▼"):""}</th>`;
     }
+    // Заголовок "№ c-lector" — не просто сортируемый лейбл, а ещё и место для
+    // компактных чекбоксов-фильтров по 4 пунктам чек-листа. Специально не
+    // переиспользую sortableTh() для этой колонки — тут нужна дополнительная
+    // строка внутри <th>, которой у остальных колонок нет.
+    function refTh(){
+      var active = sortField==="ref";
+      return h`<th data-action="sort-tickets" data-field="ref" style="cursor:pointer;user-select:none;" title="Сортировать">
+        <span>№ c-lector${active?(sortDir==="asc"?" ▲":" ▼"):""}</span>
+        <div class="tag-filter-row">${TAG_FILTER_DEFS.map(function(def){
+          var isOn = !!(f.tagFilters && f.tagFilters[def.key]);
+          return h`<label class="tag-filter-chip${isOn?' active':''}" title="${escapeHtml(def.title)}">
+            ${MS_ICON[def.key]}
+            <input type="checkbox" data-tag-filter="${def.key}" ${isOn?'checked':''}>
+          </label>`;
+        }).join("")}</div>
+      </th>`;
+    }
     return h`
       <div class="filters">
         <div class="status-filter-group">
@@ -1818,7 +1979,7 @@
         <span class="muted" style="margin-left:auto;">${list.length} заявок${(!f.showClosed && hiddenClosedCount>0) ? h` <span title="Закрытые и отклонённые скрыты по умолчанию">(скрыто: ${hiddenClosedCount})</span>` : ""}</span>
       </div>
       <div class="card"><div class="table-wrap"><table>
-        <thead><tr>${sortableTh("№ c-lector","ref")}${sortableTh("Отель","hotel")}${sortableTh("Описание","desc")}${sortableTh("Статус","status")}${sortableTh("Срок","deadline")}</tr></thead>
+        <thead><tr>${refTh()}${sortableTh("Отель","hotel")}${sortableTh("Описание","desc")}${sortableTh("Статус","status")}${sortableTh("Срок","deadline")}</tr></thead>
         <tbody>${list.length===0 ? h`<tr><td colspan="5"><div class="empty-state"><b>Заявок нет</b>Добавьте заявку по данным из c-lector.ru.</div></td></tr>` :
           list.map(function(t){ var hotel=hotelById(t.hotel_id); var di=deadlineInfo(t);
             return h`<tr data-open-ticket="${t.id}" ${t.attention_flag?'class="attn-row"':''}>
@@ -1836,6 +1997,34 @@
               <td style="${di.overdue?'color:var(--crit);font-weight:600;':(di.soon?'color:var(--warn);font-weight:600;':'')}" title="${escapeHtml(di.label)}">${di.dateLabel}</td>
             </tr>`; }).join("")}
         </tbody></table></div></div>`;
+  }
+
+  // Раздел "Системный брак" — заявки, помеченные как системный брак (см.
+  // distinctSystemDefectNames/clearSystemDefectName выше), сгруппированные по
+  // названию брака, чтобы видеть под одним заголовком все заявки, которые к
+  // нему относятся, а не искать их по одной в общем списке.
+  function viewSystemDefects(){
+    var withDefect = state.tickets.filter(function(t){ return !!t.system_defect_name; });
+    if(!withDefect.length) return h`<div class="card card-pad"><div class="empty-state"><b>Системных браков пока нет</b>Отметьте заявку «Системный брак» в её карточке (поле рядом с описанием) — она появится здесь, сгруппированная по названию.</div></div>`;
+    var groups = {};
+    withDefect.forEach(function(t){ (groups[t.system_defect_name] = groups[t.system_defect_name]||[]).push(t); });
+    var names = Object.keys(groups).sort(function(a,b){ return groups[b].length - groups[a].length || a.localeCompare(b,"ru"); });
+    return h`<div class="row-gap">${names.map(function(name){
+      var list = groups[name];
+      return h`<div class="card card-pad">
+        <div class="section-title">${escapeHtml(name)} <span class="muted" style="text-transform:none;font-weight:400;">— ${list.length} ${ruPlural(list.length,["заявка","заявки","заявок"])}</span></div>
+        <div class="table-wrap"><table><thead><tr><th>№ c-lector</th><th>Отель</th><th>Описание</th><th>Статус</th></tr></thead><tbody>
+          ${list.map(function(t){ var hotel = hotelById(t.hotel_id);
+            return h`<tr data-open-ticket="${t.id}">
+              <td class="mono">${attentionBadge(t)}${t.external_ref? escapeHtml(t.external_ref) : '<span class="muted">—</span>'}</td>
+              <td><span class="ttl">№${hotel.id} ${hotel.name}</span></td>
+              <td>${escapeHtml(displayShort(t))}</td>
+              <td>${t.external_status? externalStatusPill(t.external_status): statusPill(t.status)}</td>
+            </tr>`;
+          }).join("")}
+        </tbody></table></div>
+      </div>`;
+    }).join("")}</div>`;
   }
 
   // Раньше здесь был отдельный столбец "Зоны" с чекбоксами (1/2/3) на каждого
@@ -2093,6 +2282,21 @@
             <button class="btn btn-primary" type="submit">Создать</button>
           </form>
         </div>
+      </div>
+      <div class="card card-pad" style="margin-top:18px;">
+        <div class="section-title">Ответственный техник по объектам</div>
+        <div class="helptext" style="margin-bottom:10px;">Тот, кто от VDS выезжает на объект на осмотр, если там что-то произошло — не путать с «Лицом от Заказчика» (контакт со стороны отеля, редактируется в разделе «Отели»).</div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Отель</th><th>Ответственный техник</th><th>Телефон</th></tr></thead>
+          <tbody>${state.hotels.length===0 ? h`<tr><td colspan="3"><div class="empty-state"><b>Отелей пока нет</b>Добавьте их в разделе «Отели».</div></td></tr>` :
+            state.hotels.slice().sort(function(a,b){ return a.id-b.id; }).map(function(x){
+              return h`<tr>
+                <td><span class="ttl">№${x.id} ${escapeHtml(x.name)}</span></td>
+                <td><input type="text" data-hotel-field="vds_tech_name" data-id="${x.id}" value="${escapeHtml(x.vds_tech_name||'')}" placeholder="ФИО" style="min-width:160px;"></td>
+                <td><input type="text" data-hotel-field="vds_tech_phone" data-id="${x.id}" value="${escapeHtml(x.vds_tech_phone||'')}" placeholder="+7…" style="min-width:140px;"></td>
+              </tr>`;
+            }).join("")}
+          </tbody></table></div>
       </div>`;
   }
 
@@ -2124,8 +2328,8 @@
       <div class="row-gap">
         <div class="card">
           <div class="table-wrap"><table>
-            <thead><tr><th>№</th><th>Название</th><th>Зона</th><th>Координаты (для карты)</th><th>В эксплуатации</th><th></th></tr></thead>
-            <tbody>${list.length===0 ? h`<tr><td colspan="6"><div class="empty-state"><b>Отелей нет</b>Добавьте первый отель ниже.</div></td></tr>` :
+            <thead><tr><th>№</th><th>Название</th><th>Зона</th><th>Координаты (для карты)</th><th>Лицо от Заказчика</th><th>Должность</th><th>В эксплуатации</th><th></th></tr></thead>
+            <tbody>${list.length===0 ? h`<tr><td colspan="8"><div class="empty-state"><b>Отелей нет</b>Добавьте первый отель ниже.</div></td></tr>` :
               list.map(function(x){
                 return h`<tr>
                   <td class="mono muted">№${x.id}</td>
@@ -2140,12 +2344,14 @@
                     <input type="number" step="0.0001" data-hotel-field="lat" data-id="${x.id}" value="${x.lat!=null?x.lat:''}" placeholder="широта" style="width:96px;">
                     <input type="number" step="0.0001" data-hotel-field="lng" data-id="${x.id}" value="${x.lng!=null?x.lng:''}" placeholder="долгота" style="width:96px;">
                   </td>
+                  <td><input type="text" data-hotel-field="client_contact_name" data-id="${x.id}" value="${escapeHtml(x.client_contact_name||'')}" placeholder="ФИО (необязательно)" style="min-width:140px;"></td>
+                  <td><input type="text" data-hotel-field="client_contact_position" data-id="${x.id}" value="${escapeHtml(x.client_contact_position||'')}" placeholder="должность" style="min-width:120px;"></td>
                   <td><button class="btn btn-sm ${x.in_service===false?'':'btn-ghost'}" data-action="hotel-toggle-active" data-id="${x.id}" data-val="${x.in_service===false?1:0}">${x.in_service===false?'Включить':'В эксплуатации'}</button></td>
                   <td><button class="btn btn-sm btn-ghost btn-danger" data-action="hotel-delete" data-id="${x.id}">Удалить</button></td>
                 </tr>`;
               }).join("")}
             </tbody></table></div>
-          <div class="helptext" style="padding:10px 16px;">Зона определяет срок прибытия по регламенту: Зона 1 — 24ч, Зона 2 — 48ч, Зона 3 — 72ч. Координаты нужны только для метки на «Карте» — необязательны. Отель, по которому уже есть заявки, нельзя удалить (снимите «В эксплуатации» вместо этого).</div>
+          <div class="helptext" style="padding:10px 16px;">Зона определяет срок прибытия по регламенту: Зона 1 — 24ч, Зона 2 — 48ч, Зона 3 — 72ч. Координаты нужны только для метки на «Карте» — необязательны. «Лицо от Заказчика» — контакт со стороны отеля-клиента (необязательно). Отель, по которому уже есть заявки, нельзя удалить (снимите «В эксплуатации» вместо этого).</div>
         </div>
         <div class="card card-pad">
           <div class="section-title">Добавить отель</div>
@@ -2202,8 +2408,8 @@
         </div>`;
     }
     var preview = computeImportPreview();
-    var fieldLabel = {external_ref:"Внешний номер (для защиты от дублей)", hotel:"Отель", description:"Описание", group:"Группа критичности (1/2/3)", created_at:"Дата создания", status:"Статус (из c-lector)", deadline:"Срок устранения (из c-lector)", location:"Локация/комната (необязательно)"};
-    var fieldOrder = ["hotel","description","location","external_ref","status","deadline","group","created_at"];
+    var fieldLabel = {external_ref:"Внешний номер (для защиты от дублей)", hotel:"Отель", description:"Описание", group:"Группа критичности (1/2/3)", created_at:"Дата создания", status:"Статус (из c-lector)", deadline:"Срок устранения (из c-lector)", location:"Локация/комната (необязательно)", case_type:"Гарантия/не гарантия (необязательно)"};
+    var fieldOrder = ["hotel","description","location","external_ref","status","deadline","case_type","group","created_at"];
     return h`
       <div class="row-gap">
         <div class="card card-pad">
@@ -2350,6 +2556,13 @@
                 <button type="button" class="btn btn-ghost btn-sm" data-action="duplicate-clear" data-id="${t.id}">Снять пометку</button>`;
             })()}
           </div>
+          <div class="actions-row" style="align-items:center;flex-wrap:wrap;">
+            ${t.system_defect_name ? h`<span class="pill pill-crit">Системный брак: ${escapeHtml(t.system_defect_name)}</span>` : ""}
+            <input type="text" id="system-defect-input" data-id="${t.id}" list="system-defect-names" value="${escapeHtml(t.system_defect_name||"")}" placeholder="Название системного брака…" style="max-width:220px;">
+            <datalist id="system-defect-names">${distinctSystemDefectNames().map(function(n){ return `<option value="${escapeHtml(n)}">`; }).join("")}</datalist>
+            ${t.system_defect_name ? h`<button type="button" class="btn btn-ghost btn-sm" data-action="system-defect-clear" data-id="${t.id}">Снять пометку</button>` : ""}
+            ${feedbackHtml("system-defect-feedback")}
+          </div>
           <div>
             <div class="section-title">Ход работ ${infoTip("Значок пункта можно отметить кликом вручную (для случаев, когда что-то по факту сделано, а подтверждения в системе нет) — кроме случаев, когда пункт уже выполнен реальным действием (назначен исполнитель, прикреплён файл акта): тогда значок просто показывает это и вручную не снимается. «Материал» и «Работа» — всегда ручные флажки. В обоих случаях тот же значок сразу подсвечивается вверху карточки, у номера заявки. Когда отмечены все 4 пункта, заявка автоматически переходит в статус «Выполнено».")}</div>
             ${(function(){
@@ -2454,19 +2667,45 @@
                   <label class="btn btn-sm" style="margin-top:8px;position:relative;overflow:hidden;align-self:flex-start;display:inline-flex;width:fit-content;">
                     Прикрепить фото к акту
                     <input type="file" class="ms-quick-act-photo" data-id="${t.id}" accept="image/*" capture="environment" multiple style="position:absolute;inset:0;opacity:0;cursor:pointer;">
-                  </label>`
+                  </label>
+                  <div class="helptext" style="margin-top:12px;margin-bottom:6px;">Табель на выполненные работы (для расчёта зарплаты):</div>
+                  ${t.timesheet_ref_ticket_id ? (function(){
+                      var ref = state.tickets.find(function(x){return x.id===t.timesheet_ref_ticket_id;});
+                      var refLabel = ref ? (ref.external_ref ? ("№ "+escapeHtml(ref.external_ref)) : escapeHtml(ref.id)) : "заявки (не найдена в списке)";
+                      return h`<div class="actions-row" style="align-items:center;">
+                        <span class="pill pill-neutral">Учтён в заявке ${refLabel}</span>
+                        ${ref ? h`<button type="button" class="btn btn-ghost btn-sm" data-open-ticket="${ref.id}">Открыть</button>` : ""}
+                        <button type="button" class="btn btn-ghost btn-sm" data-action="timesheet-ref-clear" data-id="${t.id}">Снять</button>
+                      </div>`;
+                    })() : (t.timesheet_file_path ? h`
+                    <div class="actions-row">
+                      <button type="button" class="btn btn-sm" data-action="timesheet-open" data-path="${escapeHtml(t.timesheet_file_path)}">${escapeHtml(t.timesheet_file_name||'Файл табеля')}</button>
+                      <button type="button" class="btn btn-sm btn-ghost" data-action="timesheet-clear" data-id="${t.id}">Удалить</button>
+                    </div>` : h`
+                    <div class="actions-row" style="flex-wrap:wrap;">
+                      <label class="btn btn-sm" style="position:relative;overflow:hidden;">
+                        Прикрепить табель
+                        <input type="file" class="ms-quick-timesheet" data-id="${t.id}" accept="application/pdf,image/*" style="position:absolute;inset:0;opacity:0;cursor:pointer;">
+                      </label>
+                      <button type="button" class="btn btn-ghost btn-sm" data-action="timesheet-ref-set" data-id="${t.id}">Табель учтён в другой заявке…</button>
+                    </div>`)}`
               })}`;
             })()}
           </div>
           ${t.status==="onsite" ? h`<div>
             <div class="section-title">Категория (по осмотру)</div>
-            <select id="case-select" data-id="${t.id}">
-              <option value="">Не определена</option>
-              <option value="warranty" ${t.case_type==='warranty'?'selected':''}>Гарантийный случай</option>
-              <option value="nonwarranty" ${t.case_type==='nonwarranty'?'selected':''}>Негарантийный случай</option>
-              <option value="unfounded" ${t.case_type==='unfounded'?'selected':''}>Необоснованная заявка</option>
-            </select>
-            <div class="helptext">Влияет на расчёт оплаты по Регламенту (п.5.1–5.4).</div>
+            ${t.source==='c-lector' ? h`
+              <div class="kv"><span class="k">Категория</span><span class="v">${t.case_type? CASE_LABEL[t.case_type]:'ещё не пришла из c-lector'}</span></div>
+              <div class="helptext">Гарантия/не гарантия для заявок из c-lector приходит из выгрузки — вручную не редактируется (см. импорт).</div>
+            ` : h`
+              <select id="case-select" data-id="${t.id}">
+                <option value="">Не определена</option>
+                <option value="warranty" ${t.case_type==='warranty'?'selected':''}>Гарантийный случай</option>
+                <option value="nonwarranty" ${t.case_type==='nonwarranty'?'selected':''}>Негарантийный случай</option>
+                <option value="unfounded" ${t.case_type==='unfounded'?'selected':''}>Необоснованная заявка</option>
+              </select>
+              <div class="helptext">Влияет на расчёт оплаты по Регламенту (п.5.1–5.4).</div>
+            `}
           </div>` : ""}
           <div>
             <div class="section-title">Карточка заявки</div>
@@ -2618,11 +2857,12 @@
       return;
     }
     if(!navAllowed(state.route.view)){ state.route = {view: firstAllowedView(), id:null}; }
-    var titleMap = {dashboard:"Дашборд", tickets:"Заявки", team:"Команда", parts:"Склад ЗИП", "import":"Импорт из c-lector", registry:"Реестр платежей", map:"Карта", crews:"Бригады", hotels:"Отели"};
-    var body = state.route.view==="tickets"?viewTickets(): state.route.view==="team"?viewTeam(): state.route.view==="parts"?viewParts(): state.route.view==="import"?viewImport(): state.route.view==="registry"?viewRegistry(): state.route.view==="map"?viewMap(): state.route.view==="crews"?viewCrews(): state.route.view==="hotels"?viewHotels(): viewDashboard();
+    var titleMap = {dashboard:"Дашборд", tickets:"Заявки", team:"Команда", parts:"Склад ЗИП", "import":"Импорт из c-lector", registry:"Реестр платежей", map:"Карта", crews:"Бригады", hotels:"Отели", systemdefects:"Системный брак"};
+    var body = state.route.view==="tickets"?viewTickets(): state.route.view==="team"?viewTeam(): state.route.view==="parts"?viewParts(): state.route.view==="import"?viewImport(): state.route.view==="registry"?viewRegistry(): state.route.view==="map"?viewMap(): state.route.view==="crews"?viewCrews(): state.route.view==="hotels"?viewHotels(): state.route.view==="systemdefects"?viewSystemDefects(): viewDashboard();
 
     var navItems = [
       ["dashboard","Дашборд"], ["tickets","Заявки"], ["import","Импорт из c-lector"], ["map","Карта"],
+      ["systemdefects","Системный брак"],
       ["team","Команда"], ["crews","Бригады"], ["parts","Склад ЗИП"], ["registry","Реестр платежей"], ["hotels","Отели"]
     ].filter(function(x){ return navAllowed(x[0]); });
     app.innerHTML = h`
@@ -2664,6 +2904,11 @@
     // по ней никогда не долетал до этой проверки и позиция не удалялась.
     var partRemoveEl = t.closest("[data-part-remove]");
     if(partRemoveEl){ if(confirm("Удалить позицию склада?")) removePart(partRemoveEl.getAttribute("data-part-remove")); return; }
+    // Чекбоксы-фильтры по чек-листу сидят внутри сортируемого заголовка
+    // "№ c-lector" (data-action="sort-tickets") — без этой проверки клик по
+    // ним заодно переключал бы сортировку колонки (клик всплывает до th).
+    // Само переключение фильтра обрабатывается по событию change ниже.
+    if(t.closest(".tag-filter-row")) return;
 
     if(t.id==="import-parse-btn"){
       var ta = document.getElementById("import-paste"); var parsed = parseDelimited(ta?ta.value:"");
@@ -2702,6 +2947,10 @@
       if(action==="act-signed-toggle") return setActSigned(id, actionEl.getAttribute("data-val")==="1");
       if(action==="act-open") return openActFile(actionEl.getAttribute("data-path"));
       if(action==="act-clear") return clearActSigned(id);
+      if(action==="timesheet-open") return openTimesheetFile(actionEl.getAttribute("data-path"));
+      if(action==="timesheet-clear") return clearTimesheetFile(id);
+      if(action==="timesheet-ref-set") return setTimesheetRef(id);
+      if(action==="timesheet-ref-clear") return clearTimesheetRef(id);
       if(action==="invoice-open") return openInvoiceFile(actionEl.getAttribute("data-path"));
       if(action==="invoice-delete") return deleteInvoice(id, actionEl.getAttribute("data-path"));
       if(action==="registry-export") return exportRegistryExcel();
@@ -2769,6 +3018,7 @@
       }
       if(action==="duplicate-set") return setDuplicateOf(id);
       if(action==="duplicate-clear") return clearDuplicateOf(id);
+      if(action==="system-defect-clear") return clearSystemDefectName(id);
       if(action==="photo-open") return openPhotoFile(actionEl.getAttribute("data-path"));
       if(action==="photo-delete"){ deletePhoto(id, actionEl.getAttribute("data-path")); return; }
       if(action==="hotel-add"){
@@ -2786,6 +3036,7 @@
   document.addEventListener("change", function(e){
     if(e.target.matches("[data-filter]")){ state.filters=state.filters||{}; state.filters[e.target.getAttribute("data-filter")]=e.target.value; render(); }
     if(e.target.matches("[data-filter-checkbox]")){ state.filters=state.filters||{}; state.filters[e.target.getAttribute("data-filter-checkbox")]=e.target.checked; render(); return; }
+    if(e.target.matches("[data-tag-filter]")){ state.filters=state.filters||{}; state.filters.tagFilters=state.filters.tagFilters||{}; state.filters.tagFilters[e.target.getAttribute("data-tag-filter")]=e.target.checked; render(); return; }
     if(e.target.matches("[data-registry-filter]")){ state.registryFilters=state.registryFilters||{}; state.registryFilters[e.target.getAttribute("data-registry-filter")]=e.target.value; render(); return; }
     if(e.target.matches("[data-hotel-field]")){ updateHotelField(e.target.getAttribute("data-id"), e.target.getAttribute("data-hotel-field"), e.target.value); return; }
     if(e.target.id==="import-file"){ var f=e.target.files&&e.target.files[0]; if(f) loadImportFile(f); return; }
@@ -2805,6 +3056,13 @@
       saveTicketField(dsId, {description_short: dsVal}, "desc-short-feedback").then(function(ok){
         if(!ok) return;
         addNote(dsId, dsVal ? ("Изменена формулировка «Сути»: "+dsVal) : "Формулировка «Сути» очищена.");
+      });
+    }
+    if(e.target.id==="system-defect-input"){
+      var sdId = e.target.getAttribute("data-id"), sdVal = e.target.value.trim()||null;
+      saveTicketField(sdId, {system_defect_name: sdVal}, "system-defect-feedback").then(function(ok){
+        if(!ok) return;
+        addNote(sdId, sdVal ? ("Отмечена как системный брак: "+sdVal) : "Пометка «системный брак» снята.");
       });
     }
     if(e.target.matches("[data-crew-rename]")) renameCrew(e.target.getAttribute("data-crew-rename"), e.target.value);
@@ -2843,6 +3101,13 @@
       if(!qactFile) return;
       var qactId = e.target.getAttribute("data-id");
       uploadActFile(qactId, qactFile).then(function(){ e.target.value=""; });
+      return;
+    }
+    if(e.target.matches(".ms-quick-timesheet")){
+      var qtsFile = e.target.files && e.target.files[0];
+      if(!qtsFile) return;
+      var qtsId = e.target.getAttribute("data-id");
+      uploadTimesheetFile(qtsId, qtsFile).then(function(){ e.target.value=""; });
       return;
     }
   });
