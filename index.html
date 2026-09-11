@@ -134,11 +134,6 @@
   .status-icon.warn-lit{ color:var(--warn); opacity:1; filter:drop-shadow(0 0 3px var(--warn)); }
   .attn-badge{ display:inline-flex; color:var(--crit); margin-right:5px; filter:drop-shadow(0 0 3px var(--crit)); vertical-align:middle; }
   .attn-badge svg{ width:15px; height:15px; display:block; }
-  /* Тег-фильтры (см. TAG_FILTER_DEFS) не скрывают заявки, а подсвечивают строку —
-     объявлена ВЫШЕ .attn-row по каскаду, поэтому "особое внимание" остаётся
-     заметнее, если у заявки одновременно есть обе пометки. */
-  tr.tag-hl{ background:var(--accent-soft); }
-  tr.tag-hl:hover{ filter:brightness(0.97); }
   tr.attn-row{ background:var(--crit-soft); }
   tr.attn-row:hover{ filter:brightness(0.97); }
   .attn-toggle-btn{ color:var(--ink-faint); opacity:.55; }
@@ -158,6 +153,7 @@
 
   /* ---------- table ---------- */
   .table-wrap{ overflow-x:auto; }
+  .registry-totals-row td{ background:var(--surface-2); border-top:2px solid var(--line); padding-top:8px; padding-bottom:8px; }
   table{ width:100%; border-collapse:collapse; font-size:13px; }
   th{ text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-faint); font-weight:600; padding:9px 12px; border-bottom:1px solid var(--line); white-space:nowrap; }
   td{ padding:11px 12px; border-bottom:1px solid var(--line); vertical-align:middle; }
@@ -387,7 +383,7 @@
   // "Оплачено" (версия 0.2.2, п.3) добавлена последней колонкой, чтобы не
   // сдвигать нумерацию/сортировку уже существующих — редактировать её могут
   // только роли, перечисленные в canEditRegistry() выше.
-  var REGISTRY_COLUMN_LABELS = ["№","№ заявки (c-lector)","Отель","Файл","Добавлен в реестр","Оплачено"];
+  var REGISTRY_COLUMN_LABELS = ["№","№ заявки (c-lector)","Отель","Файл","Добавлен в реестр","Сумма","Оплачено"];
 
   function hotelById(id){ var list=state.hotels||[]; for (var i=0;i<list.length;i++){ if (list[i].id===Number(id)) return list[i]; } return null; }
   function fmtDate(iso){ if(!iso) return "—"; var d=new Date(iso); return d.toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit",year:"numeric"})+" "+d.toLocaleTimeString("ru-RU",{hour:"2-digit",minute:"2-digit"}); }
@@ -893,6 +889,21 @@
   // (см. reloadInvoices) придёт отдельным сетевым запросом и может не успеть до
   // этой проверки, и заявка с последним оплаченным счётом не закрылась бы сама
   // до следующего изменения.
+  // Сумма счёта в «Реестре платежей» (0.2.3, п.2) — как и "Оплачено", доступна
+  // только ролям из canEditRegistry(); нужна для подсчёта итогов "оплачено"/
+  // "к оплате" внизу реестра. Локально патчим состояние по тому же принципу,
+  // что и setInvoicePaid выше — итоговая строка пересчитывается сразу же.
+  function setInvoiceAmount(invoiceId, val){
+    if(!canEditRegistry()){ alert("Указывать сумму счёта может только Администратор, Руководитель или Финансист."); return; }
+    var amount = (val==null || val==="") ? null : Number(val);
+    if(amount!=null && isNaN(amount)){ render(); return; }
+    var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
+    if(iv) iv.amount = amount;
+    render();
+    sb.from("invoices").update({amount:amount}).eq("id", invoiceId).then(function(){
+      if(iv) addNote(iv.ticket_id, "Указана сумма счёта «"+iv.file_name+"»: "+(amount!=null?amount:"—")+".");
+    });
+  }
   function setInvoicePaid(invoiceId, val){
     if(!canEditRegistry()){ alert("Отмечать оплату счетов может только Администратор, Руководитель или Финансист."); return; }
     var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
@@ -985,6 +996,7 @@
         hotel ? ("№"+hotel.id+" "+hotel.name) : "",
         iv.file_name || "",
         iv.added_to_registry_at ? fmtDateShort(iv.added_to_registry_at) : "",
+        iv.amount!=null ? iv.amount : "",
         iv.paid ? "Да" : "Нет"
       ];
     });
@@ -1118,13 +1130,23 @@
   // Заявки регистрируются только через импорт из c-lector (см. раздел "Импорт") —
   // ручного создания заявки в платформе больше нет, так как источник один.
   function myLabel(){ return (state.me && (state.me.name||state.me.email)) || "—"; }
+  // Для журнала заявки (0.2.3): указываем не только имя автора записи, но и его
+  // роль в системе — чтобы по журналу было видно, кто именно (администратор,
+  // гл. инженер, снабжение...) выполнил то или иное действие. На остальные
+  // места, где используется myLabel() (загрузка счетов/фото, импорт из
+  // c-lector), это намеренно не влияет — там роль не требовалась.
+  function myLabelWithRole(){
+    var base = myLabel();
+    var roleLabel = state.me && ROLE_LABEL[state.me.role];
+    return roleLabel ? base+" ("+roleLabel+")" : base;
+  }
   function addNote(ticketId, text){
     // не полагаемся только на realtime-канал notes-* (может запаздывать или не
     // сработать, если для ticket_notes republication/RLS настроены не так, как
     // для остальных таблиц) — как только запись реально сохранена, сразу же
     // перезапрашиваем журнал открытой заявки, чтобы запись гарантированно
     // появилась в интерфейсе немедленно.
-    return sb.from("ticket_notes").insert({ticket_id:ticketId, author:myLabel(), note_text:text}).then(function(res){
+    return sb.from("ticket_notes").insert({ticket_id:ticketId, author:myLabelWithRole(), note_text:text}).then(function(res){
       if(res && res.error){ console.error("addNote failed:", res.error); }
       else if(state.selectedTicketId===ticketId){ loadNotesFor(ticketId); }
       return res;
@@ -1653,21 +1675,14 @@
   // дублировать логику "готово/не готово" из STATUS_ICON_DEFS ещё раз.
   var STATUS_ICON_BY_KEY = {};
   STATUS_ICON_DEFS.forEach(function(def){ STATUS_ICON_BY_KEY[def.key] = def; });
+  // Версия 0.2.3: тег-фильтры снова настоящий фильтр (не подсветка, как было в
+  // 0.2.1) — заголовки описывают именно это (см. getFilteredTicketsList).
   var TAG_FILTER_DEFS = [
-    { key:'crew', title:'Подсветить заявки без назначенной бригады' },
-    { key:'materials', title:'Подсветить заявки без закупленного материала' },
-    { key:'work', title:'Подсветить заявки, где работа не отмечена выполненной' },
-    { key:'act', title:'Подсветить заявки без подписанного акта' }
+    { key:'crew', title:'Показать только заявки с назначенной бригадой' },
+    { key:'materials', title:'Показать только заявки с закупленным материалом' },
+    { key:'work', title:'Показать только заявки, где работа отмечена выполненной' },
+    { key:'act', title:'Показать только заявки с подписанным актом' }
   ];
-  // Тег-фильтры (чекбоксы над колонкой "№ c-lector", см. TAG_FILTER_DEFS выше) не
-  // скрывают заявки, а подсвечивают строку — заявка подсвечивается, если ХОТЯ БЫ
-  // один из отмеченных пунктов чек-листа у неё ещё не закрыт (логика "ИЛИ").
-  function ticketTagHighlighted(t){
-    var tagFilters = (state.filters && state.filters.tagFilters) || {};
-    var activeTagKeys = Object.keys(tagFilters).filter(function(k){ return tagFilters[k]; });
-    if(!activeTagKeys.length) return false;
-    return activeTagKeys.some(function(key){ var def = STATUS_ICON_BY_KEY[key]; return def && !def.lit(t); });
-  }
   // Ряд из 4 иконок хода работ (бригада/материал/работа/акт) — показывается и
   // в общем списке заявок (только для быстрого визуального статуса, кликнуть
   // по ним там нельзя — data-action на иконках нет), и в карточке заявки под
@@ -1958,11 +1973,14 @@
     var f = state.filters || {statusList:[], zone:"", hotel:"", q:"", showClosed:false, attentionOnly:false};
     if(!f.statusList) f.statusList = [];
     if(!f.tagFilters) f.tagFilters = {};
+    if(!f.caseTypeList) f.caseTypeList = [];
     // Активные ключи чек-листа (бригада/материал/работа/акт) из компактных
     // чекбоксов над колонкой "№ c-lector" (см. TAG_FILTER_DEFS/viewTickets) —
-    // по решению Антона они НЕ скрывают остальные заявки, а подсвечивают строку
-    // (класс "tag-hl", см. viewTickets) у тех заявок, где ХОТЯ БЫ один отмеченный
-    // пункт ещё не закрыт (логика "ИЛИ") — список остаётся полным.
+    // версия 0.2.3 вернула им поведение настоящего фильтра (по просьбе Антона):
+    // включённый тег скрывает все заявки, где этот пункт ещё НЕ выполнен
+    // (зелёный/lit), а не подсвечивает их, как было в 0.2.1. Несколько отмеченных
+    // тегов одновременно — заявка должна остаться, только если выполнены ВСЕ
+    // отмеченные пункты сразу (логика "И", как и для остальных фильтров списка).
     var activeTagKeys = Object.keys(f.tagFilters).filter(function(k){ return f.tagFilters[k]; });
     var q = normalizeForMatch(f.q||"");
     var baseFiltered = state.tickets.filter(function(t){
@@ -1970,6 +1988,9 @@
       if(f.statusList.length && f.statusList.indexOf(ticketStatusLabel(t))===-1) return false;
       if(f.zone && String(t.zone)!==f.zone) return false;
       if(f.hotel && String(t.hotel_id)!==f.hotel) return false;
+      if(f.caseTypeList.length && f.caseTypeList.indexOf(t.case_type)===-1) return false;
+      if(f.systemDefectOnly && !t.system_defect_name) return false;
+      if(activeTagKeys.length && !activeTagKeys.every(function(key){ var def = STATUS_ICON_BY_KEY[key]; return def && def.lit(t); })) return false;
       if(q){
         var hay = normalizeForMatch((t.description||"")+" "+(t.description_short||"")+" "+(t.external_ref||""));
         if(hay.indexOf(q)===-1) return false;
@@ -2020,10 +2041,18 @@
   function exportTicketsExcel(){
     if(typeof XLSX==="undefined" || !XLSX.utils){ alert("Модуль Excel не загрузился (возможно, заблокирован интернет/VPN) — обновите страницу и попробуйте снова."); return; }
     var list = getFilteredTicketsList().list;
-    var header = ["№ c-lector","Отель","Локация","Описание","Статус","Исполнитель","Срок","Особое внимание"];
+    var header = ["№ c-lector","Отель","Локация","Описание","Статус","Исполнитель","Срок","Особое внимание","Бригада","Материал","Работа","Акт","Категория","Системный брак"];
     var rows = list.map(function(t){
       var hotel = hotelById(t.hotel_id); var di = deadlineInfo(t);
-      return [ t.external_ref||"", hotel?("№"+hotel.id+" "+hotel.name):"", t.location||"", displayShort(t), ticketStatusLabel(t), t.assigned_to||"", di.label, t.attention_flag?("Да"+(t.attention_note?": "+t.attention_note:"")):"" ];
+      return [
+        t.external_ref||"", hotel?("№"+hotel.id+" "+hotel.name):"", t.location||"", displayShort(t), ticketStatusLabel(t), t.assigned_to||"", di.label, t.attention_flag?("Да"+(t.attention_note?": "+t.attention_note:"")):"",
+        STATUS_ICON_BY_KEY.crew && STATUS_ICON_BY_KEY.crew.lit(t) ? "Да" : "Нет",
+        STATUS_ICON_BY_KEY.materials && STATUS_ICON_BY_KEY.materials.lit(t) ? "Да" : "Нет",
+        STATUS_ICON_BY_KEY.work && STATUS_ICON_BY_KEY.work.lit(t) ? "Да" : "Нет",
+        STATUS_ICON_BY_KEY.act && STATUS_ICON_BY_KEY.act.lit(t) ? "Да" : "Нет",
+        t.case_type ? CASE_LABEL[t.case_type] : "",
+        t.system_defect_name || ""
+      ];
     });
     var ws = XLSX.utils.aoa_to_sheet([header].concat(rows));
     ws["!cols"] = header.map(function(){ return {wch:22}; });
@@ -2034,6 +2063,7 @@
   function viewTickets(){
     var f = state.filters || {statusList:[], zone:"", hotel:"", q:"", showClosed:false, attentionOnly:false};
     if(!f.statusList) f.statusList = [];
+    if(!f.caseTypeList) f.caseTypeList = [];
     // Список статусов для фильтра строим из реальных значений, которые сейчас есть
     // в заявках (текст из c-lector произвольный, единого перечня нет) — а не из
     // фиксированного внутреннего набора new/dispatched/onsite/closed/rejected.
@@ -2070,11 +2100,18 @@
           }).join("")}
           ${f.statusList.length ? h`<a href="#" data-action="clear-status-filter" style="font-size:12px;">сбросить</a>` : ""}
         </div>
+        <div class="status-filter-group">
+          ${Object.keys(CASE_LABEL).map(function(ct){ var active = f.caseTypeList.indexOf(ct)>-1;
+            return h`<span class="status-filter-chip ${active?'active':''}" data-action="toggle-case-filter" data-value="${ct}">${escapeHtml(CASE_LABEL[ct])}</span>`;
+          }).join("")}
+          ${f.caseTypeList.length ? h`<a href="#" data-action="clear-case-filter" style="font-size:12px;">сбросить</a>` : ""}
+        </div>
         <select data-filter="zone"><option value="">Все зоны</option>${[1,2,3].map(function(z){return h`<option value="${z}" ${f.zone===String(z)?'selected':''}>Зона ${z}</option>`;}).join("")}</select>
         <select data-filter="hotel"><option value="">Все отели</option>${state.hotels.filter(function(x){return x.in_service;}).map(function(x){return h`<option value="${x.id}" ${f.hotel===String(x.id)?'selected':''}>№${x.id} ${x.name}</option>`;}).join("")}</select>
         <input type="text" data-filter="q" value="${escapeHtml(f.q||"")}" placeholder="Поиск по описанию или № заявки…" style="min-width:220px;">
         <div class="chip-toggle"><label><input type="checkbox" data-filter-checkbox="showClosed" ${f.showClosed?'checked':''}> Показывать закрытые/отклонённые</label></div>
         <div class="chip-toggle"><label><input type="checkbox" data-filter-checkbox="attentionOnly" ${f.attentionOnly?'checked':''}> Только с пометкой «особое внимание»</label></div>
+        <div class="chip-toggle"><label><input type="checkbox" data-filter-checkbox="systemDefectOnly" ${f.systemDefectOnly?'checked':''}> Только системный брак</label></div>
         <button class="btn btn-sm" data-action="tickets-export" ${list.length===0?'disabled':''}>Экспорт в Excel</button>
         <span class="muted" style="margin-left:auto;">${list.length} заявок${(!f.showClosed && hiddenClosedCount>0) ? h` <span title="Закрытые и отклонённые скрыты по умолчанию">(скрыто: ${hiddenClosedCount})</span>` : ""}</span>
       </div>
@@ -2082,8 +2119,7 @@
         <thead><tr>${refTh()}${sortableTh("Отель","hotel")}${sortableTh("Описание","desc")}${sortableTh("Статус","status")}${sortableTh("Срок","deadline")}</tr></thead>
         <tbody>${list.length===0 ? h`<tr><td colspan="5"><div class="empty-state"><b>Заявок нет</b>Добавьте заявку по данным из c-lector.ru.</div></td></tr>` :
           list.map(function(t){ var hotel=hotelById(t.hotel_id); var di=deadlineInfo(t);
-            var trClasses = []; if(t.attention_flag) trClasses.push("attn-row"); if(ticketTagHighlighted(t)) trClasses.push("tag-hl");
-            return h`<tr data-open-ticket="${t.id}" ${trClasses.length?('class="'+trClasses.join(" ")+'"'):''}>
+            return h`<tr data-open-ticket="${t.id}" ${t.attention_flag?'class="attn-row"':''}>
               <td class="mono">${attentionBadge(t)}${t.external_ref? escapeHtml(t.external_ref) : '<span class="muted">—</span>'}
                 <div style="margin-top:4px;">${statusIconsRow(t)}</div>
                 ${duplicateBadge(t)}
@@ -2248,8 +2284,19 @@
     }
     // поле сортировки для каждой колонки — null там, где сортировка не имеет
     // смысла (порядковый номер, сам файл, галочка "оплачено")
-    var REGISTRY_SORT_FIELDS = [null,"ref","hotel",null,"added_at",null];
+    var REGISTRY_SORT_FIELDS = [null,"ref","hotel",null,"added_at",null,null];
     var editableRegistry = canEditRegistry();
+    // Итоги "оплачено"/"к оплате" (0.2.3, п.2) — считаются по тому же списку
+    // list, что сейчас показан на экране (с учётом фильтров), а не по всему
+    // реестру — та же логика, что и у счётчика "N из M" выше. Счета без
+    // указанной суммы просто не участвуют в сумме (считаются как 0), но их
+    // количество показываем отдельно, чтобы итог не выглядел как "полный".
+    var sumPaid = 0, sumDue = 0, missingAmountCount = 0;
+    list.forEach(function(iv){
+      if(iv.amount==null){ missingAmountCount++; return; }
+      if(iv.paid) sumPaid += iv.amount; else sumDue += iv.amount;
+    });
+    function fmtSum(n){ return n.toLocaleString("ru-RU", {minimumFractionDigits:0, maximumFractionDigits:2}); }
     return h`
       <div class="row-gap">
         <div class="filters">
@@ -2274,11 +2321,18 @@
                   <td>${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
                   <td><button class="btn btn-sm" data-action="invoice-open" data-path="${escapeHtml(iv.file_path)}">${escapeHtml(iv.file_name)}</button></td>
                   <td class="mono muted">${iv.added_to_registry_at? fmtDateShort(iv.added_to_registry_at) : '—'}</td>
+                  <td><input type="number" step="0.01" min="0" data-invoice-amount data-id="${iv.id}" value="${iv.amount!=null?iv.amount:''}" placeholder="—" style="width:110px;" ${editableRegistry?'':'disabled'} title="${editableRegistry?'Указать сумму счёта':'Редактировать может только Администратор, Руководитель или Финансист'}"></td>
                   <td><input type="checkbox" data-action="invoice-paid-toggle" data-id="${iv.id}" data-val="${iv.paid?'0':'1'}" ${iv.paid?'checked':''} ${editableRegistry?'':'disabled'} title="${editableRegistry?'Отметить оплату счёта':'Редактировать может только Администратор, Руководитель или Финансист'}"></td>
                 </tr>`;
               }).join("")}
-            </tbody></table></div>
-          <div class="helptext" style="padding:10px 16px;">Счёт попадает сюда автоматически при прикреплении к заявке в её карточке.</div>
+            </tbody>
+            ${list.length>0 ? h`<tfoot><tr class="registry-totals-row">
+              <td colspan="4" class="muted" style="text-align:right;">Итого по показанным ${list.length} счетам${missingAmountCount?' (без суммы: '+missingAmountCount+')':''}:</td>
+              <td class="mono"><b>Оплачено: ${fmtSum(sumPaid)}</b><br><span class="muted">К оплате: ${fmtSum(sumDue)}</span></td>
+              <td></td>
+            </tr></tfoot>` : ""}
+            </table></div>
+          <div class="helptext" style="padding:10px 16px;">Счёт попадает сюда автоматически при прикреплении к заявке в её карточке. Сумму счёта указывает Администратор, Руководитель или Финансист — по ней считаются итоги «оплачено»/«к оплате» выше.</div>
         </div>
       </div>`;
   }
@@ -2396,7 +2450,10 @@
               return h`<tr>
                 <td><span class="ttl">№${x.id} ${escapeHtml(x.name)}</span></td>
                 <td><input type="text" data-hotel-field="vds_tech_name" data-id="${x.id}" value="${escapeHtml(x.vds_tech_name||'')}" placeholder="ФИО" style="min-width:160px;"></td>
-                <td><input type="text" data-hotel-field="vds_tech_phone" data-id="${x.id}" value="${escapeHtml(x.vds_tech_phone||'')}" placeholder="+7…" style="min-width:140px;"></td>
+                <td>
+                  <input type="text" data-hotel-field="vds_tech_phone" data-id="${x.id}" value="${escapeHtml(x.vds_tech_phone||'')}" placeholder="+7…" style="min-width:140px;">
+                  ${x.vds_tech_phone ? h`<div><a href="tel:${escapeHtml(x.vds_tech_phone.replace(/[^\d+]/g,''))}" style="font-size:11px;">Позвонить</a></div>` : ""}
+                </td>
               </tr>`;
             }).join("")}
           </tbody></table></div>
@@ -2453,6 +2510,7 @@
                       <input type="text" data-hotel-field="client_contact_position" data-id="${x.id}" value="${escapeHtml(x.client_contact_position||'')}" placeholder="должность" style="flex:1;min-width:0;font-size:12px;">
                       <input type="text" data-hotel-field="client_contact_phone" data-id="${x.id}" value="${escapeHtml(x.client_contact_phone||'')}" placeholder="телефон" style="flex:1;min-width:0;font-size:12px;">
                     </div>
+                    ${x.client_contact_phone ? h`<a href="tel:${escapeHtml(x.client_contact_phone.replace(/[^\d+]/g,''))}" style="font-size:11px;">Позвонить</a>` : ""}
                   </td>
                   <td><button class="btn btn-sm ${x.in_service===false?'':'btn-ghost'}" data-action="hotel-toggle-active" data-id="${x.id}" data-val="${x.in_service===false?1:0}">${x.in_service===false?'Включить':'В эксплуатации'}</button></td>
                   <td><button class="btn btn-sm btn-ghost btn-danger" data-action="hotel-delete" data-id="${x.id}">Удалить</button></td>
@@ -2637,6 +2695,7 @@
             <div style="font-weight:700;font-size:16px;margin-top:8px;">№${hotel.id} ${hotel.name}${t.location ? h` <span class="muted" style="font-weight:400;">— ${escapeHtml(t.location)}</span>` : ""} ${t.demo?'<span class="demo-tag">пример</span>':''} ${t.source==='c-lector'?'<span class="source-tag">c-lector</span>':''}</div>
             ${t.attention_flag && t.attention_note ? h`<div class="muted" style="font-size:12px;margin-top:4px;">⚑ ${escapeHtml(t.attention_note)}</div>` : ""}
           </div>
+          <button type="button" class="btn btn-ghost btn-sm" data-action="copy-ticket-link" data-id="${t.id}" title="Скопировать прямую ссылку на эту заявку" style="flex:none;">Ссылка</button>
           <button class="btn btn-ghost panel-close" data-close-panel>✕</button>
         </div>
         <div class="panel-body">
@@ -2973,6 +3032,16 @@
     if(!state.session){ renderAuthScreen(); return; }
     if(!state.me || !state.hotelsLoaded){ document.getElementById("app").innerHTML = h`<div class="auth-wrap"><div class="muted">Загрузка…</div></div>`; return; }
 
+    // Прямые ссылки на заявку (0.2.3, п.7): переход по ссылке вида
+    // "#/tickets/<id>" открывает карточку этой заявки сразу, без отдельного
+    // клика по строке в списке. Сравниваем с уже открытой заявкой, чтобы не
+    // мешать закрытию панели пользователем — обработчик data-close-panel ниже
+    // сбрасывает state.route.id при закрытии именно для этого.
+    if(state.route.view==="tickets" && state.route.id && String(state.selectedTicketId)!==String(state.route.id)){
+      var routeTicket = state.tickets.find(function(x){ return String(x.id)===String(state.route.id); });
+      if(routeTicket) state.selectedTicketId = routeTicket.id;
+    }
+
     var app = document.getElementById("app");
     if(state.route.view==="workorder"){
       state.selectedTicketId = null; document.getElementById("overlay-root").innerHTML = "";
@@ -3018,7 +3087,17 @@
     if(t.closest(".nav-item")) return;
     var openTicket = t.closest("[data-open-ticket]");
     if(openTicket){ state.selectedTicketId = openTicket.getAttribute("data-open-ticket"); state.editingNoteId = null; state.milestoneOpen = {}; state.editingDescShort = false; renderTicketPanel(); loadNotesFor(state.selectedTicketId); return; }
-    if(t.closest("[data-close-panel]")){ state.selectedTicketId = null; state.editingNoteId = null; state.milestoneOpen = {}; state.editingDescShort = false; renderTicketPanel(); return; }
+    if(t.closest("[data-close-panel]")){
+      state.selectedTicketId = null; state.editingNoteId = null; state.milestoneOpen = {}; state.editingDescShort = false;
+      // Если панель была открыта прямой ссылкой "#/tickets/<id>" — сбрасываем id
+      // из маршрута при закрытии, иначе следующий render() (например, после
+      // любого другого действия) снова открыл бы ту же заявку.
+      if(state.route.view==="tickets" && state.route.id){
+        state.route = {view:"tickets", id:null};
+        history.replaceState(null, "", location.pathname+location.search+"#/tickets");
+      }
+      renderTicketPanel(); return;
+    }
     if(t.matches(".modal-scrim") && t.hasAttribute("data-close-modal")){ closeModal(); return; }
     if(t.hasAttribute("data-close-modal")){ closeModal(); return; }
     // Кнопка "Удалить" в "Склад ЗИП" — раньше эта проверка ошибочно лежала
@@ -3048,6 +3127,15 @@
     if(actionEl){
       var action = actionEl.getAttribute("data-action"); var id = actionEl.getAttribute("data-id");
       if(action==="me") return openMeModal();
+      if(action==="copy-ticket-link"){
+        var ticketLinkUrl = window.location.origin+window.location.pathname+"#/tickets/"+id;
+        if(navigator.clipboard){
+          navigator.clipboard.writeText(ticketLinkUrl).then(function(){
+            var origLbl = actionEl.textContent; actionEl.textContent="Скопировано"; setTimeout(function(){ actionEl.textContent=origLbl; },1500);
+          });
+        }
+        return;
+      }
       if(action==="edit-portfolio") return openPortfolioModal();
       if(action==="clear-demo"){ if(confirm("Удалить все примеры заявок?")) clearDemo(); return; }
       if(action==="import-commit") return commitImport();
@@ -3097,6 +3185,14 @@
         render(); return;
       }
       if(action==="clear-status-filter"){ e.preventDefault(); state.filters=state.filters||{}; state.filters.statusList=[]; render(); return; }
+      if(action==="toggle-case-filter"){
+        var cv = actionEl.getAttribute("data-value");
+        state.filters = state.filters||{}; state.filters.caseTypeList = state.filters.caseTypeList||[];
+        var cidx = state.filters.caseTypeList.indexOf(cv);
+        if(cidx>-1) state.filters.caseTypeList.splice(cidx,1); else state.filters.caseTypeList.push(cv);
+        render(); return;
+      }
+      if(action==="clear-case-filter"){ e.preventDefault(); state.filters=state.filters||{}; state.filters.caseTypeList=[]; render(); return; }
       if(action==="sort-tickets"){
         var sfield = actionEl.getAttribute("data-field");
         state.filters = state.filters||{};
@@ -3173,6 +3269,7 @@
     if(e.target.matches("[data-tag-filter]")){ state.filters=state.filters||{}; state.filters.tagFilters=state.filters.tagFilters||{}; state.filters.tagFilters[e.target.getAttribute("data-tag-filter")]=e.target.checked; render(); return; }
     if(e.target.matches("[data-registry-filter]")){ state.registryFilters=state.registryFilters||{}; state.registryFilters[e.target.getAttribute("data-registry-filter")]=e.target.value; render(); return; }
     if(e.target.matches("[data-hotel-field]")){ updateHotelField(e.target.getAttribute("data-id"), e.target.getAttribute("data-hotel-field"), e.target.value); return; }
+    if(e.target.matches("[data-invoice-amount]")){ setInvoiceAmount(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.id==="import-file"){ var f=e.target.files&&e.target.files[0]; if(f) loadImportFile(f); return; }
     if(e.target.matches("[data-import-map]")){ state.importMapping[e.target.getAttribute("data-import-map")]=e.target.value; render(); return; }
     if(e.target.id==="case-select") setCaseType(e.target.getAttribute("data-id"), e.target.value);
