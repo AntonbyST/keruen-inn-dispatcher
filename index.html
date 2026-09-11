@@ -133,6 +133,11 @@
   .status-icon.lit{ color:var(--ok); opacity:1; filter:drop-shadow(0 0 3px var(--ok)); }
   .attn-badge{ display:inline-flex; color:var(--crit); margin-right:5px; filter:drop-shadow(0 0 3px var(--crit)); vertical-align:middle; }
   .attn-badge svg{ width:15px; height:15px; display:block; }
+  /* Тег-фильтры (см. TAG_FILTER_DEFS) не скрывают заявки, а подсвечивают строку —
+     объявлена ВЫШЕ .attn-row по каскаду, поэтому "особое внимание" остаётся
+     заметнее, если у заявки одновременно есть обе пометки. */
+  tr.tag-hl{ background:var(--accent-soft); }
+  tr.tag-hl:hover{ filter:brightness(0.97); }
   tr.attn-row{ background:var(--crit-soft); }
   tr.attn-row:hover{ filter:brightness(0.97); }
   .attn-toggle-btn{ color:var(--ink-faint); opacity:.55; }
@@ -1579,11 +1584,20 @@
   var STATUS_ICON_BY_KEY = {};
   STATUS_ICON_DEFS.forEach(function(def){ STATUS_ICON_BY_KEY[def.key] = def; });
   var TAG_FILTER_DEFS = [
-    { key:'crew', title:'Показать заявки без назначенной бригады' },
-    { key:'materials', title:'Показать заявки без закупленного материала' },
-    { key:'work', title:'Показать заявки, где работа не отмечена выполненной' },
-    { key:'act', title:'Показать заявки без подписанного акта' }
+    { key:'crew', title:'Подсветить заявки без назначенной бригады' },
+    { key:'materials', title:'Подсветить заявки без закупленного материала' },
+    { key:'work', title:'Подсветить заявки, где работа не отмечена выполненной' },
+    { key:'act', title:'Подсветить заявки без подписанного акта' }
   ];
+  // Тег-фильтры (чекбоксы над колонкой "№ c-lector", см. TAG_FILTER_DEFS выше) не
+  // скрывают заявки, а подсвечивают строку — заявка подсвечивается, если ХОТЯ БЫ
+  // один из отмеченных пунктов чек-листа у неё ещё не закрыт (логика "ИЛИ").
+  function ticketTagHighlighted(t){
+    var tagFilters = (state.filters && state.filters.tagFilters) || {};
+    var activeTagKeys = Object.keys(tagFilters).filter(function(k){ return tagFilters[k]; });
+    if(!activeTagKeys.length) return false;
+    return activeTagKeys.some(function(key){ var def = STATUS_ICON_BY_KEY[key]; return def && !def.lit(t); });
+  }
   // Ряд из 4 иконок хода работ (бригада/материал/работа/акт) — показывается и
   // в общем списке заявок (только для быстрого визуального статуса, кликнуть
   // по ним там нельзя — data-action на иконках нет), и в карточке заявки под
@@ -1856,9 +1870,9 @@
     if(!f.tagFilters) f.tagFilters = {};
     // Активные ключи чек-листа (бригада/материал/работа/акт) из компактных
     // чекбоксов над колонкой "№ c-lector" (см. TAG_FILTER_DEFS/viewTickets) —
-    // логика "ИЛИ": показываем заявку, если ХОТЯ БЫ один отмеченный пункт у
-    // неё ещё не закрыт (так удобнее искать всё, что просело хоть по одному
-    // фронту, а не только заявки, у которых просели сразу все выбранные).
+    // по решению Антона они НЕ скрывают остальные заявки, а подсвечивают строку
+    // (класс "tag-hl", см. viewTickets) у тех заявок, где ХОТЯ БЫ один отмеченный
+    // пункт ещё не закрыт (логика "ИЛИ") — список остаётся полным.
     var activeTagKeys = Object.keys(f.tagFilters).filter(function(k){ return f.tagFilters[k]; });
     var q = normalizeForMatch(f.q||"");
     var baseFiltered = state.tickets.filter(function(t){
@@ -1866,10 +1880,6 @@
       if(f.statusList.length && f.statusList.indexOf(ticketStatusLabel(t))===-1) return false;
       if(f.zone && String(t.zone)!==f.zone) return false;
       if(f.hotel && String(t.hotel_id)!==f.hotel) return false;
-      if(activeTagKeys.length){
-        var missesSelected = activeTagKeys.some(function(key){ var def = STATUS_ICON_BY_KEY[key]; return def && !def.lit(t); });
-        if(!missesSelected) return false;
-      }
       if(q){
         var hay = normalizeForMatch((t.description||"")+" "+(t.description_short||"")+" "+(t.external_ref||""));
         if(hay.indexOf(q)===-1) return false;
@@ -1982,7 +1992,8 @@
         <thead><tr>${refTh()}${sortableTh("Отель","hotel")}${sortableTh("Описание","desc")}${sortableTh("Статус","status")}${sortableTh("Срок","deadline")}</tr></thead>
         <tbody>${list.length===0 ? h`<tr><td colspan="5"><div class="empty-state"><b>Заявок нет</b>Добавьте заявку по данным из c-lector.ru.</div></td></tr>` :
           list.map(function(t){ var hotel=hotelById(t.hotel_id); var di=deadlineInfo(t);
-            return h`<tr data-open-ticket="${t.id}" ${t.attention_flag?'class="attn-row"':''}>
+            var trClasses = []; if(t.attention_flag) trClasses.push("attn-row"); if(ticketTagHighlighted(t)) trClasses.push("tag-hl");
+            return h`<tr data-open-ticket="${t.id}" ${trClasses.length?('class="'+trClasses.join(" ")+'"'):''}>
               <td class="mono">${attentionBadge(t)}${t.external_ref? escapeHtml(t.external_ref) : '<span class="muted">—</span>'}
                 <div style="margin-top:4px;">${statusIconsRow(t)}</div>
                 ${duplicateBadge(t)}
@@ -2328,8 +2339,8 @@
       <div class="row-gap">
         <div class="card">
           <div class="table-wrap"><table>
-            <thead><tr><th>№</th><th>Название</th><th>Зона</th><th>Координаты (для карты)</th><th>Лицо от Заказчика</th><th>Должность</th><th>В эксплуатации</th><th></th></tr></thead>
-            <tbody>${list.length===0 ? h`<tr><td colspan="8"><div class="empty-state"><b>Отелей нет</b>Добавьте первый отель ниже.</div></td></tr>` :
+            <thead><tr><th>№</th><th>Название</th><th>Зона</th><th>Координаты (для карты)</th><th>Лицо от Заказчика</th><th>В эксплуатации</th><th></th></tr></thead>
+            <tbody>${list.length===0 ? h`<tr><td colspan="7"><div class="empty-state"><b>Отелей нет</b>Добавьте первый отель ниже.</div></td></tr>` :
               list.map(function(x){
                 return h`<tr>
                   <td class="mono muted">№${x.id}</td>
@@ -2344,8 +2355,13 @@
                     <input type="number" step="0.0001" data-hotel-field="lat" data-id="${x.id}" value="${x.lat!=null?x.lat:''}" placeholder="широта" style="width:96px;">
                     <input type="number" step="0.0001" data-hotel-field="lng" data-id="${x.id}" value="${x.lng!=null?x.lng:''}" placeholder="долгота" style="width:96px;">
                   </td>
-                  <td><input type="text" data-hotel-field="client_contact_name" data-id="${x.id}" value="${escapeHtml(x.client_contact_name||'')}" placeholder="ФИО (необязательно)" style="min-width:140px;"></td>
-                  <td><input type="text" data-hotel-field="client_contact_position" data-id="${x.id}" value="${escapeHtml(x.client_contact_position||'')}" placeholder="должность" style="min-width:120px;"></td>
+                  <td style="min-width:180px;">
+                    <input type="text" data-hotel-field="client_contact_name" data-id="${x.id}" value="${escapeHtml(x.client_contact_name||'')}" placeholder="ФИО (необязательно)" style="width:100%;margin-bottom:3px;">
+                    <div style="display:flex;gap:4px;">
+                      <input type="text" data-hotel-field="client_contact_position" data-id="${x.id}" value="${escapeHtml(x.client_contact_position||'')}" placeholder="должность" style="flex:1;min-width:0;font-size:12px;">
+                      <input type="text" data-hotel-field="client_contact_phone" data-id="${x.id}" value="${escapeHtml(x.client_contact_phone||'')}" placeholder="телефон" style="flex:1;min-width:0;font-size:12px;">
+                    </div>
+                  </td>
                   <td><button class="btn btn-sm ${x.in_service===false?'':'btn-ghost'}" data-action="hotel-toggle-active" data-id="${x.id}" data-val="${x.in_service===false?1:0}">${x.in_service===false?'Включить':'В эксплуатации'}</button></td>
                   <td><button class="btn btn-sm btn-ghost btn-danger" data-action="hotel-delete" data-id="${x.id}">Удалить</button></td>
                 </tr>`;
