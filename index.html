@@ -131,6 +131,7 @@
   .status-icon{ width:18px; height:18px; display:inline-flex; align-items:center; justify-content:center; color:var(--ink-faint); opacity:.4; transition:opacity .15s ease, color .15s ease, filter .15s ease; cursor:default; }
   .status-icon svg{ width:14px; height:14px; display:block; }
   .status-icon.lit{ color:var(--ok); opacity:1; filter:drop-shadow(0 0 3px var(--ok)); }
+  .status-icon.warn-lit{ color:var(--warn); opacity:1; filter:drop-shadow(0 0 3px var(--warn)); }
   .attn-badge{ display:inline-flex; color:var(--crit); margin-right:5px; filter:drop-shadow(0 0 3px var(--crit)); vertical-align:middle; }
   .attn-badge svg{ width:15px; height:15px; display:block; }
   /* Тег-фильтры (см. TAG_FILTER_DEFS) не скрывают заявки, а подсвечивают строку —
@@ -216,14 +217,16 @@
   .milestone-hd{ display:flex; align-items:center; gap:8px; padding:7px 2px; cursor:pointer; user-select:none; }
   /* Значок-иконка пункта (бригада/материал/работа/акт) — та же картинка, что и
      в статус-иконках под номером заявки наверху (см. STATUS_ICON_DEFS), чтобы
-     обе точки были явно "одно и то же состояние". Для пункта "Материал" значок
-     ещё и кликабелен — мгновенно переключает t.materials_ready, не разворачивая
-     строку (см. renderTicketPanel/milestoneRow); остальные 3 пункта отмечаются
-     выполненными только реальным действием (назначить бригаду/приложить
-     фото/подписать акт), поэтому там значок не кликабелен. */
+     обе точки были явно "одно и то же состояние". С версии 0.2.2 значок
+     "Материал" — трёхцветный (см. materialsState/.warn-lit/.milestone-icon.warn)
+     и уже не кликабелен: состояние теперь целиком выводится из счетов и флажка
+     "материал не нужен" (см. setMaterialsNotNeeded). "Работа" и "Акт" отмечаются
+     выполненными реальным действием (приложить фото/подписать акт), поэтому там
+     значок тоже не кликабелен. */
   .milestone-icon{ flex:none; width:26px; height:26px; border-radius:50%; display:flex; align-items:center; justify-content:center; background:var(--surface-2); color:var(--ink-faint); border:none; padding:0; }
   .milestone-icon svg{ width:14px; height:14px; display:block; }
   .milestone-icon.done{ background:var(--ok-soft); color:var(--ok); filter:drop-shadow(0 0 3px var(--ok)); }
+  .milestone-icon.warn{ background:var(--warn-soft); color:var(--warn); filter:drop-shadow(0 0 3px var(--warn)); }
   button.milestone-icon{ cursor:pointer; }
   .milestone-title{ flex:1; min-width:0; font-weight:600; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .milestone-meta{ flex:none; font-size:11.5px; color:var(--ink-faint); white-space:nowrap; }
@@ -322,7 +325,7 @@
   var STATUS_LABEL = { new:"Новая", dispatched:"Диспетчеризована", onsite:"На объекте / устранение", closed:"Закрыта", rejected:"Отклонена" };
   var STATUS_PILL = { new:"pill-neutral", dispatched:"pill-accent", onsite:"pill-warn", closed:"pill-ok", rejected:"pill-neutral" };
   var CASE_LABEL = { warranty:"Гарантийный", nonwarranty:"Негарантийный", unfounded:"Необоснованная" };
-  var ROLE_LABEL = {dispatcher:"Диспетчер", specialist:"Главный инженер", head:"Руководитель", warehouse:"Склад ЗИП", finance:"Финансист"};
+  var ROLE_LABEL = {dispatcher:"Администратор", specialist:"Гл. инженер", head:"Руководитель", warehouse:"Снабжение", finance:"Финансист"};
   // Какие разделы меню видит каждая роль. null = видит всё. Это ограничение
   // только интерфейса (чтобы не путать людей лишними разделами) — на уровне
   // базы данных (RLS) доступ по-прежнему открыт всем вошедшим, поэтому это
@@ -335,8 +338,15 @@
   var ROLE_NAV = {
     dispatcher: null,
     head: null,
+    // "tickets" нужен Снабжению, чтобы прикреплять счета на материалы прямо в
+    // карточке заявки (см. milestoneRow "Материал" в renderTicketPanel) — без
+    // доступа к самим заявкам эта роль не смогла бы этого делать. "registry"
+    // тоже добавлен Снабжению (версия 0.2.2) — чтобы видеть, оплачены ли уже
+    // прикреплённые ими счета, но только для просмотра: сама галочка "Оплачено"
+    // рисуется disabled для всех ролей, кроме перечисленных в canEditRegistry()
+    // ниже (Администратор/Руководитель/Финансист), независимо от ROLE_NAV.
     specialist: ["dashboard","tickets","map","team","systemdefects"],
-    warehouse: ["dashboard","parts","team"],
+    warehouse: ["dashboard","tickets","parts","registry","team"],
     finance: ["dashboard","registry","team"]
   };
   function navAllowed(view){
@@ -351,6 +361,16 @@
     if(allowed===null || !allowed.length) return "dashboard";
     return allowed[0];
   }
+  // Право редактировать «Реестр платежей», включая галочку «Оплачено» у счёта
+  // (версия 0.2.2, п.3) — только у Администратора, Руководителя и Финансиста.
+  // Как и остальной ROLE_NAV/isOwner выше, это ограничение уровня интерфейса, а
+  // не политика Supabase: у остальных ролей просто не показывается доступ к
+  // разделу «Реестр платежей» в меню, а сама галочка рисуется как disabled на
+  // случай прямого перехода по ссылке.
+  function canEditRegistry(){
+    var role = state.me && state.me.role;
+    return role==="dispatcher" || role==="head" || role==="finance";
+  }
   // Единственный email, которому в разделе «Команда» доступны изменение
   // роли/зон, включение/отключение и удаление сотрудника — по просьбе Антона
   // это должен делать только он, а не любой, кто открыл «Команду». Как и
@@ -364,7 +384,10 @@
   // корпоративным Excel-файлом (поставщик, суммы, валюта, НДС, статья бюджета,
   // ERP-поля и т.д.) — все они заполнялись вручную и оказались не нужны прямо
   // в этом приложении.
-  var REGISTRY_COLUMN_LABELS = ["№","№ заявки (c-lector)","Отель","Файл","Добавлен в реестр"];
+  // "Оплачено" (версия 0.2.2, п.3) добавлена последней колонкой, чтобы не
+  // сдвигать нумерацию/сортировку уже существующих — редактировать её могут
+  // только роли, перечисленные в canEditRegistry() выше.
+  var REGISTRY_COLUMN_LABELS = ["№","№ заявки (c-lector)","Отель","Файл","Добавлен в реестр","Оплачено"];
 
   function hotelById(id){ var list=state.hotels||[]; for (var i=0;i<list.length;i++){ if (list[i].id===Number(id)) return list[i]; } return null; }
   function fmtDate(iso){ if(!iso) return "—"; var d=new Date(iso); return d.toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit",year:"numeric"})+" "+d.toLocaleTimeString("ru-RU",{hour:"2-digit",minute:"2-digit"}); }
@@ -861,6 +884,27 @@
       if(iv) addNote(iv.ticket_id, "Удалён файл («"+(INVOICE_CATEGORY_LABEL[iv.category]||"Счета")+"»): "+iv.file_name+".");
     });
   }
+  // Галочка "Оплачено" в «Реестре платежей» (версия 0.2.2, п.1/3) — только для
+  // ролей из canEditRegistry() (проверка дублируется тут на случай, если кто-то
+  // дёрнет обработчик мимо disabled-чекбокса в разметке). Локально патчим
+  // state.invoices (как patchTicketLocal выше патчит state.tickets) ДО вызова
+  // maybeAutoComplete — иначе materialsState()/materialsIsGreen() в её проверке
+  // прочитали бы ещё не обновлённое состояние счёта: эхо по каналу "invoices-rt"
+  // (см. reloadInvoices) придёт отдельным сетевым запросом и может не успеть до
+  // этой проверки, и заявка с последним оплаченным счётом не закрылась бы сама
+  // до следующего изменения.
+  function setInvoicePaid(invoiceId, val){
+    if(!canEditRegistry()){ alert("Отмечать оплату счетов может только Администратор, Руководитель или Финансист."); return; }
+    var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
+    if(iv) iv.paid = val;
+    render();
+    sb.from("invoices").update({paid:val}).eq("id", invoiceId).then(function(){
+      if(iv){
+        addNote(iv.ticket_id, val ? "Счёт «"+iv.file_name+"» отмечен оплаченным." : "Отметка «оплачено» снята со счёта «"+iv.file_name+"».");
+        if(val) maybeAutoComplete(iv.ticket_id);
+      }
+    });
+  }
 
   // Фото по заявке — рабочий инструмент (до/после, подтверждение выполненных
   // работ), отдельно от c-lector и от счетов. Храним в собственном бакете
@@ -940,7 +984,8 @@
         tk && tk.external_ref ? tk.external_ref : "",
         hotel ? ("№"+hotel.id+" "+hotel.name) : "",
         iv.file_name || "",
-        iv.added_to_registry_at ? fmtDateShort(iv.added_to_registry_at) : ""
+        iv.added_to_registry_at ? fmtDateShort(iv.added_to_registry_at) : "",
+        iv.paid ? "Да" : "Нет"
       ];
     });
     var aoa = [REGISTRY_COLUMN_LABELS].concat(rows);
@@ -1103,7 +1148,9 @@
     if(t) Object.assign(t, patch);
   }
   function assignSpecialist(id, name){
-    var patch = {assigned_to:name, status:"dispatched"};
+    // Назначение реального исполнителя снимает "бригада не нужна" (0.2.2), если
+    // она почему-то была отмечена раньше — состояния взаимоисключающие по смыслу.
+    var patch = {assigned_to:name, status:"dispatched", crew_not_needed:false};
     patchTicketLocal(id, patch);
     sb.from("tickets").update(patch).eq("id",id).then(function(){
       addNote(id, "Назначен главный инженер: "+name+".");
@@ -1113,7 +1160,7 @@
   // Смена исполнителя уже назначенной заявки (в отличие от assignSpecialist выше,
   // не трогает status/дедлайны — те уже отсчитываются от прибытия/устранения).
   function reassignSpecialist(id, name){
-    var patch = {assigned_to:name};
+    var patch = {assigned_to:name, crew_not_needed:false};
     patchTicketLocal(id, patch);
     sb.from("tickets").update(patch).eq("id",id).then(function(){
       addNote(id, "Исполнитель изменён на: "+name+".");
@@ -1155,29 +1202,31 @@
       addNote(id, "Ожидание материалов — ожидаемая поставка: "+fmtDateShort(dateStr)+".");
     });
   }
-  function setMaterialsReady(id, val){
-    var patch = {materials_ready:val};
+  // "Материал не нужен" (версия 0.2.2) — заменяет старый ручной флажок
+  // materials_ready: пункт чек-листа "Материал" сразу становится зелёным, счёт
+  // не требуется. Взаимоисключаемо со счетами по смыслу, но не технически —
+  // если счета уже прикреплены, галочку всё равно можно поставить (например,
+  // если счёт оказался ошибочно приложен не к той заявке).
+  function setMaterialsNotNeeded(id, val){
+    var patch = {materials_not_needed:val};
     patchTicketLocal(id, patch);
+    renderTicketPanel();
     sb.from("tickets").update(patch).eq("id",id).then(function(){
-      addNote(id, val ? "Материалы закуплены/получены." : "Отметка «материалы закуплены» снята.");
+      addNote(id, val ? "Отмечено: материал для этой заявки не нужен." : "Отметка «материал не нужен» снята.");
       if(val) maybeAutoComplete(id);
     });
   }
-  // Ручные флажки "Бригада"/"Работа" — для случаев, когда что-то по факту уже
-  // сделано (например, замечание устранили на месте), а формального
-  // подтверждения в системе нет и заводить его прямо сейчас смысла нет
-  // (никто не назначал бригаду через приложение, фото никто не сделал).
-  // В отличие от реальных признаков (t.assigned_to / наличие фото), этот
-  // флажок не появляется на кнопке "Назначить"/в разделе "Действия" — это
-  // отдельная, чисто визуальная отметка "выполнено", доступная только через
-  // клик по значку пункта в "Ход работ" (см. milestoneRow в renderTicketPanel),
-  // и только пока нет настоящего признака (тогда значок вместо этого просто
-  // показывает реальное состояние и не кликабелен).
-  function setCrewManualDone(id, val){
-    var patch = {crew_manual_done:val};
+  // "Бригада не нужна" (версия 0.2.2) — заменяет прежнюю безымянную ручную
+  // отметку crew_manual_done ("выполнено вручную" без указания, кто именно):
+  // теперь пункт "Бригада" зелёный либо когда реально назначен исполнитель
+  // (assigned_to — см. "Назначить"/"Сменить" в теле пункта), либо когда явно
+  // отмечено, что бригада для этой заявки не нужна.
+  function setCrewNotNeeded(id, val){
+    var patch = {crew_not_needed:val};
     patchTicketLocal(id, patch);
+    renderTicketPanel();
     sb.from("tickets").update(patch).eq("id",id).then(function(){
-      addNote(id, val ? "Бригада отмечена выполненной вручную (без назначения в приложении)." : "Ручная отметка «бригада» снята.");
+      addNote(id, val ? "Отмечено: бригада для этой заявки не нужна." : "Отметка «бригада не нужна» снята.");
       if(val) maybeAutoComplete(id);
     });
   }
@@ -1223,7 +1272,7 @@
     });
   }
   // Быстрая ручная отметка "акт подписан" прямо по клику на значок пункта
-  // (см. setCrewManualDone/setWorkManualDone выше) — доступна только пока файл
+  // (см. setWorkManualDone выше) — доступна только пока файл
   // акта не прикреплён; как только файл есть, снимать отметку нужно через
   // кнопку "Снять отметку" внутри пункта (clearActSigned, с подтверждением).
   function setActSigned(id, val){
@@ -1326,15 +1375,15 @@
     sb.from("tickets").select("*").eq("id", id).maybeSingle().then(function(res){
       var t = res.data; if(!t) return;
       if(t.status==="closed" || t.status==="rejected") return;
-      // Каждый из 4 пунктов может быть выполнен либо реальным действием
-      // (назначена бригада / прикреплён файл акта), либо вручную отмечен как
-      // выполненный (см. crew_manual_done/work_manual_done и act_signed без
-      // файла — setCrewManualDone/setWorkManualDone/setActSigned) для случаев,
-      // когда что-то по факту сделано, а подтверждения в системе нет.
-      // "Материал" и "Работа" — всегда просто ручной флажок (см. STATUS_ICON_DEFS
-      // выше: фото в "Работа" больше не участвуют — "Фото" теперь отдельная
-      // галерея замечаний, а не признак сделанной работы).
-      var allDone = (!!t.assigned_to || !!t.crew_manual_done) && !!t.materials_ready && !!t.work_manual_done && !!t.act_signed;
+      // "Бригада" — реальное назначение (assigned_to) либо явная отметка "не
+      // нужна" (crew_not_needed, версия 0.2.2 — прежней безымянной ручной
+      // отметки больше нет). "Материал" — зелёный по materialsIsGreen() (все
+      // счета категории "materials" оплачены, либо отмечено "не нужен") —
+      // жёлтого (счёт есть, но не оплачен) для автозакрытия НЕ достаточно.
+      // "Работа" — всегда просто ручной флажок (см. STATUS_ICON_DEFS выше: фото
+      // в "Работа" больше не участвуют — "Фото" теперь отдельная галерея
+      // замечаний, а не признак сделанной работы).
+      var allDone = (!!t.assigned_to || !!t.crew_not_needed) && materialsIsGreen(t) && !!t.work_manual_done && !!t.act_signed;
       if(!allDone) return;
       var patch = {status:"closed", closed_at:new Date().toISOString()};
       patchTicketLocal(id, patch);
@@ -1421,7 +1470,7 @@
   // Заявки, уже назначенные на этого человека (assigned_to — текст-имя, не
   // внешний ключ), не трогаем: они просто останутся с прежним именем исполнителя.
   function deleteProfile(id, label){
-    if(!confirm("Удалить сотрудника «"+label+"» из списка команды и сбросить его роль/зоны? Уже назначенные на него заявки не изменятся (имя останется в поле «Исполнитель»).\n\nВажно: сам вход по почте это не отключает (это может сделать только Supabase Auth, у приложения нет туда доступа) — если человек всё ещё нужен, войдя снова, он будет работать как «Главный инженер» без ролей/зон, но обратно в этот список автоматически не попадёт.")) return;
+    if(!confirm("Удалить сотрудника «"+label+"» из списка команды и сбросить его роль/зоны? Уже назначенные на него заявки не изменятся (имя останется в поле «Исполнитель»).\n\nВажно: сам вход по почте это не отключает (это может сделать только Supabase Auth, у приложения нет туда доступа) — если человек всё ещё нужен, войдя снова, он будет работать как «"+ROLE_LABEL.specialist+"» без ролей/зон, но обратно в этот список автоматически не попадёт.")) return;
     sb.from("profiles").delete().eq("id", id).then(function(){});
   }
   function saveMyName(name){ updateProfile(state.me.id, {name:name}); }
@@ -1551,15 +1600,36 @@
   // Мини-иконки хода работ в списке заявок (заменяют собой прежний текстовый
   // значок "✓ назначена"). Каждая иконка приглушена по умолчанию и "загорается"
   // (акцентный цвет + лёгкое свечение) когда соответствующее условие выполнено.
-  // Иконка "материал закуплен" опирается на новое поле t.materials_ready —
-  // остальные три используют уже существующие поля заявки.
+  // "Бригада" (0.2.2): зелёная либо когда назначен реальный исполнитель
+  // (t.assigned_to), либо когда явно отмечено "бригада не нужна" — прежней
+  // безымянной ручной отметки ("выполнено вручную" без имени) больше нет.
+  //
+  // "Материал" (0.2.2): три состояния вместо старого ручного флажка —
+  // нейтральный (нет счетов и не отмечено "не нужен"), жёлтый (счёт есть, но
+  // не все счета оплачены), зелёный (все счета категории "materials" оплачены,
+  // ИЛИ отмечено "материал не нужен"). См. materialsState()/materialsIsGreen()
+  // ниже — определены после invoicesFor(), но вызываются лениво, так что
+  // порядок объявления в файле значения не имеет (function-декларации hoisted).
+  function materialsState(t){
+    if(t.materials_not_needed) return "ok";
+    var invs = invoicesFor(t, "materials");
+    if(!invs.length) return "neutral";
+    return invs.every(function(iv){ return !!iv.paid; }) ? "ok" : "warn";
+  }
+  function materialsIsGreen(t){ return materialsState(t)==="ok"; }
   var STATUS_ICON_DEFS = [
     { key:'crew', svg:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 0-5.6 5.6L2 19l3 3 7.1-7.1a4 4 0 0 0 5.6-5.6l-2.5 2.5-2-2 2.5-2.5z"/></svg>',
-      lit:function(t){ return !!t.assigned_to || !!t.crew_manual_done; },
-      label:function(t){ return t.assigned_to ? "Бригада назначена: "+t.assigned_to : (t.crew_manual_done ? "Бригада отмечена вручную" : "Бригада ещё не назначена"); } },
+      lit:function(t){ return !!t.assigned_to || !!t.crew_not_needed; },
+      label:function(t){ return t.assigned_to ? "Бригада назначена: "+t.assigned_to : (t.crew_not_needed ? "Бригада не нужна для этой заявки" : "Бригада ещё не назначена"); } },
     { key:'materials', svg:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg>',
-      lit:function(t){ return !!t.materials_ready; },
-      label:function(t){ return t.materials_ready ? "Материал закуплен" : "Материал ещё не закуплен"; } },
+      lit:function(t){ return materialsIsGreen(t); },
+      state:function(t){ return materialsState(t); },
+      label:function(t){
+        var s = materialsState(t);
+        if(s==="ok") return t.materials_not_needed ? "Материал не требуется" : "Материал оплачен";
+        if(s==="warn") return "Материал: счёт приложен, ещё не оплачен";
+        return "Материал ещё не приобретён";
+      } },
     { key:'work', svg:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>',
       // "работа выполнена" — раньше срабатывала по наличию ЛЮБОГО фото в общей
       // галерее "Фото", но с разделением "Фото" (замечания) и фото-доказательств
@@ -1605,8 +1675,11 @@
   // счёт/фото/акт, сменить исполнителя) — см. renderTicketPanel().
   function statusIconsRow(t){
     return h`<span class="status-icons">${STATUS_ICON_DEFS.map(function(def){
-      var lit = def.lit(t);
-      return h`<span class="status-icon${lit?' lit':''}" title="${escapeHtml(def.label(t))}">${def.svg}</span>`;
+      // def.state (пока только у "Материал") — три состояния neutral/warn/ok;
+      // у остальных пунктов только два (def.lit boolean), как и раньше.
+      var st = def.state ? def.state(t) : (def.lit(t) ? "ok" : "neutral");
+      var cls = st==="ok" ? " lit" : (st==="warn" ? " warn-lit" : "");
+      return h`<span class="status-icon${cls}" title="${escapeHtml(def.label(t))}">${def.svg}</span>`;
     }).join("")}</span>`;
   }
   // Те же 4 картинки, что и в STATUS_ICON_DEFS выше, по ключу пункта — чтобы в
@@ -1633,21 +1706,26 @@
     // opts.key — уникальный ключ пункта (crew/materials/work/act) для
     // сворачивания/разворачивания (state.milestoneOpen), opts.done — галочка,
     // opts.icon — svg пункта (см. MS_ICON), opts.clickable — если true, клик по
-    // иконке сразу переключает opts.toggleAction/toggleId/toggleVal. "Материал"
-    // всегда кликабелен (это просто ручной флажок). У "Бригада"/"Работа"/"Акт"
-    // иконка кликабельна только пока нет реального подтверждения (назначение/
-    // файл акта) — так можно вручную отметить пункт выполненным, если по
-    // факту сделано, а подтверждения в системе нет; как только реальное
-    // подтверждение появляется, иконка становится статичной (см. crewReal/
-    // actHasFile в блоке "Ход работ" — "Материал"/"Работа" всегда кликабельны,
-    // это чисто ручные флажки), opts.title — заголовок (1 строка,
+    // иконке сразу переключает opts.toggleAction/toggleId/toggleVal. С версии
+    // 0.2.2 "Бригада"/"Материал" не кликабельны вообще — у них теперь свои явные
+    // элементы управления в теле пункта ("Назначить"/"Сменить" или галочка
+    // "не нужна(-ен)"), значок только отображает состояние (см. materialsState()
+    // выше). "Работа" — простой ручной флажок, поэтому кликабелен всегда. "Акт"
+    // кликабелен только пока нет реального подтверждения (файл акта) — так можно
+    // вручную отметить пункт выполненным, если по факту сделано, а подтверждения
+    // в системе нет; как только файл появляется, иконка становится статичной
+    // (см. actHasFile в блоке "Ход работ"). opts.warn — промежуточное жёлтое
+    // состояние (пока только у "Материал"). opts.title — заголовок (1 строка,
     // длинный текст обрезается), opts.meta — счётчик файлов/кнопка "прикрепить"
     // (видны всегда), opts.body — раскрывающееся содержимое, видно только когда
     // раскрыто.
     var open = !!(state.milestoneOpen && state.milestoneOpen[opts.key]);
+    // opts.warn (пока только у "Материал", см. materialsState()) — промежуточное
+    // жёлтое состояние вдобавок к обычному done/не done.
+    var iconCls = opts.done ? " done" : (opts.warn ? " warn" : "");
     var iconTag = opts.clickable
-      ? h`<button type="button" class="milestone-icon${opts.done?' done':''}" data-action="${opts.toggleAction}" data-id="${opts.toggleId}" data-val="${opts.toggleVal}" title="${opts.done?'Снять отметку':'Отметить выполненным'}">${opts.icon}</button>`
-      : h`<span class="milestone-icon${opts.done?' done':''}">${opts.icon}</span>`;
+      ? h`<button type="button" class="milestone-icon${iconCls}" data-action="${opts.toggleAction}" data-id="${opts.toggleId}" data-val="${opts.toggleVal}" title="${opts.done?'Снять отметку':'Отметить выполненным'}">${opts.icon}</button>`
+      : h`<span class="milestone-icon${iconCls}">${opts.icon}</span>`;
     return h`<div class="milestone-row">
       <div class="milestone-hd" data-action="toggle-milestone" data-key="${opts.key}">
         ${iconTag}
@@ -1674,12 +1752,24 @@
   function legacyInvoicesFor(t){
     return (state.invoices||[]).filter(function(iv){ return iv.ticket_id===t.id && iv.category==null; });
   }
+  // Пилюля "Оплачено"/"Не оплачено" — только для чтения (сама галочка "оплачено"
+  // ставится в «Реестре платежей», см. viewRegistry/setInvoicePaid); здесь нужна,
+  // чтобы статус счёта было видно прямо в карточке заявки, даже тем ролям, у
+  // которых нет доступа к разделу «Реестр платежей» (напр. Снабжение).
+  function invoicePaidPill(iv){
+    return iv.paid
+      ? h`<span class="pill pill-ok">Оплачено</span>`
+      : h`<span class="pill pill-warn">Не оплачено</span>`;
+  }
   function renderInvoiceList(list){
     if(!list.length) return h`<div class="muted" style="font-size:12.5px;">Файлов пока нет.</div>`;
     return h`<div class="row-gap" style="gap:6px;display:flex;flex-direction:column;">${list.map(function(iv){
       return h`<div class="invoice-row" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 10px;border:1px solid var(--line);border-radius:8px;">
         <button type="button" class="btn btn-sm" data-action="invoice-open" data-path="${escapeHtml(iv.file_path)}">${escapeHtml(iv.file_name)}</button>
-        <button type="button" class="btn btn-sm btn-ghost btn-danger" style="margin-left:auto;" data-action="invoice-delete" data-id="${iv.id}" data-path="${escapeHtml(iv.file_path)}" title="Удалить файл">✕</button>
+        <div style="margin-left:auto;display:flex;align-items:center;gap:8px;">
+          ${invoicePaidPill(iv)}
+          <button type="button" class="btn btn-sm btn-ghost btn-danger" data-action="invoice-delete" data-id="${iv.id}" data-path="${escapeHtml(iv.file_path)}" title="Удалить файл">✕</button>
+        </div>
       </div>`;
     }).join("")}</div>`;
   }
@@ -2157,8 +2247,9 @@
       return h`<th data-action="sort-registry" data-field="${field}" style="cursor:pointer;user-select:none;" title="Сортировать">${label}${active?(rSortDir==="asc"?" ▲":" ▼"):""}</th>`;
     }
     // поле сортировки для каждой колонки — null там, где сортировка не имеет
-    // смысла (порядковый номер, сам файл)
-    var REGISTRY_SORT_FIELDS = [null,"ref","hotel",null,"added_at"];
+    // смысла (порядковый номер, сам файл, галочка "оплачено")
+    var REGISTRY_SORT_FIELDS = [null,"ref","hotel",null,"added_at",null];
+    var editableRegistry = canEditRegistry();
     return h`
       <div class="row-gap">
         <div class="filters">
@@ -2183,6 +2274,7 @@
                   <td>${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
                   <td><button class="btn btn-sm" data-action="invoice-open" data-path="${escapeHtml(iv.file_path)}">${escapeHtml(iv.file_name)}</button></td>
                   <td class="mono muted">${iv.added_to_registry_at? fmtDateShort(iv.added_to_registry_at) : '—'}</td>
+                  <td><input type="checkbox" data-action="invoice-paid-toggle" data-id="${iv.id}" data-val="${iv.paid?'0':'1'}" ${iv.paid?'checked':''} ${editableRegistry?'':'disabled'} title="${editableRegistry?'Отметить оплату счёта':'Редактировать может только Администратор, Руководитель или Финансист'}"></td>
                 </tr>`;
               }).join("")}
             </tbody></table></div>
@@ -2580,22 +2672,18 @@
             ${feedbackHtml("system-defect-feedback")}
           </div>
           <div>
-            <div class="section-title">Ход работ ${infoTip("Значок пункта можно отметить кликом вручную (для случаев, когда что-то по факту сделано, а подтверждения в системе нет) — кроме случаев, когда пункт уже выполнен реальным действием (назначен исполнитель, прикреплён файл акта): тогда значок просто показывает это и вручную не снимается. «Материал» и «Работа» — всегда ручные флажки. В обоих случаях тот же значок сразу подсвечивается вверху карточки, у номера заявки. Когда отмечены все 4 пункта, заявка автоматически переходит в статус «Выполнено».")}</div>
+            <div class="section-title">Ход работ ${infoTip("«Бригада» становится зелёной, когда назначен исполнитель, либо по галочке «бригада не нужна». «Материал» — жёлтый, пока приложенный счёт не отмечен «Оплачено» в «Реестре платежей», и сразу зелёный по галочке «материал не нужен» или когда все счета оплачены. «Работа» — ручной флажок (для случаев, когда сделано по факту, а подтверждения в системе нет). «Акт» подтверждается прикреплённым файлом, либо тоже вручную, пока файла нет. Во всех случаях тот же значок сразу подсвечивается вверху карточки, у номера заявки. Когда отмечены все 4 пункта (и «Материал» именно зелёный, а не жёлтый), заявка автоматически переходит в статус «Выполнено».")}</div>
             ${(function(){
               var crewFiles = invoicesFor(t, "crew").length;
               var materialsFiles = invoicesFor(t, "materials").length;
               var actPhotoCount = (state.photos||[]).filter(function(p){return p.ticket_id===t.id && p.category==="act";}).length;
-              // Каждый пункт (кроме "Материал"/"Работа", которые всегда просто
-              // ручной флажок) может быть выполнен либо реальным действием
-              // (Real), либо вручную (Manual) — см. setCrewManualDone/
-              // setWorkManualDone/setActSigned. Пока реального признака нет,
-              // значок кликабелен и ставит ручную отметку; как только
-              // появляется реальный признак, значок показывает его и вручную
-              // больше не переключается (нельзя руками "отменить" настоящее
-              // назначение/файл акта). "Работа" — фото из "Фото" в этом больше
-              // не участвуют (см. STATUS_ICON_DEFS выше): замечания фотографируют
-              // обычно ДО работы, это не подтверждение того, что она сделана.
-              var crewReal = !!t.assigned_to, crewManual = !!t.crew_manual_done, crewDone = crewReal||crewManual;
+              // "Бригада"/"Материал" (версия 0.2.2) больше не переключаются кликом
+              // по значку — у них теперь свои явные элементы управления в теле
+              // пункта ("Назначить"/"Сменить" или галочка "не нужна(-ен)"), значок
+              // только отображает состояние. "Работа"/"Акт" — как раньше: значок
+              // кликабелен вручную, пока нет реального подтверждения (фото/файл).
+              var crewReal = !!t.assigned_to, crewNotNeeded = !!t.crew_not_needed, crewDone = crewReal||crewNotNeeded;
+              var mState = materialsState(t), materialsDone = mState==="ok", materialsWarn = mState==="warn";
               var workDone = !!t.work_manual_done;
               var actHasFile = !!t.act_file_path, actDone = !!t.act_signed;
               return h`
@@ -2603,14 +2691,19 @@
                 key: "crew",
                 icon: MS_ICON.crew,
                 done: crewDone,
-                clickable: !crewReal,
-                toggleAction: "crew-manual-toggle", toggleId: t.id, toggleVal: crewManual?'0':'1',
-                title: crewReal ? ("Бригада назначена: " + escapeHtml(t.assigned_to)) : (crewManual ? "Бригада отмечена вручную" : "Бригада ещё не назначена"),
+                clickable: false,
+                title: crewReal ? ("Бригада назначена: " + escapeHtml(t.assigned_to)) : (crewNotNeeded ? "Бригада не нужна для этой заявки" : "Бригада ещё не назначена"),
                 meta: h`
                   ${crewFiles ? h`<span class="milestone-meta">${crewFiles} ${ruPlural(crewFiles,["файл","файла","файлов"])}</span>` : ""}
                   ${milestoneAttachControl({cls:"ms-quick-attach", id:t.id, category:"crew", accept:"application/pdf,image/*", multiple:true, title:"Прикрепить счёт/договор (можно сразу несколько)"})}`,
                 body: h`
-                  ${t.status==="new" ? h`
+                  ${!crewReal ? h`<div class="actions-row" style="margin-bottom:8px;align-items:center;">
+                    <label style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:400;margin:0;">
+                      <input type="checkbox" data-action="crew-not-needed-toggle" data-id="${t.id}" data-val="${crewNotNeeded?'0':'1'}" ${crewNotNeeded?'checked':''}>
+                      Бригада не нужна
+                    </label>
+                  </div>` : ""}
+                  ${(t.status==="new" && !crewNotNeeded) ? h`
                   <div class="actions-row" style="margin-bottom:8px;">
                     <select id="assign-select" style="max-width:240px;">
                       <option value="">Выбрать исполнителя…</option>
@@ -2618,6 +2711,10 @@
                       ${state.crews.length ? h`<optgroup label="Бригады">${state.crews.map(function(c){return h`<option value="Бригада: ${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`;}).join("")}</optgroup>` : ""}
                     </select>
                     <button class="btn btn-primary btn-sm" data-action="assign" data-id="${t.id}">Назначить</button>
+                  </div>
+                  <div class="actions-row" style="margin-bottom:8px;">
+                    <input type="text" id="assign-free-input" data-id="${t.id}" placeholder="…или впишите имя/название вручную" style="max-width:240px;">
+                    <button class="btn btn-sm" data-action="assign-free" data-id="${t.id}">Назначить</button>
                   </div>` : ""}
                   ${(t.status==="dispatched"||t.status==="onsite") ? h`
                   <div class="actions-row" style="margin-bottom:8px;">
@@ -2628,24 +2725,34 @@
                     </select>
                     <button class="btn btn-sm" data-action="reassign" data-id="${t.id}">Сменить</button>
                     ${t.status==="dispatched" ? h`<button class="btn btn-sm" data-action="arrived" data-id="${t.id}">Отметить прибытие</button>` : ""}
+                  </div>
+                  <div class="actions-row" style="margin-bottom:8px;">
+                    <input type="text" id="reassign-free-input" data-id="${t.id}" placeholder="…или впишите имя/название вручную" style="max-width:240px;">
+                    <button class="btn btn-sm" data-action="reassign-free" data-id="${t.id}">Сменить</button>
                   </div>` : ""}
                   ${t.assigned_to ? h`<div class="actions-row" style="margin-bottom:8px;"><a class="btn btn-sm" href="#/workorder/${t.id}">Наряд-задание</a></div>` : ""}
-                  ${crewManual && !crewReal ? h`<div class="helptext" style="margin-bottom:8px;">Отмечено вручную, без назначения в приложении.</div>` : ""}
                   ${milestoneInvoiceList(t, "crew")}`
               })}
               ${milestoneRow({
                 key: "materials",
                 icon: MS_ICON.materials,
-                done: !!t.materials_ready,
-                clickable: true,
-                toggleAction: "materials-ready-toggle", toggleId: t.id, toggleVal: t.materials_ready?'0':'1',
-                title: t.materials_ready ? "Материал закуплен/получен" : "Материал ещё не закуплен",
+                done: materialsDone,
+                warn: materialsWarn,
+                clickable: false,
+                title: materialsDone ? (t.materials_not_needed ? "Материал не требуется" : "Материал оплачен") : (materialsWarn ? "Счёт приложен, ещё не оплачен" : "Материал ещё не приобретён"),
                 meta: h`
                   ${materialsFiles ? h`<span class="milestone-meta">${materialsFiles} ${ruPlural(materialsFiles,["файл","файла","файлов"])}</span>` : ""}
                   ${milestoneAttachControl({cls:"ms-quick-attach", id:t.id, category:"materials", accept:"application/pdf,image/*", multiple:true, title:"Прикрепить счёт/накладную (можно сразу несколько)"})}`,
                 body: h`
+                  <div class="actions-row" style="margin-bottom:8px;align-items:center;">
+                    <label style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:400;margin:0;">
+                      <input type="checkbox" data-action="materials-not-needed-toggle" data-id="${t.id}" data-val="${t.materials_not_needed?'0':'1'}" ${t.materials_not_needed?'checked':''}>
+                      Материал не нужен
+                    </label>
+                  </div>
                   ${t.status==="onsite" ? h`<div class="actions-row" style="margin-bottom:8px;"><button class="btn btn-sm" data-action="materials" data-id="${t.id}">Нужны материалы…</button></div>` : ""}
                   ${t.materials_wait ? h`<div class="helptext" style="margin-bottom:8px;">Ожидаются материалы (срок поставки: ${fmtDateShort(t.materials_eta)}).</div>` : ""}
+                  ${materialsFiles ? h`<div class="helptext" style="margin-bottom:8px;">Оплата счёта отмечается галочкой «Оплачено» в «Реестре платежей».</div>` : ""}
                   ${milestoneInvoiceList(t, "materials")}`
               })}
               ${milestoneRow({
@@ -2950,15 +3057,25 @@
         if(!name){ alert("Выберите исполнителя из списка (назначьте роль в «Команде» или создайте бригаду в «Бригадах», если список пуст)."); return; }
         assignSpecialist(id,name); return;
       }
+      if(action==="assign-free"){
+        var afInput=document.getElementById("assign-free-input"); var afName=afInput&&afInput.value&&afInput.value.trim();
+        if(!afName){ alert("Впишите имя или название исполнителя."); return; }
+        assignSpecialist(id,afName); if(afInput) afInput.value=""; return;
+      }
       if(action==="reassign"){
         var rsel=document.getElementById("reassign-select"); var rname=rsel&&rsel.value;
         if(!rname){ alert("Выберите нового исполнителя из списка."); return; }
         reassignSpecialist(id,rname); return;
       }
+      if(action==="reassign-free"){
+        var rfInput=document.getElementById("reassign-free-input"); var rfName=rfInput&&rfInput.value&&rfInput.value.trim();
+        if(!rfName){ alert("Впишите имя или название нового исполнителя."); return; }
+        reassignSpecialist(id,rfName); if(rfInput) rfInput.value=""; return;
+      }
       if(action==="arrived") return markArrived(id);
       if(action==="materials") return openMaterialsEtaModal(id);
-      if(action==="materials-ready-toggle") return setMaterialsReady(id, actionEl.getAttribute("data-val")==="1");
-      if(action==="crew-manual-toggle") return setCrewManualDone(id, actionEl.getAttribute("data-val")==="1");
+      if(action==="materials-not-needed-toggle") return setMaterialsNotNeeded(id, actionEl.getAttribute("data-val")==="1");
+      if(action==="crew-not-needed-toggle") return setCrewNotNeeded(id, actionEl.getAttribute("data-val")==="1");
       if(action==="work-manual-toggle") return setWorkManualDone(id, actionEl.getAttribute("data-val")==="1");
       if(action==="act-signed-toggle") return setActSigned(id, actionEl.getAttribute("data-val")==="1");
       if(action==="act-open") return openActFile(actionEl.getAttribute("data-path"));
@@ -2969,6 +3086,7 @@
       if(action==="timesheet-ref-clear") return clearTimesheetRef(id);
       if(action==="invoice-open") return openInvoiceFile(actionEl.getAttribute("data-path"));
       if(action==="invoice-delete") return deleteInvoice(id, actionEl.getAttribute("data-path"));
+      if(action==="invoice-paid-toggle") return setInvoicePaid(id, actionEl.getAttribute("data-val")==="1");
       if(action==="registry-export") return exportRegistryExcel();
       if(action==="tickets-export") return exportTicketsExcel();
       if(action==="toggle-status-filter"){
