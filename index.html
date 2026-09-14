@@ -316,7 +316,15 @@
   ::selection{ background:var(--accent-soft); }
 
   /* ---------- auth screen ---------- */
-  .auth-wrap{ min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px; }
+  /* width:100% (0.2.10) — #app само по себе display:flex (см. #app выше), а
+     .auth-wrap/.configwarn/"Загрузка…" — единственные дети #app на экранах
+     входа/загрузки/ожидания. Без width:100% каждый из них как flex-элемент
+     сжимается до ширины своего контента (карточки в 380px) и прижимается к
+     ЛЕВОМУ краю #app (который сам по себе центрирован на странице через
+     max-width+margin:auto) — снаружи это выглядит так, будто окно входа
+     висит слева, а не по центру. width:100% отдаёт .auth-wrap всю ширину
+     #app, и уже её собственные align-items/justify-content центрируют карточку.*/
+  .auth-wrap{ width:100%; min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px; }
   .auth-card{ width:380px; max-width:100%; padding:34px 30px; }
   .auth-logo{ font-weight:700; font-size:19px; margin-bottom:2px; }
   .auth-sub{ color:var(--ink-faint); font-size:12.5px; margin-bottom:26px; }
@@ -371,7 +379,7 @@
   // «Активен/Отключён» (уже существовал для сотрудников) для «Заказчика»
   // реально закрывает вход на сайт, а не просто убирает из списков — см.
   // проверку "role===\"customer\" && active===false" в render() ниже.
-  var ROLE_LABEL = {dispatcher:"Администратор", specialist:"Гл. инженер", head:"Руководитель", warehouse:"Снабжение", finance:"Финансист", customer:"Заказчик", pending:"Ожидает назначения роли"};
+  var ROLE_LABEL = {dispatcher:"Администратор", specialist:"Гл. инженер", head:"Руководитель", warehouse:"Снабжение", finance:"Финансист", operator:"Диспетчер", customer:"Заказчик", pending:"Ожидает назначения роли"};
   // Какие разделы меню видит каждая роль. null = видит всё. Это ограничение
   // только интерфейса (чтобы не путать людей лишними разделами) — на уровне
   // базы данных (RLS) доступ по-прежнему открыт всем вошедшим, поэтому это
@@ -417,8 +425,25 @@
     // СЕРВИСу теперь встроен прямо в «Дашборд» (см. viewDashboard), который
     // доступен всем ролям, так что видимость отчёта больше не завязана на роль
     // Финансиста отдельно.
-    finance: ["dashboard","registry","cashexpenses","team"]
+    finance: ["dashboard","registry","cashexpenses","team"],
+    // «Диспетчер» (0.2.10) — новая роль без своего готового набора разделов:
+    // по просьбе Антона она пустая по умолчанию, а какие разделы видит
+    // конкретный диспетчер, он расставляет персонально через «Права» в
+    // «Команде» (см. PERMISSION_VIEWS/extra_views ниже) — то есть для этой
+    // роли ROLE_NAV НЕ задаёт вообще ничего, всё решают галочки конкретного
+    // человека.
+    operator: []
   };
+  // Полный список разделов, которые можно выдать отдельной галочкой сверх
+  // того, что уже даёт роль (0.2.10, окно «Права» в «Команде» — см.
+  // openPermissionsModal). Ключ — тот же view, что и в ROLE_NAV/titleMap,
+  // подпись — то, что видит владелец в чекбоксах.
+  var PERMISSION_VIEWS = [
+    ["dashboard","Дашборд"], ["tickets","Заявки"], ["map","Карта"], ["hotels","Отели"],
+    ["team","Команда"], ["parts","Склад ЗИП"], ["import","Импорт из c-lector"],
+    ["registry","Реестр платежей"], ["cashexpenses","Наличные расходы"],
+    ["crews","Бригады"], ["systemdefects","Системный брак"]
+  ];
   function navAllowed(view){
     // Владелец (см. isOwner() ниже) всегда может дойти до «Команды», даже если
     // его собственная роль почему-то "pending" (пустой ROLE_NAV.pending) —
@@ -432,24 +457,36 @@
     var role = state.me && state.me.role;
     var allowed = ROLE_NAV.hasOwnProperty(role) ? ROLE_NAV[role] : null;
     if(allowed===null) return true;
-    return allowed.indexOf(view) > -1;
+    if(allowed.indexOf(view) > -1) return true;
+    // Персональные права (0.2.10) — окно «Права» в «Команде» ДОБАВЛЯЕТ разделы
+    // сверх того, что уже даёт роль (а не заменяет их), поэтому если роль уже
+    // разрешила раздел — сюда даже заходить не нужно (see выше), а если нет —
+    // проверяем персональный список extra_views этого конкретного профиля.
+    var extra = (state.me && state.me.extra_views) || [];
+    return extra.indexOf(view) > -1;
   }
   function firstAllowedView(){
     var role = state.me && state.me.role;
     var allowed = ROLE_NAV.hasOwnProperty(role) ? ROLE_NAV[role] : null;
-    if(allowed===null || !allowed.length) return "dashboard";
-    return allowed[0];
+    if(allowed===null) return "dashboard";
+    var extra = (state.me && state.me.extra_views) || [];
+    var combined = allowed.concat(extra);
+    if(!combined.length) return "dashboard";
+    return combined[0];
   }
   // Право редактировать «Финансы» — и «Реестр платежей» (галочка «Оплачено»,
   // версия 0.2.2, п.3), и «Наличные расходы» (версия 0.2.4: выдачи/расходы) —
-  // только у Администратора, Руководителя и Финансиста. Как и остальной
-  // ROLE_NAV/isOwner выше, это ограничение уровня интерфейса, а не политика
-  // Supabase: у остальных ролей просто не показывается доступ к разделу
-  // «Финансы» в меню, а элементы управления рисуются как disabled на случай
-  // прямого перехода по ссылке.
+  // по умолчанию у Администратора, Руководителя и Финансиста. С 0.2.10 это
+  // право можно ТАКЖЕ выдать отдельной галочкой любому конкретному человеку
+  // через «Права» в «Команде» (state.me.can_edit_registry), независимо от
+  // роли — как и остальной ROLE_NAV/isOwner выше, это ограничение уровня
+  // интерфейса, а не политика Supabase: у остальных ролей просто не
+  // показывается доступ к разделу «Финансы» в меню, а элементы управления
+  // рисуются как disabled на случай прямого перехода по ссылке.
   function canEditRegistry(){
     var role = state.me && state.me.role;
-    return role==="dispatcher" || role==="head" || role==="finance";
+    if(role==="dispatcher" || role==="head" || role==="finance") return true;
+    return !!(state.me && state.me.can_edit_registry);
   }
   // Единственный email, которому в разделе «Команда» доступны изменение
   // роли/зон, включение/отключение и удаление сотрудника — по просьбе Антона
@@ -852,7 +889,26 @@
   function initAuth(){
     if(!CONFIGURED || !LIB_LOADED){ render(); return; }
     sb.auth.onAuthStateChange(function(event, session){
+      // Открытая карточка заявки (state.selectedTicketId/#overlay-root) и
+      // текущий маршрут (state.route, включая "#/tickets/<id>") принадлежат
+      // ПРЕДЫДУЩЕМУ вошедшему человеку — без сброса при смене личности (вход
+      // другим человеком, либо выход) они могли бы "утечь" следующему: если
+      // хэш в адресной строке ещё указывал на конкретную заявку, код прямых
+      // ссылок ниже (0.2.3, п.7) снова открыл бы её панель уже для нового
+      // человека, поверх его экрана (в т.ч. поверх экрана ожидания/блокировки).
+      // Обнаружено на тестах (0.2.10) при переключении между учётками. Сеанс
+      // ТОГО ЖЕ человека (простое восстановление/обновление токена) — не смена
+      // личности, маршрут в этом случае не трогаем.
+      var prevUserId = state.session && state.session.user && state.session.user.id;
+      var nextUserId = session && session.user && session.user.id;
       state.session = session;
+      if(prevUserId !== nextUserId){
+        state.selectedTicketId = null;
+        state.route = {view:"dashboard", id:null};
+        history.replaceState(null, "", location.pathname+location.search+"#/dashboard");
+        var overlayRoot = document.getElementById("overlay-root");
+        if(overlayRoot) overlayRoot.innerHTML = "";
+      }
       if(session){
         // strip magic-link tokens from the address bar
         if(location.hash && location.hash.indexOf("access_token")>-1){
@@ -877,7 +933,7 @@
       // handle_new_user (гонка сразу после первого входа) — role:"pending" в тон
       // реальному значению по умолчанию в БД (см. supabase_schema.sql), чтобы
       // такой человек тоже увидел экран ожидания, а не получил доступ по ошибке.
-      state.me = res.data || {id:state.session.user.id, email:state.session.user.email, name:"", role:"pending", active:true};
+      state.me = res.data || {id:state.session.user.id, email:state.session.user.email, name:"", role:"pending", active:true, extra_views:[], can_edit_registry:false};
     });
   }
 
@@ -2562,7 +2618,10 @@
                 <td>${owner
                   ? h`<button class="btn btn-sm ${m.active===false?'':'btn-ghost'}" data-action="profile-toggle-active" data-id="${m.id}" data-val="${m.active===false?1:0}">${m.active===false?'Включить':'Активен'}</button>`
                   : h`<span class="pill ${m.active===false?'pill-neutral':'pill-ok'}">${m.active===false?'Отключён':'Активен'}</span>`}</td>
-                ${owner ? h`<td>${isSelf?'':h`<button class="btn btn-sm btn-ghost btn-danger" data-action="profile-delete" data-id="${m.id}" data-label="${escapeHtml(m.name||m.email)}">Удалить</button>`}</td>` : ''}
+                ${owner ? h`<td style="white-space:nowrap;">
+                  <button class="btn btn-sm btn-ghost" data-action="edit-permissions" data-id="${m.id}" title="Разделы и права, которые ДОБАВЛЯЮТСЯ этому человеку сверх того, что уже даёт роль">Права</button>
+                  ${isSelf?'':h`<button class="btn btn-sm btn-ghost btn-danger" data-action="profile-delete" data-id="${m.id}" data-label="${escapeHtml(m.name||m.email)}">Удалить</button>`}
+                </td>` : ''}
               </tr>`;
             }).join("")}</tbody>
           </table></div>`}
@@ -3687,6 +3746,52 @@
     document.getElementById("me-signout").addEventListener("click", function(){ closeModal(); signOut(); });
   }
 
+  // Окно «Права» в «Команде» (0.2.10, по просьбе Антона) — владелец службы
+  // может для КОНКРЕТНОГО человека галочками добавить разделы сверх того, что
+  // уже даёт его роль (см. PERMISSION_VIEWS/navAllowed выше), плюс отдельно —
+  // право отмечать счета оплаченными («Оплачено» в «Реестре платежей» и
+  // «Наличные расходы», см. canEditRegistry). Роль при этом не трогаем —
+  // именно поэтому здесь нет отдельного select для роли, это окно только про
+  // ДОПОЛНИТЕЛЬНЫЕ, персональные права.
+  function openPermissionsModal(userId){
+    var m = state.profiles.find(function(p){ return p.id===userId; });
+    if(!m) return;
+    var extra = m.extra_views || [];
+    var roleAllowed = ROLE_NAV.hasOwnProperty(m.role) ? ROLE_NAV[m.role] : null;
+    openModal(h`
+      <div class="modal" data-stop style="width:560px;">
+        <div class="modal-head"><h2>Права — ${escapeHtml(m.name||m.email)}</h2><button class="btn btn-ghost" data-close-modal>✕</button></div>
+        <form id="permissions-form">
+          <div class="modal-body">
+            <div class="helptext" style="margin-bottom:12px;">Роль «${escapeHtml(roleLabel(m.role))}»${roleAllowed===null?' уже даёт доступ ко всем разделам — галочки ниже ничего не добавят.':(roleAllowed&&roleAllowed.length?' уже даёт доступ к: '+roleAllowed.map(function(v){var f=PERMISSION_VIEWS.find(function(x){return x[0]===v;});return f?f[1]:v;}).join(", ")+'.':' пока не даёт доступа ни к одному разделу.')} Галочки ниже ДОБАВЛЯЮТ разделы именно этому человеку, не трогая роль и остальных.${m.role==="pending"?' Пока роль «Ожидает назначения роли» — человек не попадёт даже на «Дашборд», какие бы галочки здесь ни стояли: сначала смените роль (например, на «Диспетчер»).':''}</div>
+            <div class="chip-toggle" style="gap:8px;">
+              ${PERMISSION_VIEWS.map(function(v){
+                var alreadyByRole = roleAllowed===null || (roleAllowed && roleAllowed.indexOf(v[0])>-1);
+                var checked = alreadyByRole || extra.indexOf(v[0])>-1;
+                return h`<label title="${alreadyByRole?'Уже открыто ролью «'+escapeHtml(roleLabel(m.role))+'»':''}">
+                  <input type="checkbox" name="view_${v[0]}" ${checked?'checked':''} ${alreadyByRole?'disabled':''}> ${v[1]}
+                </label>`;
+              }).join("")}
+            </div>
+            <hr style="margin:14px 0;border:none;border-top:1px solid var(--line);">
+            <div class="chip-toggle"><label title="${(m.role==="dispatcher"||m.role==="head"||m.role==="finance")?'Уже даётся ролью «'+escapeHtml(roleLabel(m.role))+'»':''}"><input type="checkbox" name="editRegistry" ${(m.role==="dispatcher"||m.role==="head"||m.role==="finance")?'checked disabled':(m.can_edit_registry?'checked':'')}> Может отмечать счета оплаченными (Реестр платежей / Наличные расходы)</label></div>
+          </div>
+          <div class="modal-foot"><button type="button" class="btn" data-close-modal>Отмена</button><button type="submit" class="btn btn-primary">Сохранить</button></div>
+        </form>
+      </div>`);
+    document.getElementById("permissions-form").addEventListener("submit", function(e){
+      e.preventDefault();
+      var fd = new FormData(e.target);
+      var newExtra = PERMISSION_VIEWS.filter(function(v){
+        var alreadyByRole = roleAllowed===null || (roleAllowed && roleAllowed.indexOf(v[0])>-1);
+        return !alreadyByRole && fd.get("view_"+v[0]);
+      }).map(function(v){ return v[0]; });
+      var editRegistry = (m.role==="dispatcher"||m.role==="head"||m.role==="finance") ? false : !!fd.get("editRegistry");
+      updateProfile(userId, {extra_views:newExtra, can_edit_registry:editRegistry});
+      closeModal();
+    });
+  }
+
   // Раньше дата ожидаемой поставки материалов вводилась через prompt() обычным
   // текстом ("ГГГГ-ММ-ДД") — по просьбе Антона заменили на настоящий выпадающий
   // календарь (тот же <input type="date">, что уже использовался в снимке
@@ -4019,6 +4124,7 @@
       }
       if(action==="profile-toggle-active"){ if(!isOwner()) return; updateProfile(id, {active: actionEl.getAttribute("data-val")==="1"}); return; }
       if(action==="profile-delete"){ if(!isOwner()) return; deleteProfile(id, actionEl.getAttribute("data-label")||"—"); return; }
+      if(action==="edit-permissions"){ if(!isOwner()) return; openPermissionsModal(id); return; }
       if(action==="attention-toggle"){
         var turnOn = actionEl.getAttribute("data-val")==="1";
         var note = turnOn ? (prompt("Комментарий (необязательно) — например, кто обратил внимание:")||"") : "";
