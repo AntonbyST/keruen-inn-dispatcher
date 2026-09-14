@@ -373,6 +373,10 @@
   var STATUS_LABEL = { new:"Новая", dispatched:"Диспетчеризована", onsite:"На объекте / устранение", closed:"Закрыта", rejected:"Отклонена" };
   var STATUS_PILL = { new:"pill-neutral", dispatched:"pill-accent", onsite:"pill-warn", closed:"pill-ok", rejected:"pill-neutral" };
   var CASE_LABEL = { warranty:"Гарантийный", nonwarranty:"Негарантийный", unfounded:"Необоснованная" };
+  // Метки статусов из status_history в clector_raw (0.2.11, синхронизация по
+  // API) — коды самой заявки в c-lector, см. MOTEL_API.md "Значения".
+  // Отдельно от STATUS_LABEL выше — те коды нашей внутренней "status".
+  var CLECTOR_STATUS_LABEL = { opened:"Подана", accepted:"Принята", processing:"В работе", finished:"Выполнена", rejected:"Отклонена" };
   // "customer" (0.2.8) — «Заказчик»: единственная роль, которую можно назначить
   // только владельцу службы (isOwner(), см. viewTeam) — как и все остальные
   // роли, но у неё есть вторая, отдельная защёлка: тот же переключатель
@@ -587,8 +591,11 @@
   function workOrderNo(t){ var d=new Date(t.created_at||Date.now()); var ds=d.getFullYear()+String(d.getMonth()+1).padStart(2,"0")+String(d.getDate()).padStart(2,"0"); return "НЗ-"+ds+"-"+(t.id||"").replace(/-/g,"").slice(-4).toUpperCase(); }
 
   /* ============================== ИМПОРТ ИЗ C-LECTOR ==============================
-     У c-lector.ru нет публичного API — импорт делается из данных, которые сам
-     пользователь скопировал (вставка таблицы) или выгрузил (CSV/XLSX) из c-lector. */
+     С версии 0.2.11 есть официальный API c-lector (только чтение) — заявки, у
+     которых он подключён, синхронизируются сами по расписанию (см.
+     edge-functions/clector-sync.ts), без участия человека. Ручной путь
+     ниже (вставка таблицы/файл) остаётся как запасной вариант — например,
+     пока ключ API ещё не выдан, либо для данных, которых в API нет. */
   function normalizeForMatch(s){ return String(s||"").toLowerCase().replace(/[«»"'.,№#]/g,"").replace(/\s+/g," ").trim(); }
   function matchHotelByName(name){
     var n = normalizeForMatch(name);
@@ -2159,6 +2166,50 @@
   // Раздел для старых файлов без категории (см. legacyInvoicesFor выше) — виден
   // в карточке заявки, только если такие файлы у неё реально есть, чтобы не
   // загромождать обычные заявки уже неактуальным разделом.
+  // Переписка и история статусов из c-lector (0.2.11, автосинхронизация по
+  // API — см. edge-functions/clector-sync.ts) — заявка целиком приходит
+  // из API и складывается в tickets.clector_raw как есть (comments[],
+  // status_history[]), это просто их отображение. Заявок, заведённых
+  // ручным импортом файла/вставки (viewImport/commitImport), это не
+  // касается — там clector_raw не заполняется, секция не показывается.
+  function clectorCommentsList(comments){
+    if(!comments || !comments.length) return "";
+    return h`<div style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px;">
+      ${comments.slice().reverse().map(function(c){
+        var author = (c.author && c.author.name) ? c.author.name : "—";
+        return h`<div style="padding:6px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;">
+          <div class="muted" style="font-size:11.5px;margin-bottom:2px;">${escapeHtml(author)} · ${escapeHtml(fmtDate(c.created_at))}</div>
+          <div>${escapeHtml(c.text||"")}</div>
+        </div>`;
+      }).join("")}
+    </div>`;
+  }
+  function clectorStatusHistoryList(history){
+    if(!history || !history.length) return "";
+    return h`<div style="display:flex;flex-direction:column;gap:4px;">
+      ${history.slice().reverse().map(function(e){
+        var from = e.from_status ? (CLECTOR_STATUS_LABEL[e.from_status]||e.from_status) : null;
+        var to = CLECTOR_STATUS_LABEL[e.to_status]||e.to_status;
+        var by = (e.changed_by && e.changed_by.name) ? e.changed_by.name : "автоматически";
+        return h`<div class="kv" style="font-size:12.5px;">
+          <span class="k">${escapeHtml(fmtDate(e.changed_at))}</span>
+          <span class="v">${from?escapeHtml(from)+" → ":""}${escapeHtml(to)} <span class="muted">(${escapeHtml(by)})</span></span>
+        </div>`;
+      }).join("")}
+    </div>`;
+  }
+  function clectorSyncSection(t){
+    if(t.source!=="c-lector" || !t.clector_raw) return "";
+    var raw = t.clector_raw;
+    var comments = raw.comments||[];
+    var history = raw.status_history||[];
+    if(!comments.length && !history.length) return "";
+    return h`<div>
+      <div class="section-title">Из c-lector ${infoTip("Переписка и история статусов подтягиваются автоматически при синхронизации с API c-lector, только для чтения — ответить отсюда нельзя, писать нужно в самой системе c-lector.")}</div>
+      ${history.length ? h`<div class="helptext" style="margin-bottom:4px;">История статусов:</div>${clectorStatusHistoryList(history)}` : ""}
+      ${comments.length ? h`<div class="helptext" style="margin:10px 0 4px;">Переписка:</div>${clectorCommentsList(comments)}` : ""}
+    </div>`;
+  }
   function legacyInvoiceSection(t){
     var list = legacyInvoicesFor(t);
     if(!list.length) return "";
@@ -3322,11 +3373,12 @@
         </div>`;
     }
     if(state.importHeaders.length===0){
+      var lastSync = (state.snapshots||[]).slice().sort(function(a,b){ return new Date(b.imported_at)-new Date(a.imported_at); })[0];
       return h`
         <div class="two-col">
           <div class="card card-pad">
-            <div class="section-title">1. Вставьте данные из c-lector.ru</div>
-            <p style="font-size:13px;">Так как у c-lector нет открытого API, данные переносятся вручную: откройте список заявок в c-lector, выделите таблицу целиком (включая заголовки) и скопируйте — вставьте сюда. Либо выгрузите список в Excel/CSV и загрузите файл.</p>
+            <div class="section-title">Ручной перенос из c-lector.ru</div>
+            <p style="font-size:13px;">Для заявок, у которых подключён официальный API c-lector, синхронизация идёт сама по расписанию — сюда их вставлять не нужно. Этот раздел — запасной путь: откройте список заявок в c-lector, выделите таблицу целиком (включая заголовки) и скопируйте — вставьте сюда. Либо выгрузите список в Excel/CSV и загрузите файл.</p>
             <div class="field"><textarea id="import-paste" rows="6" placeholder="Вставьте скопированную таблицу (Ctrl+V)…"></textarea></div>
             <button class="btn btn-primary" id="import-parse-btn">Разобрать вставленные данные</button>
             <div class="helptext" style="margin:12px 0 6px;">— или —</div>
@@ -3337,7 +3389,10 @@
             ${state.importFileError ? h`<div class="banner" style="margin-top:12px;">${state.importFileError}</div>` : ""}
           </div>
           <div class="card card-pad">
-            <div class="section-title">Как это работает</div>
+            <div class="section-title">Автосинхронизация по API</div>
+            <div class="kv"><span class="k">Последняя синхронизация</span><span class="v">${lastSync ? fmtDate(lastSync.imported_at) : "ещё не было"}</span></div>
+            <div class="helptext" style="margin:10px 0 14px;">Если давно не обновлялось — проверьте расписание и ключ API в Supabase (Edge Functions → clector-sync → Logs).</div>
+            <div class="section-title">Как работает ручной перенос (запасной путь)</div>
             <div class="kv"><span class="k">1</span><span class="v" style="text-align:left;">Вставляете или загружаете таблицу заявок</span></div>
             <div class="kv"><span class="k">2</span><span class="v" style="text-align:left;">Сопоставляете колонки c-lector с полями платформы</span></div>
             <div class="kv"><span class="k">3</span><span class="v" style="text-align:left;">Платформа сама находит отель по названию и пропускает уже импортированные заявки</span></div>
@@ -3670,6 +3725,7 @@
             <div class="kv"><span class="k">Срок устранения</span><span class="v" style="${(!di.done && t.resolution_deadline && new Date(t.resolution_deadline).getTime()<Date.now())?'color:var(--crit);font-weight:600;':''}">${t.resolution_deadline? fmtDate(t.resolution_deadline): "не указан (нет данных c-lector)"}</span></div>
             <div class="kv"><span class="k">Наряд-задание</span><span class="v mono">${workOrderNo(t)}</span></div>
           </div>
+          ${clectorSyncSection(t)}
           ${(function(){
             var cost = ticketCostTotal(t);
             if(!cost.invoiceCount && !cost.cashCount) return "";
