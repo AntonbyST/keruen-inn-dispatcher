@@ -127,6 +127,12 @@
   .tag-filter-chip input{ position:absolute; inset:0; opacity:0; margin:0; cursor:pointer; }
   .tag-filter-chip:hover{ border-color:var(--accent-line); }
   .tag-filter-chip.active{ background:var(--accent-soft); border-color:var(--accent-line); color:var(--accent); }
+  /* Трёхпозиционный фильтр "Материал" (0.2.9) — жёлтый/зелёный вместо общего
+     акцентного цвета .active выше, чтобы сразу читалось, какое именно
+     состояние сейчас выбрано (как и у самой иконки статуса, см. .status-icon
+     выше). Отдельные правила после .active, чтобы точно её переопределить. */
+  .tag-filter-chip.warn-lit{ background:var(--warn-soft); border-color:var(--warn); color:var(--warn); }
+  .tag-filter-chip.lit{ background:var(--ok-soft); border-color:var(--ok); color:var(--ok); }
   .status-icons{ display:inline-flex; align-items:center; gap:4px; vertical-align:middle; }
   .status-icon{ width:18px; height:18px; display:inline-flex; align-items:center; justify-content:center; color:var(--ink-faint); opacity:.4; transition:opacity .15s ease, color .15s ease, filter .15s ease; cursor:default; }
   .status-icon svg{ width:14px; height:14px; display:block; }
@@ -316,6 +322,9 @@
   .auth-sub{ color:var(--ink-faint); font-size:12.5px; margin-bottom:26px; }
   .auth-err{ background:var(--crit-soft); color:var(--crit); border-radius:8px; padding:9px 12px; font-size:12.5px; margin-bottom:14px; }
   .auth-ok{ background:var(--ok-soft); color:var(--ok); border-radius:8px; padding:12px 14px; font-size:13px; }
+  /* "Заказчик" без доступа (0.2.8) — тот же экран-обёртка входа, но нейтрально-
+     предупреждающего цвета, а не зелёного "успеха" (auth-ok выше). */
+  .auth-maintenance{ background:var(--warn-soft); color:var(--warn); border-radius:8px; padding:12px 14px; font-size:13px; }
   .configwarn{ max-width:560px; margin:60px auto; padding:24px 26px; }
 </style>
 </head>
@@ -356,19 +365,42 @@
   var STATUS_LABEL = { new:"Новая", dispatched:"Диспетчеризована", onsite:"На объекте / устранение", closed:"Закрыта", rejected:"Отклонена" };
   var STATUS_PILL = { new:"pill-neutral", dispatched:"pill-accent", onsite:"pill-warn", closed:"pill-ok", rejected:"pill-neutral" };
   var CASE_LABEL = { warranty:"Гарантийный", nonwarranty:"Негарантийный", unfounded:"Необоснованная" };
-  var ROLE_LABEL = {dispatcher:"Администратор", specialist:"Гл. инженер", head:"Руководитель", warehouse:"Снабжение", finance:"Финансист"};
+  // "customer" (0.2.8) — «Заказчик»: единственная роль, которую можно назначить
+  // только владельцу службы (isOwner(), см. viewTeam) — как и все остальные
+  // роли, но у неё есть вторая, отдельная защёлка: тот же переключатель
+  // «Активен/Отключён» (уже существовал для сотрудников) для «Заказчика»
+  // реально закрывает вход на сайт, а не просто убирает из списков — см.
+  // проверку "role===\"customer\" && active===false" в render() ниже.
+  var ROLE_LABEL = {dispatcher:"Администратор", specialist:"Гл. инженер", head:"Руководитель", warehouse:"Снабжение", finance:"Финансист", customer:"Заказчик", pending:"Ожидает назначения роли"};
   // Какие разделы меню видит каждая роль. null = видит всё. Это ограничение
   // только интерфейса (чтобы не путать людей лишними разделами) — на уровне
   // базы данных (RLS) доступ по-прежнему открыт всем вошедшим, поэтому это
   // не защита данных, а удобство навигации.
-  // «Команда» доступна всем ролям без исключения: это единственное место, где
-  // назначается роль, и по умолчанию любой новый человек становится
-  // «Главный инженер» (specialist) — если убрать отсюда «Команду», человек,
-  // первым вошедший в систему, никогда не сможет сам себе (или другим)
-  // назначить роль диспетчера/руководителя.
+  // «Команда» доступна всем ролям без исключения (кроме «Заказчика», см. ниже):
+  // это единственное место, где назначается роль, и по умолчанию любой новый
+  // человек становится «Главный инженер» (specialist) — если убрать отсюда
+  // «Команду», человек, первым вошедший в систему, никогда не сможет сам себе
+  // (или другим) назначить роль диспетчера/руководителя.
   var ROLE_NAV = {
     dispatcher: null,
     head: null,
+    // «Заказчик» (0.2.8, расширено в 0.2.9) — внешний человек со стороны
+    // отеля/клиента, видит «Дашборд», «Заявки», «Карту» и «Отели» (по просьбе
+    // Антона) и намеренно НЕ видит «Команду»: ни к чему показывать внешнему
+    // человеку список сотрудников и их роли, да и раз "Команда" — единственное
+    // место назначения ролей, лишний повод не пускать туда роль, которую сам
+    // себе никто, кроме владельца, назначить не может. Доступ к «Заявкам»
+    // теперь настоящий (открытие карточки больше не блокируется, см. клик по
+    // "openTicket" и render() ниже) — раз этот пункт меню показывается, он
+    // должен реально работать.
+    customer: ["dashboard","tickets","map","hotels"],
+    // «Ожидает назначения роли» (0.2.9) — роль по умолчанию для только что
+    // вошедшего человека (см. supabase_schema.sql), пока Администратор
+    // (owner) не назначит настоящую роль в «Команде». Пустой список означает
+    // «нет доступных разделов» — render() ниже вообще не даёт такому человеку
+    // попасть за экран блокировки, так что фактическое содержимое этого
+    // списка не используется, но пусть будет явным (а не null = «видит всё»).
+    pending: [],
     // "tickets" нужен Снабжению, чтобы прикреплять счета на материалы прямо в
     // карточке заявки (см. milestoneRow "Материал" в renderTicketPanel) — без
     // доступа к самим заявкам эта роль не смогла бы этого делать. "registry"
@@ -388,6 +420,15 @@
     finance: ["dashboard","registry","cashexpenses","team"]
   };
   function navAllowed(view){
+    // Владелец (см. isOwner() ниже) всегда может дойти до «Команды», даже если
+    // его собственная роль почему-то "pending" (пустой ROLE_NAV.pending) —
+    // иначе получилась бы задача "курицы и яйца": единственное место, где
+    // назначаются роли, было бы недостижимо для того самого человека, который
+    // один и может там что-то менять. Специально НЕ делаем isOwner() общим
+    // пропуском на ВСЕ разделы — это иначе сделало бы невозможной проверку
+    // самих ограничений ROLE_NAV на тестах, которые временно переключают роль
+    // именно на аккаунте владельца (см. test_standalone.js).
+    if(view==="team" && isOwner()) return true;
     var role = state.me && state.me.role;
     var allowed = ROLE_NAV.hasOwnProperty(role) ? ROLE_NAV[role] : null;
     if(allowed===null) return true;
@@ -750,6 +791,7 @@
       state.importResult = { inserted: insertedCount, updated: updatedCount, failed: failedCount, lastError: lastError, counts: preview.counts };
       state.importHeaders = []; state.importRows = []; state.importMapping = {};
       recordImportSnapshot();
+      updatePortfolioFromImport();
       render();
     }
     function nextInsert(idx){
@@ -831,7 +873,11 @@
 
   function loadMyProfile(){
     return sb.from("profiles").select("*").eq("id", state.session.user.id).maybeSingle().then(function(res){
-      state.me = res.data || {id:state.session.user.id, email:state.session.user.email, name:"", role:"specialist", active:true};
+      // Запасной вариант, если строка профиля почему-то ещё не создана триггером
+      // handle_new_user (гонка сразу после первого входа) — role:"pending" в тон
+      // реальному значению по умолчанию в БД (см. supabase_schema.sql), чтобы
+      // такой человек тоже увидел экран ожидания, а не получил доступ по ошибке.
+      state.me = res.data || {id:state.session.user.id, email:state.session.user.email, name:"", role:"pending", active:true};
     });
   }
 
@@ -1196,7 +1242,15 @@
   function findSnapshotNearDaysAgo(days){
     var snaps = (state.statsSnapshots||[]).filter(function(s){ return s.snapshot_date; });
     if(!snaps.length) return null;
-    var targetTime = Date.now() - days*24*3600*1000;
+    // Снимки — календарные даты без времени ("2026-09-14"), поэтому цель
+    // сравнения тоже нормализуем к полуночи сегодняшнего дня, а не берём
+    // "Date.now() - N дней" как есть. Иначе сравнение расстояния в миллисекундах
+    // зависит от времени суток, в которое считается отчёт: например, во второй
+    // половине дня снимок "сегодня" (полночь сегодня) оказывается ближе к
+    // "N дней назад", чем снимок ровно N дней назад (полночь N дней назад) —
+    // отчёт молча сравнивал бы себя с самим собой вместо нужного дня.
+    var todayMidnight = new Date(); todayMidnight.setHours(0,0,0,0);
+    var targetTime = todayMidnight.getTime() - days*24*3600*1000;
     var best = null, bestDiff = Infinity;
     snaps.forEach(function(s){
       var diff = Math.abs(new Date(s.snapshot_date).getTime() - targetTime);
@@ -1708,6 +1762,22 @@
   function updatePartQty(id, qty){ sb.from("parts").update({qty:Number(qty)||0, updated_at:new Date().toISOString()}).eq("id",id).then(function(){}); }
   function removePart(id){ sb.from("parts").delete().eq("id",id).then(function(){}); }
   function savePortfolio(byHotel, snapshotDate){ sb.from("portfolio_snapshot").upsert({id:1, by_hotel:byHotel, snapshot_date:snapshotDate}).then(function(){}); }
+  // Автообновление "Портфель по c-lector.ru" вместе с импортом (0.2.9, по
+  // просьбе Антона) — раньше эти цифры (total/submitted/inWork/overdue/done/
+  // rejected по каждому отелю) заполнялись вручную через кнопку "Обновить
+  // снимок" (см. бывший openPortfolioModal, убран вместе с кнопкой), теперь
+  // считаются автоматически из тех же живых данных заявок, что и "Отчёт по
+  // СЕРВИСу" (см. computeLiveHotelStats выше) — сразу после каждого коммита
+  // импорта из c-lector (см. commitImport → finish). state.portfolio
+  // обновляем локально сразу же (а не только через savePortfolio → realtime),
+  // чтобы виджет на дашборде обновился в тот же рендер, не дожидаясь ответа
+  // от Supabase/канала portfolio-rt.
+  function updatePortfolioFromImport(){
+    var todayIso = new Date().toISOString().slice(0,10);
+    var byHotel = computeLiveHotelStats();
+    state.portfolio = {id:1, by_hotel: byHotel, snapshot_date: todayIso};
+    savePortfolio(byHotel, todayIso);
+  }
 
   // Единый обработчик для полей, которые сохраняются "на лету" (Табель, Суть,
   // поля счёта в реестре) — раньше такие сохранения были "выстрелил и забыл"
@@ -2236,8 +2306,7 @@
             <div class="kv"><span class="k">Просрочено</span><span class="v mono" style="color:var(--crit)">${pfTotal.overdue}</span></div>
             <div class="kv"><span class="k">Завершено</span><span class="v mono">${pfTotal.done}</span></div>
             <div class="kv"><span class="k">% выполнения</span><span class="v mono">${pfTotal.total-pfTotal.rejected>0? Math.round(pfTotal.done/(pfTotal.total-pfTotal.rejected)*1000)/10 : 0}%</span></div>
-            <button class="btn btn-sm" style="margin-top:10px;" data-action="edit-portfolio">Обновить снимок</button>
-            <div class="helptext">Ручной снимок из еженедельной выгрузки VDS (c-lector.ru) — не обновляется автоматически.</div>
+            <div class="helptext">Обновляется автоматически при каждом импорте данных из c-lector.ru.</div>
           </div>
         </div>
       </div>`;
@@ -2258,7 +2327,10 @@
     // (зелёный/lit), а не подсвечивает их, как было в 0.2.1. Несколько отмеченных
     // тегов одновременно — заявка должна остаться, только если выполнены ВСЕ
     // отмеченные пункты сразу (логика "И", как и для остальных фильтров списка).
-    var activeTagKeys = Object.keys(f.tagFilters).filter(function(k){ return f.tagFilters[k]; });
+    // С версии 0.2.9 "материал" хранит не true/false, а "warn"/"ok" (см.
+    // data-cycle-material-filter) — остальные три пункта остаются обычными
+    // булевыми чекбоксами, поэтому здесь фильтруем по любому "истинному" значению.
+    var activeTagKeys = Object.keys(f.tagFilters).filter(function(k){ return !!f.tagFilters[k]; });
     var q = normalizeForMatch(f.q||"");
     var baseFiltered = state.tickets.filter(function(t){
       if(f.attentionOnly && !t.attention_flag) return false;
@@ -2267,7 +2339,15 @@
       if(f.hotel && String(t.hotel_id)!==f.hotel) return false;
       if(f.caseTypeList.length && f.caseTypeList.indexOf(t.case_type)===-1) return false;
       if(f.systemDefectOnly && !t.system_defect_name) return false;
-      if(activeTagKeys.length && !activeTagKeys.every(function(key){ var def = STATUS_ICON_BY_KEY[key]; return def && def.lit(t); })) return false;
+      if(activeTagKeys.length && !activeTagKeys.every(function(key){
+        var def = STATUS_ICON_BY_KEY[key];
+        if(!def) return false;
+        // "Материал" — трёхпозиционный фильтр: значение в tagFilters это не
+        // true, а конкретное состояние ("warn"/"ok"), которое надо сравнить
+        // с фактическим состоянием заявки через def.state(), а не def.lit().
+        if(def.state) return def.state(t) === f.tagFilters[key];
+        return def.lit(t);
+      })) return false;
       if(q){
         var hay = normalizeForMatch((t.description||"")+" "+(t.description_short||"")+" "+(t.external_ref||""));
         if(hay.indexOf(q)===-1) return false;
@@ -2361,6 +2441,20 @@
       return h`<th data-action="sort-tickets" data-field="ref" style="cursor:pointer;user-select:none;" title="Сортировать">
         <span>№ c-lector${active?(sortDir==="asc"?" ▲":" ▼"):""}</span>
         <div class="tag-filter-row">${TAG_FILTER_DEFS.map(function(def){
+          // "Материал" — единственный пункт с тремя реальными состояниями
+          // (нейтральный/жёлтый счёт не оплачен/зелёный оплачен, см.
+          // materialsState()), поэтому его фильтр-чип не обычный чекбокс
+          // (вкл/выкл), а трёхпозиционный переключатель по клику: выключен →
+          // жёлтый → зелёный → снова выключен. Остальные три пункта (бригада/
+          // работа/акт) — простое да/нет, чекбокс им подходит как и раньше.
+          if(def.key==="materials"){
+            var mVal = f.tagFilters && f.tagFilters.materials;
+            var mCls = mVal==="warn" ? " warn-lit active" : (mVal==="ok" ? " lit active" : "");
+            var mTitle = mVal==="warn" ? "Показаны заявки: счёт на материал есть, но не оплачен (клик — переключить на «оплачен»)"
+              : mVal==="ok" ? "Показаны заявки: материал оплачен (клик — сбросить фильтр)"
+              : def.title+" — клик переключает: не оплачен → оплачен → сброс";
+            return h`<span class="tag-filter-chip${mCls}" title="${escapeHtml(mTitle)}" data-cycle-material-filter="1">${MS_ICON[def.key]}</span>`;
+          }
           var isOn = !!(f.tagFilters && f.tagFilters[def.key]);
           return h`<label class="tag-filter-chip${isOn?' active':''}" title="${escapeHtml(def.title)}">
             ${MS_ICON[def.key]}
@@ -3616,31 +3710,9 @@
       if(d){ setMaterialsEta(ticketId, d); closeModal(); }
     });
   }
-  function openPortfolioModal(){
-    var pf = state.portfolio || {by_hotel:{}, snapshot_date:new Date().toISOString().slice(0,10)};
-    var fields = ["total","submitted","inWork","overdue","done","rejected"];
-    var fieldLabels = {total:"Всего",submitted:"Подано",inWork:"В работе",overdue:"Просрочено",done:"Завершено",rejected:"Отклонено"};
-    openModal(h`
-      <div class="modal" data-stop style="width:760px;">
-        <div class="modal-head"><h2>Снимок портфеля (c-lector.ru)</h2><button class="btn btn-ghost" data-close-modal>✕</button></div>
-        <form id="portfolio-form">
-          <div class="modal-body">
-            <div class="field" style="max-width:220px;"><label>Дата снимка</label><input type="date" name="snapshotDate" value="${pf.snapshot_date||''}"></div>
-            <div class="table-wrap"><table><thead><tr><th>Отель</th>${fields.map(function(f){return '<th class="num">'+fieldLabels[f]+'</th>';}).join("")}</tr></thead>
-              <tbody>${state.hotels.filter(function(x){return x.in_service;}).map(function(x){
-                var row = (pf.by_hotel && pf.by_hotel[x.id]) || {};
-                return h`<tr><td>№${x.id} ${x.name}</td>${fields.map(function(f){return '<td class="num"><input type="number" name="h'+x.id+'_'+f+'" value="'+(row[f]||0)+'" style="width:64px;text-align:right;padding:4px 6px;"></td>';}).join("")}</tr>`;
-              }).join("")}</tbody></table></div>
-          </div>
-          <div class="modal-foot"><button type="button" class="btn" data-close-modal>Отмена</button><button type="submit" class="btn btn-primary">Сохранить</button></div>
-        </form>
-      </div>`);
-    document.getElementById("portfolio-form").addEventListener("submit", function(e){
-      e.preventDefault(); var fd=new FormData(e.target); var byHotel={};
-      state.hotels.filter(function(x){return x.in_service;}).forEach(function(x){ byHotel[x.id]={}; fields.forEach(function(f){ byHotel[x.id][f]=Number(fd.get("h"+x.id+"_"+f))||0; }); });
-      savePortfolio(byHotel, fd.get("snapshotDate")); closeModal();
-    });
-  }
+  // Ручная форма правки снимка портфеля (openPortfolioModal, кнопка
+  // "Обновить снимок") убрана в 0.2.9 — снимок теперь считается и сохраняется
+  // автоматически при каждом импорте из c-lector, см. updatePortfolioFromImport().
 
   /* ============================== ROOT RENDER ============================== */
   function render(){
@@ -3661,12 +3733,46 @@
     }
     if(!state.session){ renderAuthScreen(); return; }
     if(!state.me || !state.hotelsLoaded){ document.getElementById("app").innerHTML = h`<div class="auth-wrap"><div class="muted">Загрузка…</div></div>`; return; }
+    // Новый человек (0.2.9) — авторизован (сессия и профиль есть), но пока
+    // Администратор (владелец, см. isOwner()) не назначил ему настоящую роль
+    // в «Команде», профиль остаётся с ролью по умолчанию "pending" (см.
+    // supabase_schema.sql) — такой человек не должен видеть вообще ничего,
+    // кроме экрана ожидания. isOwner() в условии — на случай, если сам
+    // владелец почему-то окажется с ролью "pending" (например, ручная правка
+    // в базе) — ему это ограничение применяться не должно (см. navAllowed()).
+    if(!isOwner() && state.me.role==="pending"){
+      document.getElementById("app").innerHTML = h`<div class="auth-wrap"><div class="card auth-card">
+        <div class="auth-logo">Диспетчерская Keruen Inn</div>
+        <div class="auth-sub">Служба сервиса</div>
+        <div class="auth-maintenance"><b>Ожидает назначения роли</b><br>Администратор ещё не открыл вам доступ — обратитесь к нему, либо загляните чуть позже.</div>
+        <button class="btn btn-block" style="margin-top:14px;" data-action="sign-out">Выйти</button>
+      </div></div>`;
+      return;
+    }
+    // «Заказчик» (0.2.8) без включённого доступа — авторизован (сессия и
+    // профиль есть), но саму диспетчерскую видеть не должен. Показываем
+    // нейтральный экран вместо приложения; выйти можно, войти обратно — как
+    // только Администратор поставит галочку "Активен" в «Команде».
+    if(state.me.role==="customer" && state.me.active===false){
+      document.getElementById("app").innerHTML = h`<div class="auth-wrap"><div class="card auth-card">
+        <div class="auth-logo">Диспетчерская Keruen Inn</div>
+        <div class="auth-sub">Служба сервиса</div>
+        <div class="auth-maintenance"><b>Ведутся работы на сайте</b><br>Доступ временно закрыт — загляните чуть позже.</div>
+        <button class="btn btn-block" style="margin-top:14px;" data-action="sign-out">Выйти</button>
+      </div></div>`;
+      return;
+    }
 
     // Прямые ссылки на заявку (0.2.3, п.7): переход по ссылке вида
     // "#/tickets/<id>" открывает карточку этой заявки сразу, без отдельного
     // клика по строке в списке. Сравниваем с уже открытой заявкой, чтобы не
     // мешать закрытию панели пользователем — обработчик data-close-panel ниже
     // сбрасывает state.route.id при закрытии именно для этого.
+    // «Заказчик» с 0.2.9 видит «Заявки» наравне с остальными разрешёнными
+    // разделами (см. ROLE_NAV), поэтому прямая ссылка "#/tickets/<id>"
+    // открывает карточку заявки как и для всех остальных ролей — раньше тут
+    // было отдельное исключение для customer (пока у роли был доступ только
+    // к «Дашборду»), теперь оно только мешало бы.
     if(state.route.view==="tickets" && state.route.id && String(state.selectedTicketId)!==String(state.route.id)){
       var routeTicket = state.tickets.find(function(x){ return String(x.id)===String(state.route.id); });
       if(routeTicket) state.selectedTicketId = routeTicket.id;
@@ -3716,6 +3822,10 @@
     var t = e.target;
     if(t.closest(".nav-item")) return;
     var openTicket = t.closest("[data-open-ticket]");
+    // «Заказчик» с 0.2.9 имеет полноценный доступ к разделу «Заявки» (см.
+    // ROLE_NAV) — раньше здесь была блокировка открытия карточки для этой
+    // роли (когда ей был виден только «Дашборд»), но теперь она бы только
+    // сделала список заявок нерабочим (пункт меню есть, а строки не кликаются).
     if(openTicket){ state.selectedTicketId = openTicket.getAttribute("data-open-ticket"); state.editingNoteId = null; state.milestoneOpen = {}; state.editingDescShort = false; renderTicketPanel(); loadNotesFor(state.selectedTicketId); return; }
     if(t.closest("[data-close-panel]")){
       state.selectedTicketId = null; state.editingNoteId = null; state.milestoneOpen = {}; state.editingDescShort = false;
@@ -3739,7 +3849,19 @@
     // Чекбоксы-фильтры по чек-листу сидят внутри сортируемого заголовка
     // "№ c-lector" (data-action="sort-tickets") — без этой проверки клик по
     // ним заодно переключал бы сортировку колонки (клик всплывает до th).
-    // Само переключение фильтра обрабатывается по событию change ниже.
+    // Большинство пунктов переключаются по событию change ниже (обычные
+    // чекбоксы да/нет), но "Материал" — трёхпозиционный переключатель по
+    // клику (выкл → жёлтый/не оплачен → зелёный/оплачен → снова выкл),
+    // поэтому его обрабатываем здесь, до общего "return" по tag-filter-row.
+    var materialCycleEl = t.closest("[data-cycle-material-filter]");
+    if(materialCycleEl){
+      state.filters = state.filters || {}; state.filters.tagFilters = state.filters.tagFilters || {};
+      var curMatVal = state.filters.tagFilters.materials;
+      var nextMatVal = curMatVal==="warn" ? "ok" : (curMatVal==="ok" ? null : "warn");
+      if(nextMatVal) state.filters.tagFilters.materials = nextMatVal; else delete state.filters.tagFilters.materials;
+      render();
+      return;
+    }
     if(t.closest(".tag-filter-row")) return;
 
     if(t.id==="import-parse-btn"){
@@ -3779,6 +3901,7 @@
     if(actionEl){
       var action = actionEl.getAttribute("data-action"); var id = actionEl.getAttribute("data-id");
       if(action==="me") return openMeModal();
+      if(action==="sign-out") return signOut();
       if(action==="copy-ticket-link"){
         var ticketLinkUrl = window.location.origin+window.location.pathname+"#/tickets/"+id;
         if(navigator.clipboard){
@@ -3788,7 +3911,6 @@
         }
         return;
       }
-      if(action==="edit-portfolio") return openPortfolioModal();
       if(action==="clear-demo"){ if(confirm("Удалить все примеры заявок?")) clearDemo(); return; }
       // Пресеты периода отчёта на дашборде (0.2.7) — быстрый выбор "7/14/30 дней"
       // вместо ручного ввода числа каждый раз; ручной ввод (#report-period-days)
