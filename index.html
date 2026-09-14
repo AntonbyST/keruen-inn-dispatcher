@@ -895,6 +895,19 @@
   /* ============================== AUTH ============================== */
   function initAuth(){
     if(!CONFIGURED || !LIB_LOADED){ render(); return; }
+    // authEventSeen: отличает настоящую смену личности внутри уже открытой
+    // вкладки (см. комментарий ниже) от самого первого события в жизни этой
+    // вкладки — а это событие срабатывает и при обычном открытии страницы с
+    // уже действующей сессией (Supabase восстанавливает её из localStorage).
+    // Раньше это не различалось: state.session до первого события всегда
+    // undefined, поэтому prevUserId(undefined) !== nextUserId(реальный id)
+    // расценивалось как "смена человека" даже при самой обычной загрузке
+    // страницы — из-за этого прямая ссылка на заявку ("#/tickets/<id>",
+    // скопированная кнопкой "Ссылка") при открытии в новой вкладке/окне
+    // всегда затиралась на "#/dashboard" ещё до того, как приложение успевало
+    // ей воспользоваться. Обнаружено 14.09 — открытие скопированной ссылки на
+    // заявку не приводило к заявке.
+    var authEventSeen = false;
     sb.auth.onAuthStateChange(function(event, session){
       // Открытая карточка заявки (state.selectedTicketId/#overlay-root) и
       // текущий маршрут (state.route, включая "#/tickets/<id>") принадлежат
@@ -905,17 +918,20 @@
       // человека, поверх его экрана (в т.ч. поверх экрана ожидания/блокировки).
       // Обнаружено на тестах (0.2.10) при переключении между учётками. Сеанс
       // ТОГО ЖЕ человека (простое восстановление/обновление токена) — не смена
-      // личности, маршрут в этом случае не трогаем.
+      // личности, маршрут в этом случае не трогаем. Условие authEventSeen —
+      // см. комментарий выше: самое первое событие в этой вкладке никогда не
+      // считается сменой личности, даже если до него state.session был пуст.
       var prevUserId = state.session && state.session.user && state.session.user.id;
       var nextUserId = session && session.user && session.user.id;
       state.session = session;
-      if(prevUserId !== nextUserId){
+      if(authEventSeen && prevUserId !== nextUserId){
         state.selectedTicketId = null;
         state.route = {view:"dashboard", id:null};
         history.replaceState(null, "", location.pathname+location.search+"#/dashboard");
         var overlayRoot = document.getElementById("overlay-root");
         if(overlayRoot) overlayRoot.innerHTML = "";
       }
+      authEventSeen = true;
       if(session){
         // strip magic-link tokens from the address bar
         if(location.hash && location.hash.indexOf("access_token")>-1){
@@ -1892,8 +1908,22 @@
   function updateNote(id, text){
     return sb.from("ticket_notes").update({note_text:text, edited_at:new Date().toISOString()}).eq("id", id);
   }
+  // Раньше .delete() ни на что не проверялся: если удаление по какой-то
+  // причине не проходило на сервере (RLS, сетевая ошибка) — Supabase не
+  // бросает исключение, просто удаляет 0 строк молча, и запись оставалась на
+  // месте без единого сообщения об этом (подтверждение "Удалить запись из
+  // журнала?" при этом всё равно показывалось и принимало ответ). Плюс сам
+  // журнал обновлялся только через realtime-подписку — если она почему-то не
+  // сработала, строка тоже осталась бы висеть. Теперь явно проверяем ошибку
+  // (и сообщаем о ней) и в любом случае перезапрашиваем список записей, не
+  // полагаясь только на realtime.
   function deleteNote(id){
-    return sb.from("ticket_notes").delete().eq("id", id);
+    var note = (state.ticketNotes||[]).find(function(n){ return String(n.id)===String(id); });
+    var ticketId = note ? note.ticket_id : notesChannelTicketId;
+    return sb.from("ticket_notes").delete().eq("id", id).then(function(res){
+      if(res.error){ alert("Не удалось удалить запись: "+res.error.message); return; }
+      if(ticketId) fetchNotes(ticketId);
+    });
   }
 
   /* ---- Бригады: создание/переименование/участники/удаление ---- */
