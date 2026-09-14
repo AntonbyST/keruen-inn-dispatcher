@@ -192,8 +192,33 @@
   .finance-tab:hover{ color:var(--ink); }
   .cash-balance-row.negative td{ color:var(--crit); font-weight:600; }
 
-  /* ---------- «Отчёты»: текст еженедельного отчёта заказчику ---------- */
-  .report-text{ background:var(--bg-soft,#f6f7f9); border:1px solid var(--line); border-radius:10px; padding:16px 18px; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:13px; line-height:1.55; white-space:pre-wrap; word-break:break-word; }
+  /* ---------- отчёт по СЕРВИСу на дашборде (0.2.6/0.2.7) ---------- */
+  .report-text{
+    background:var(--surface-2); color:var(--ink); border:1px solid var(--line); border-radius:10px;
+    padding:14px 16px; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:12.5px;
+    line-height:1.6; white-space:pre-wrap; word-break:break-word; max-height:340px; overflow-y:auto;
+  }
+  /* Период отчёта — быстрые пресеты (7/14/30 дней) + своё число, в одну строку,
+     как в привычных аналитических дашбордах ("Last 7 days / 30 days / Custom"). */
+  .report-period-row{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:14px; }
+  .report-period-row .field{ margin:0; }
+  .report-period-row .field input{ width:76px; }
+  /* Компактные плитки с цифрами отчёта (ГЛАВНОЕ) — вместо простыни текста. */
+  .report-stats{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin-bottom:16px; }
+  .report-stat{ background:var(--surface-2); border:1px solid var(--line); border-radius:10px; padding:10px 12px; }
+  .report-stat-label{ font-size:11px; color:var(--ink-faint); display:flex; align-items:center; gap:5px; }
+  .report-stat-value{ font-size:18px; font-weight:700; margin-top:3px; font-variant-numeric:tabular-nums; }
+  .report-stat-sub{ font-size:11px; color:var(--ink-faint); margin-top:1px; font-variant-numeric:tabular-nums; }
+  /* Таблица по объектам — медаль, отель, закрыто/открыто/% в виде обычной
+     компактной таблицы, а не строк текста. */
+  .report-hotel-table td{ font-variant-numeric:tabular-nums; }
+  .report-hotel-table .medal{ font-size:15px; }
+  .report-pct-bar{ display:inline-block; width:46px; height:5px; border-radius:3px; background:var(--surface-3); overflow:hidden; vertical-align:middle; margin-right:6px; }
+  .report-pct-bar > span{ display:block; height:100%; background:var(--accent); }
+  details.report-raw{ margin-top:14px; }
+  details.report-raw > summary{ cursor:pointer; font-size:12.5px; color:var(--ink-soft); font-weight:600; user-select:none; }
+  details.report-raw > summary:hover{ color:var(--ink); }
+  details.report-raw .report-text{ margin-top:10px; }
 
   /* ---------- panel (slide-over) ---------- */
   .scrim{ position:fixed; inset:0; background:rgba(10,16,22,.35); z-index:20; }
@@ -1225,10 +1250,21 @@
     lines.push("");
     lines.push("ПО ОБЪЕКТАМ (закрыто за период / открытых на "+fmtDDMM(now)+" / % выполнения)");
     rows.forEach(function(r, idx){
-      var medal = idx===0 ? "🥇" : (idx===rows.length-1 ? "🔸" : "🔹");
-      lines.push(medal+" Отель №"+r.hotel.id+", "+r.hotel.name+" — "+fmtSigned(r.closed)+" / "+r.open+" / "+fmtPct(r.pct)+"%");
+      r.medal = idx===0 ? "🥇" : (idx===rows.length-1 ? "🔸" : "🔹");
+      lines.push(r.medal+" Отель №"+r.hotel.id+", "+r.hotel.name+" — "+fmtSigned(r.closed)+" / "+r.open+" / "+fmtPct(r.pct)+"%");
     });
-    return { text: lines.join("\n"), actualDays: actualDays, baselineDate: baseline.snapshot_date, thin: actualDays<1 };
+    // Помимо готового текста для копирования (text, формат — как в Telegram),
+    // отдаём и разобранные по полям цифры — дашборд (0.2.7) рисует из них
+    // компактный виджет с плитками и таблицей, а не кладёт весь текст отчёта
+    // целиком в один блок, который иначе съедает весь экран.
+    return {
+      text: lines.join("\n"), actualDays: actualDays, baselineDate: baseline.snapshot_date, thin: actualDays<1,
+      periodToDate: now, closedPeriod: closedPeriod,
+      newCount: currentTotals.total-baseTotals.total, newBefore: baseTotals.total, newAfter: currentTotals.total,
+      openBefore: openBefore, openNow: openNow, openDelta: openNow-openBefore,
+      rejectedDelta: currentTotals.rejected-baseTotals.rejected, overdueNow: currentTotals.overdue,
+      pctBefore: pctBefore, pctNow: pctNow, fmtPct: fmtPct, rows: rows
+    };
   }
   function maybeSeedPortfolio(){
     if(state.portfolio) return;
@@ -2134,15 +2170,11 @@
       <div class="row-gap">
         ${demoCount>0 ? h`<div class="banner">Показаны примеры заявок для демонстрации процесса — замените их реальными.
           <button class="btn btn-sm" data-action="clear-demo">Удалить примеры</button></div>` : ""}
-        <div class="card card-pad">
-          <div class="section-title">Отчёт по СЕРВИСу заказчику ${infoTip("Текст в том же формате, что уже уходит в Telegram — считается прямо по заявкам платформы, выгрузка из c-lector не нужна. Раз в день платформа сама сохраняет снимок текущих счётчиков по каждому отелю — это и есть точка сравнения «N дней назад». Раздел «МОНТАЖ» сюда не входит — эти цифры по-прежнему приходят вручную от прораба монтажа.")}</div>
-          <div class="field-row" style="grid-template-columns:180px auto;align-items:end;gap:12px;margin-bottom:14px;">
-            <div class="field"><label>Период, дней назад</label><input type="number" id="report-period-days" min="1" max="90" value="${reportDays}"></div>
-            ${report ? h`<button class="btn btn-primary" id="report-copy-btn" style="justify-self:start;">Скопировать текст отчёта</button>` : ''}
-          </div>
-          ${!report ? h`<div class="empty-state"><b>Пока не с чем сравнивать</b>Платформа только начинает копить дневные снимки счётчиков — откройте дашборд ещё раз попозже (или завтра), и появится база для сравнения.</div>` : h`
-            ${report.thin ? h`<div class="banner" style="margin-bottom:12px;">Истории снимков меньше суток — период сравнения получился короче запрошенного. Он станет полноценным через несколько дней, по мере накопления снимков.</div>` : ''}
-            <pre class="report-text" id="report-text">${escapeHtml(report.text)}</pre>`}
+        <div class="grid-kpi">
+          <div class="card kpi"><div class="kpi-label">Активных заявок</div><div class="kpi-value accent">${active.length}</div><div class="kpi-sub">внутри платформы</div></div>
+          <div class="card kpi"><div class="kpi-label">Просрочено</div><div class="kpi-value ${overdue.length?'crit':''}">${overdue.length}</div><div class="kpi-sub">нарушен срок прибытия/устранения</div></div>
+          <div class="card kpi"><div class="kpi-label">Выполнено с загрузки ~7 дн. назад</div><div class="kpi-value ok">${closedWeek? ((closedWeek.delta>=0?'+':'')+closedWeek.delta) : '—'}</div><div class="kpi-sub">${closedWeek? ('с '+fmtDateShort(closedWeek.fromDate)+' по '+fmtDateShort(closedWeek.toDate)) : 'нужно ≥2 загрузок из c-lector'}</div></div>
+          <div class="card kpi"><div class="kpi-label">Группа 1 в работе</div><div class="kpi-value">${group1Active.length}</div><div class="kpi-sub">критические, на контроле</div></div>
         </div>
         <div class="card card-pad">
           <div class="section-title">Требуют внимания</div>
@@ -2158,11 +2190,39 @@
               </tr>`; }).join("")}
           </tbody></table></div>`}
         </div>
-        <div class="grid-kpi">
-          <div class="card kpi"><div class="kpi-label">Активных заявок</div><div class="kpi-value accent">${active.length}</div><div class="kpi-sub">внутри платформы</div></div>
-          <div class="card kpi"><div class="kpi-label">Просрочено</div><div class="kpi-value ${overdue.length?'crit':''}">${overdue.length}</div><div class="kpi-sub">нарушен срок прибытия/устранения</div></div>
-          <div class="card kpi"><div class="kpi-label">Выполнено с загрузки ~7 дн. назад</div><div class="kpi-value ok">${closedWeek? ((closedWeek.delta>=0?'+':'')+closedWeek.delta) : '—'}</div><div class="kpi-sub">${closedWeek? ('с '+fmtDateShort(closedWeek.fromDate)+' по '+fmtDateShort(closedWeek.toDate)) : 'нужно ≥2 загрузок из c-lector'}</div></div>
-          <div class="card kpi"><div class="kpi-label">Группа 1 в работе</div><div class="kpi-value">${group1Active.length}</div><div class="kpi-sub">критические, на контроле</div></div>
+        <div class="card card-pad">
+          <div class="section-title">Отчёт по СЕРВИСу заказчику ${infoTip("Текст в том же формате, что уже уходит в Telegram — считается прямо по заявкам платформы, выгрузка из c-lector не нужна. Раз в день платформа сама сохраняет снимок текущих счётчиков по каждому отелю — это и есть точка сравнения «N дней назад». Раздел «МОНТАЖ» сюда не входит — эти цифры по-прежнему приходят вручную от прораба монтажа.")}</div>
+          <div class="report-period-row">
+            <span class="muted" style="font-size:12px;">Период:</span>
+            ${[7,14,30].map(function(d){ return h`<span class="status-filter-chip ${reportDays===d?'active':''}" data-action="report-period-preset" data-value="${d}">${d} дней</span>`; }).join("")}
+            <div class="field"><label style="font-size:11px;">свой, дней</label><input type="number" id="report-period-days" min="1" max="90" value="${reportDays}"></div>
+            ${report ? h`<button class="btn btn-primary btn-sm" id="report-copy-btn" style="margin-left:auto;">Скопировать текст отчёта</button>` : ''}
+          </div>
+          ${!report ? h`<div class="empty-state"><b>Пока не с чем сравнивать</b>Платформа только начинает копить дневные снимки счётчиков — откройте дашборд ещё раз попозже (или завтра), и появится база для сравнения.</div>` : h`
+            ${report.thin ? h`<div class="banner" style="margin-bottom:12px;">Истории снимков меньше суток — период сравнения получился короче запрошенного. Он станет полноценным через несколько дней, по мере накопления снимков.</div>` : ''}
+            <div class="report-stats">
+              <div class="report-stat"><div class="report-stat-label">✅ Закрыто за период</div><div class="report-stat-value">${report.closedPeriod}</div><div class="report-stat-sub">${pluralRu(report.closedPeriod,"заявка","заявки","заявок")}</div></div>
+              <div class="report-stat"><div class="report-stat-label">🆕 Новых заявок</div><div class="report-stat-value">${fmtSigned(report.newCount)}</div><div class="report-stat-sub">${report.newBefore} → ${report.newAfter}</div></div>
+              <div class="report-stat"><div class="report-stat-label">🔵 Открытых</div><div class="report-stat-value">${report.openNow}</div><div class="report-stat-sub">было ${report.openBefore} (${fmtSigned(report.openDelta)})</div></div>
+              <div class="report-stat"><div class="report-stat-label">❌ Отклонено доп.</div><div class="report-stat-value">${report.rejectedDelta}</div><div class="report-stat-sub">за период</div></div>
+              <div class="report-stat"><div class="report-stat-label">⏰ Просрочено</div><div class="report-stat-value" style="${report.overdueNow?'color:var(--crit);':''}">${report.overdueNow}</div><div class="report-stat-sub">на ${fmtDDMM(report.periodToDate)}</div></div>
+              <div class="report-stat"><div class="report-stat-label">📈 % выполнения</div><div class="report-stat-value">${report.fmtPct(report.pctNow)}%</div><div class="report-stat-sub">было ${report.fmtPct(report.pctBefore)}%</div></div>
+            </div>
+            <div class="table-wrap"><table class="report-hotel-table"><thead><tr><th></th><th>Отель</th><th>Закрыто</th><th>Открыто</th><th>% выполнения</th></tr></thead><tbody>
+              ${report.rows.map(function(r){
+                return h`<tr>
+                  <td class="medal">${r.medal}</td>
+                  <td>№${r.hotel.id} ${escapeHtml(r.hotel.name)}</td>
+                  <td style="${r.closed>0?'color:var(--ok);font-weight:600;':(r.closed<0?'color:var(--crit);font-weight:600;':'')}">${fmtSigned(r.closed)}</td>
+                  <td>${r.open}</td>
+                  <td><span class="report-pct-bar"><span style="width:${Math.max(0,Math.min(100,r.pct))}%"></span></span>${report.fmtPct(r.pct)}%</td>
+                </tr>`;
+              }).join("")}
+            </tbody></table></div>
+            <details class="report-raw">
+              <summary>Показать как обычный текст (для копирования в Telegram)</summary>
+              <pre class="report-text" id="report-text">${escapeHtml(report.text)}</pre>
+            </details>`}
         </div>
         <div class="two-col">
           <div class="card card-pad">
@@ -3730,6 +3790,10 @@
       }
       if(action==="edit-portfolio") return openPortfolioModal();
       if(action==="clear-demo"){ if(confirm("Удалить все примеры заявок?")) clearDemo(); return; }
+      // Пресеты периода отчёта на дашборде (0.2.7) — быстрый выбор "7/14/30 дней"
+      // вместо ручного ввода числа каждый раз; ручной ввод (#report-period-days)
+      // остаётся рядом для нестандартного периода.
+      if(action==="report-period-preset"){ state.reportPeriodDays = Number(actionEl.getAttribute("data-value")) || 7; render(); return; }
       if(action==="import-commit") return commitImport();
       if(action==="import-reset") return resetImport();
       if(action==="assign"){
