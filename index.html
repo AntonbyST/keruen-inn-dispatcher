@@ -192,6 +192,9 @@
   .finance-tab:hover{ color:var(--ink); }
   .cash-balance-row.negative td{ color:var(--crit); font-weight:600; }
 
+  /* ---------- «Отчёты»: текст еженедельного отчёта заказчику ---------- */
+  .report-text{ background:var(--bg-soft,#f6f7f9); border:1px solid var(--line); border-radius:10px; padding:16px 18px; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:13px; line-height:1.55; white-space:pre-wrap; word-break:break-word; }
+
   /* ---------- panel (slide-over) ---------- */
   .scrim{ position:fixed; inset:0; background:rgba(10,16,22,.35); z-index:20; }
   .panel{
@@ -353,7 +356,10 @@
     // под одним пунктом меню «Финансы» (см. navItems/navItem ниже), так что
     // право видеть один подраздел даёт право видеть и второй.
     warehouse: ["dashboard","tickets","parts","registry","cashexpenses","team"],
-    finance: ["dashboard","registry","cashexpenses","team"]
+    // "reports" (0.2.5) — еженедельный отчёт по СЕРВИСу для заказчика, нужен
+    // Финансисту как отчётность, но не Снабжению/специалисту (их работа с
+    // заявками начинается и заканчивается конкретными заявками).
+    finance: ["dashboard","registry","cashexpenses","reports","team"]
   };
   function navAllowed(view){
     var role = state.me && state.me.role;
@@ -399,6 +405,14 @@
   function hotelById(id){ var list=state.hotels||[]; for (var i=0;i<list.length;i++){ if (list[i].id===Number(id)) return list[i]; } return null; }
   function fmtDate(iso){ if(!iso) return "—"; var d=new Date(iso); return d.toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit",year:"numeric"})+" "+d.toLocaleTimeString("ru-RU",{hour:"2-digit",minute:"2-digit"}); }
   function fmtDateShort(iso){ if(!iso) return "—"; var d=new Date(iso); return d.toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit",year:"2-digit"}); }
+  // Для еженедельного отчёта клиенту (0.2.5, "Отчёты") — без времени, но с
+  // полным годом ("Период: 20.08.2026 → 28.08.2026") либо совсем коротко, как
+  // в шапке телеграм-отчёта ("Отчет 28.08").
+  function fmtDMY(iso){ if(!iso) return "—"; var d=new Date(iso); return d.toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit",year:"numeric"}); }
+  function fmtDDMM(iso){ if(!iso) return "—"; var d=new Date(iso); return d.toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit"}); }
+  // Знак разницы с юникодным минусом (типографский "−", не дефис) — так же, как
+  // в примере отчёта, который Антон уже рассылает ("Открытых: 102 → 70 (−32)").
+  function fmtSigned(n){ if(n>0) return "+"+n; if(n<0) return "−"+Math.abs(n); return "0"; }
   // Русское склонение существительного по числу — используется для счётчиков
   // файлов в чек-листе "Ход работ" (1 файл / 2 файла / 5 файлов).
   function ruPlural(n, forms){
@@ -745,6 +759,11 @@
     authView: "signin", authEmail: "", authError: "",
     tickets: [], profiles: [], parts: [], portfolio: null, invoices: [], photos: [], snapshots: [], crews: [], hotels: [], hotelsLoaded: false,
     cashAdvances: [], cashExpenses: [],
+    // «Отчёты» → еженедельный отчёт по СЕРВИСу (0.2.5): ежедневные снимки живых
+    // счётчиков по отелям (см. ticket_stats_snapshots) — точки сравнения "N
+    // дней назад" для расчёта отчёта. reportPeriodDays — сколько дней назад
+    // сравниваем, меняется прямо на экране (по умолчанию неделя).
+    statsSnapshots: [], reportPeriodDays: 7, statsSnapshotRecorded: false,
     selectedTicketId: null, ticketNotes: [], editingNoteId: null, milestoneOpen: {}, editingDescShort: false,
     loaded: false,
     importHeaders: [], importRows: [], importMapping: {}, importResult: null, importBusy: false, importFileError: "",
@@ -802,7 +821,7 @@
 
   /* ============================== DATA LOAD + REALTIME ============================== */
   function subscribeAll(){
-    reloadTickets(); reloadProfiles(); reloadParts(); reloadPortfolio(); reloadInvoices(); reloadPhotos(); reloadSnapshots(); reloadCrews(); reloadHotels(); reloadCashAdvances(); reloadCashExpenses();
+    reloadTickets(); reloadProfiles(); reloadParts(); reloadPortfolio(); reloadInvoices(); reloadPhotos(); reloadSnapshots(); reloadCrews(); reloadHotels(); reloadCashAdvances(); reloadCashExpenses(); reloadStatsSnapshots();
     sb.channel("tickets-rt").on("postgres_changes", {event:"*", schema:"public", table:"tickets"}, reloadTickets).subscribe();
     sb.channel("profiles-rt").on("postgres_changes", {event:"*", schema:"public", table:"profiles"}, reloadProfiles).subscribe();
     sb.channel("parts-rt").on("postgres_changes", {event:"*", schema:"public", table:"parts"}, reloadParts).subscribe();
@@ -814,6 +833,7 @@
     sb.channel("hotels-rt").on("postgres_changes", {event:"*", schema:"public", table:"hotels"}, reloadHotels).subscribe();
     sb.channel("cash-advances-rt").on("postgres_changes", {event:"*", schema:"public", table:"cash_advances"}, reloadCashAdvances).subscribe();
     sb.channel("cash-expenses-rt").on("postgres_changes", {event:"*", schema:"public", table:"cash_expenses"}, reloadCashExpenses).subscribe();
+    sb.channel("stats-snapshots-rt").on("postgres_changes", {event:"*", schema:"public", table:"ticket_stats_snapshots"}, reloadStatsSnapshots).subscribe();
   }
   // Список отелей — раньше был константой в коде, теперь строка в таблице hotels;
   // maybeSeed() (демо-заявки) ждёт, пока отели тоже загрузятся, иначе примерные
@@ -823,6 +843,7 @@
       state.hotels = res.data || [];
       state.hotelsLoaded = true;
       maybeSeed();
+      maybeRecordTodaysStatsSnapshot();
       render();
     });
   }
@@ -837,6 +858,7 @@
       state.tickets = res.data || [];
       state.loaded = true;
       maybeSeed();
+      maybeRecordTodaysStatsSnapshot();
       render();
     });
   }
@@ -859,6 +881,14 @@
   }
   function reloadCashExpenses(){
     sb.from("cash_expenses").select("*").order("date", {ascending:false}).then(function(res){ state.cashExpenses = res.data || []; render(); });
+  }
+  function reloadStatsSnapshots(){
+    sb.from("ticket_stats_snapshots").select("*").order("snapshot_date", {ascending:true}).then(function(res){
+      state.statsSnapshots = res.data || [];
+      state.statsSnapshotsLoaded = true;
+      maybeRecordTodaysStatsSnapshot();
+      render();
+    });
   }
   // Счёт при загрузке сразу попадает в реестр платежей — просто как файл. Раньше
   // здесь стояло автораспознавание поставщика/суммы/валюты через ИИ (Anthropic
@@ -1082,6 +1112,122 @@
         case_type: ex.caseType||null, demo:true
       }).then(function(){});
     });
+  }
+  // ============ «Отчёты» → еженедельный отчёт по СЕРВИСу (0.2.5) ============
+  // Живые счётчики СЕРВИСа по каждому отелю в сервисе (в стиле выгрузки
+  // c-lector.ru "Заявок всего/подано/в работе/просрочено/завершено/отклонено",
+  // см. hotel-reports в памяти) — считаем ПРЯМО из state.tickets, xlsx/импорт
+  // для этого больше не нужен. "Всего" — все не-демо заявки отеля за всё
+  // время (растёт монотонно), "Открыто" = подано + в работе.
+  function computeLiveHotelStats(){
+    var byHotel = {};
+    (state.hotels||[]).forEach(function(h){ if(h.in_service) byHotel[h.id] = {total:0,submitted:0,inWork:0,overdue:0,done:0,rejected:0}; });
+    (state.tickets||[]).forEach(function(t){
+      if(t.demo) return;
+      var row = byHotel[t.hotel_id];
+      if(!row) return; // отель не в сервисе (напр. монтажный №8) — в отчёт СЕРВИС не входит
+      row.total++;
+      var done = isTicketDone(t);
+      if(done){
+        // тот же признак "отклонена", что и в isTicketDone(): текст статуса
+        // c-lector, если он есть, иначе внутренний status (на практике
+        // внутренний "rejected" сейчас нигде не проставляется — отклонение
+        // всегда приходит из c-lector, но проверяем на будущее).
+        var rejected = t.external_status ? /отклон|отказ/i.test(t.external_status) : t.status==="rejected";
+        if(rejected) row.rejected++; else row.done++;
+      } else {
+        if(deadlineInfo(t).overdue) row.overdue++;
+        if(t.status==="new") row.submitted++; else row.inWork++;
+      }
+    });
+    return byHotel;
+  }
+  function sumHotelStats(byHotel){
+    var totals = {total:0,submitted:0,inWork:0,overdue:0,done:0,rejected:0};
+    Object.keys(byHotel||{}).forEach(function(id){ var r=byHotel[id]||{}; Object.keys(totals).forEach(function(f){ totals[f]+=(r[f]||0); }); });
+    return totals;
+  }
+  // Раз в день добавляем/обновляем строку-снимок на СЕГОДНЯ (ticket_stats_snapshots)
+  // — это и есть будущая точка сравнения "N дней назад" для отчёта, без
+  // какой-либо внешней выгрузки. Обновляем существующую строку за сегодня при
+  // каждом открытии платформы (а не только создаём один раз), чтобы к концу
+  // дня в снимке было отражено более свежее состояние.
+  var statsSnapshotChecked = false;
+  function maybeRecordTodaysStatsSnapshot(){
+    if(statsSnapshotChecked) return;
+    if(!state.loaded || !state.hotelsLoaded || !state.statsSnapshotsLoaded) return;
+    statsSnapshotChecked = true;
+    var todayIso = new Date().toISOString().slice(0,10);
+    var byHotel = computeLiveHotelStats();
+    var existing = (state.statsSnapshots||[]).find(function(s){ return s.snapshot_date===todayIso; });
+    if(existing) sb.from("ticket_stats_snapshots").update({by_hotel: byHotel}).eq("id", existing.id).then(function(){});
+    else sb.from("ticket_stats_snapshots").insert({snapshot_date: todayIso, by_hotel: byHotel}).then(function(){});
+  }
+  // Ближайший по дате снимок к "N дней назад" — тот же принцип терпимости к
+  // пропущенным дням, что и closedSinceLastWeek() выше (снимки копятся раз в
+  // день, только пока кто-то заходит в платформу — если день пропущен, берём
+  // ближайший из тех, что реально есть, вместо того чтобы требовать ровно N).
+  function findSnapshotNearDaysAgo(days){
+    var snaps = (state.statsSnapshots||[]).filter(function(s){ return s.snapshot_date; });
+    if(!snaps.length) return null;
+    var targetTime = Date.now() - days*24*3600*1000;
+    var best = null, bestDiff = Infinity;
+    snaps.forEach(function(s){
+      var diff = Math.abs(new Date(s.snapshot_date).getTime() - targetTime);
+      if(diff<bestDiff){ bestDiff = diff; best = s; }
+    });
+    return best;
+  }
+  // Собирает готовый текст отчёта — тот же формат, что Антон уже рассылает в
+  // Telegram (см. память hotel-reports): ГЛАВНОЕ + разбивка ПО ОБЪЕКТАМ,
+  // отсортированная по числу закрытых за период (лидер — 🥇, аутсайдер — 🔸,
+  // остальные — 🔹; это наша собственная простая сортировка, не претендует на
+  // точное повторение чьей-то ручной расстановки медалей в прошлых отчётах).
+  // Возвращает null, если снимков вообще ещё нет (платформа только что
+  // начала их копить) — вызывающий код должен показать честное сообщение,
+  // а не подставлять нулевые цифры.
+  function buildServiceReport(periodDays){
+    var currentByHotel = computeLiveHotelStats();
+    var currentTotals = sumHotelStats(currentByHotel);
+    var baseline = findSnapshotNearDaysAgo(periodDays);
+    if(!baseline) return null;
+    var baseByHotel = baseline.by_hotel || {};
+    var baseTotals = sumHotelStats(baseByHotel);
+    var actualDays = Math.round((Date.now() - new Date(baseline.snapshot_date).getTime())/86400000);
+    var pctOf = function(totals){ return (totals.total-totals.rejected)>0 ? totals.done/(totals.total-totals.rejected)*100 : 0; };
+    var pctNow = pctOf(currentTotals), pctBefore = pctOf(baseTotals);
+
+    var rows = (state.hotels||[]).filter(function(h){return h.in_service;}).map(function(h){
+      var cur = currentByHotel[h.id] || {total:0,submitted:0,inWork:0,overdue:0,done:0,rejected:0};
+      var base = baseByHotel[h.id] || {total:0,submitted:0,inWork:0,overdue:0,done:0,rejected:0};
+      return { hotel:h, closed: cur.done-base.done, open: cur.submitted+cur.inWork, pct: pctOf(cur) };
+    }).sort(function(a,b){ return b.closed-a.closed; });
+
+    var fmtPct = function(n){ return n.toLocaleString("ru-RU", {minimumFractionDigits:1, maximumFractionDigits:1}); };
+    var now = new Date();
+    var closedPeriod = currentTotals.done - baseTotals.done;
+    var openBefore = baseTotals.submitted+baseTotals.inWork, openNow = currentTotals.submitted+currentTotals.inWork;
+    var lines = [];
+    lines.push("Здравствуйте!");
+    lines.push("Отчет "+fmtDDMM(now));
+    lines.push("");
+    lines.push("СЕРВИС");
+    lines.push("Период: "+fmtDMY(baseline.snapshot_date)+" → "+fmtDMY(now)+" ("+actualDays+" "+pluralRu(actualDays,"день","дня","дней")+")");
+    lines.push("");
+    lines.push("ГЛАВНОЕ");
+    lines.push("✅ Закрыто за период: "+closedPeriod+" "+pluralRu(closedPeriod,"заявка","заявки","заявок"));
+    lines.push("🆕 Новых заявок: "+(currentTotals.total-baseTotals.total)+" ("+baseTotals.total+" → "+currentTotals.total+")");
+    lines.push("🔵 Открытых: "+openBefore+" → "+openNow+" ("+fmtSigned(openNow-openBefore)+")");
+    lines.push("❌ Отклонено дополнительно: "+(currentTotals.rejected-baseTotals.rejected));
+    lines.push("⏰ Просрочено на "+fmtDDMM(now)+": "+currentTotals.overdue);
+    lines.push("📈 % выполнения: "+fmtPct(pctBefore)+"% → "+fmtPct(pctNow)+"%");
+    lines.push("");
+    lines.push("ПО ОБЪЕКТАМ (закрыто за период / открытых на "+fmtDDMM(now)+" / % выполнения)");
+    rows.forEach(function(r, idx){
+      var medal = idx===0 ? "🥇" : (idx===rows.length-1 ? "🔸" : "🔹");
+      lines.push(medal+" Отель №"+r.hotel.id+", "+r.hotel.name+" — "+fmtSigned(r.closed)+" / "+r.open+" / "+fmtPct(r.pct)+"%");
+    });
+    return { text: lines.join("\n"), actualDays: actualDays, baselineDate: baseline.snapshot_date, thin: actualDays<1 };
   }
   function maybeSeedPortfolio(){
     if(state.portfolio) return;
@@ -2215,6 +2361,29 @@
         </tbody></table></div>
       </div>`;
     }).join("")}</div>`;
+  }
+
+  // «Отчёты» (0.2.5) — готовый текст еженедельного отчёта заказчику, в том же
+  // формате, что Антон уже отправляет в Telegram, но посчитанный прямо по
+  // заявкам платформы (см. buildServiceReport выше) — только скопировать и
+  // отправить, никакой рассылки из самого приложения нет (по решению Антона).
+  // Раздел «МОНТАЖ» из исходного формата сюда не входит — этих данных в
+  // платформе нет, они по-прежнему приходят вручную от прораба монтажа.
+  function viewReports(){
+    var days = state.reportPeriodDays || 7;
+    var report = buildServiceReport(days);
+    return h`<div class="row-gap">
+      <div class="card card-pad">
+        <div class="section-title">Отчёт по СЕРВИСу заказчику ${infoTip("Текст в том же формате, что уже уходит в Telegram — считается прямо по заявкам платформы, выгрузка из c-lector не нужна. Раз в день платформа сама сохраняет снимок текущих счётчиков по каждому отелю — это и есть точка сравнения «N дней назад». Раздел «МОНТАЖ» сюда не входит — эти цифры по-прежнему приходят вручную от прораба монтажа.")}</div>
+        <div class="field-row" style="grid-template-columns:180px auto;align-items:end;gap:12px;margin-bottom:14px;">
+          <div class="field"><label>Период, дней назад</label><input type="number" id="report-period-days" min="1" max="90" value="${days}"></div>
+          ${report ? h`<button class="btn btn-primary" id="report-copy-btn" style="justify-self:start;">Скопировать текст отчёта</button>` : ''}
+        </div>
+        ${!report ? h`<div class="empty-state"><b>Пока не с чем сравнивать</b>Платформа только начинает копить дневные снимки счётчиков — откройте этот раздел ещё раз попозже (или завтра), и появится база для сравнения.</div>` : h`
+          ${report.thin ? h`<div class="banner" style="margin-bottom:12px;">Истории снимков меньше суток — период сравнения получился короче запрошенного. Он станет полноценным через несколько дней, по мере накопления снимков.</div>` : ''}
+          <pre class="report-text" id="report-text">${escapeHtml(report.text)}</pre>`}
+      </div>
+    </div>`;
   }
 
   // Раньше здесь был отдельный столбец "Зоны" с чекбоксами (1/2/3) на каждого
@@ -3455,12 +3624,12 @@
       return;
     }
     if(!navAllowed(state.route.view)){ state.route = {view: firstAllowedView(), id:null}; }
-    var titleMap = {dashboard:"Дашборд", tickets:"Заявки", team:"Команда", parts:"Склад ЗИП", "import":"Импорт из c-lector", registry:"Финансы · Реестр платежей", cashexpenses:"Финансы · Наличные расходы", map:"Карта", crews:"Бригады", hotels:"Отели", systemdefects:"Системный брак"};
-    var body = state.route.view==="tickets"?viewTickets(): state.route.view==="team"?viewTeam(): state.route.view==="parts"?viewParts(): state.route.view==="import"?viewImport(): state.route.view==="registry"?viewRegistry(): state.route.view==="cashexpenses"?viewCashExpenses(): state.route.view==="map"?viewMap(): state.route.view==="crews"?viewCrews(): state.route.view==="hotels"?viewHotels(): state.route.view==="systemdefects"?viewSystemDefects(): viewDashboard();
+    var titleMap = {dashboard:"Дашборд", tickets:"Заявки", team:"Команда", parts:"Склад ЗИП", "import":"Импорт из c-lector", registry:"Финансы · Реестр платежей", cashexpenses:"Финансы · Наличные расходы", map:"Карта", crews:"Бригады", hotels:"Отели", systemdefects:"Системный брак", reports:"Отчёты"};
+    var body = state.route.view==="tickets"?viewTickets(): state.route.view==="team"?viewTeam(): state.route.view==="parts"?viewParts(): state.route.view==="import"?viewImport(): state.route.view==="registry"?viewRegistry(): state.route.view==="cashexpenses"?viewCashExpenses(): state.route.view==="map"?viewMap(): state.route.view==="crews"?viewCrews(): state.route.view==="hotels"?viewHotels(): state.route.view==="systemdefects"?viewSystemDefects(): state.route.view==="reports"?viewReports(): viewDashboard();
 
     var navItems = [
       ["dashboard","Дашборд"], ["tickets","Заявки"], ["import","Импорт из c-lector"], ["map","Карта"],
-      ["systemdefects","Системный брак"],
+      ["systemdefects","Системный брак"], ["reports","Отчёты"],
       ["team","Команда"], ["crews","Бригады"], ["parts","Склад ЗИП"], ["registry","Финансы",["cashexpenses"]], ["hotels","Отели"]
     ].filter(function(x){ return navAllowed(x[0]); });
     app.innerHTML = h`
@@ -3541,6 +3710,13 @@
     }
     if(t.id==="copy-link"){
       navigator.clipboard && navigator.clipboard.writeText(window.location.origin+window.location.pathname).then(function(){ t.textContent="Скопировано"; setTimeout(function(){ t.textContent="Скопировать ссылку"; },1500); });
+      return;
+    }
+    if(t.id==="report-copy-btn"){
+      var reportEl = document.getElementById("report-text");
+      var reportTxt = reportEl ? reportEl.textContent : "";
+      var origLabel = t.textContent;
+      if(navigator.clipboard) navigator.clipboard.writeText(reportTxt).then(function(){ t.textContent="Скопировано"; setTimeout(function(){ t.textContent=origLabel; },1500); });
       return;
     }
 
@@ -3697,6 +3873,12 @@
     if(e.target.id==="import-file"){ var f=e.target.files&&e.target.files[0]; if(f) loadImportFile(f); return; }
     if(e.target.matches("[data-import-map]")){ state.importMapping[e.target.getAttribute("data-import-map")]=e.target.value; render(); return; }
     if(e.target.matches("[data-cash-import-map]")){ state.cashImportMapping[e.target.getAttribute("data-cash-import-map")]=e.target.value; render(); return; }
+    if(e.target.id==="report-period-days"){
+      var reportDays = Number(e.target.value);
+      state.reportPeriodDays = (reportDays>0) ? reportDays : 7;
+      render();
+      return;
+    }
     if(e.target.id==="case-select") setCaseType(e.target.getAttribute("data-id"), e.target.value);
     if(e.target.id==="repair-hours-input"){
       var rh = e.target.value===""?null:Number(e.target.value);
