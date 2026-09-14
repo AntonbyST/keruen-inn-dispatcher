@@ -356,10 +356,11 @@
     // под одним пунктом меню «Финансы» (см. navItems/navItem ниже), так что
     // право видеть один подраздел даёт право видеть и второй.
     warehouse: ["dashboard","tickets","parts","registry","cashexpenses","team"],
-    // "reports" (0.2.5) — еженедельный отчёт по СЕРВИСу для заказчика, нужен
-    // Финансисту как отчётность, но не Снабжению/специалисту (их работа с
-    // заявками начинается и заканчивается конкретными заявками).
-    finance: ["dashboard","registry","cashexpenses","reports","team"]
+    // Отдельный пункт меню «Отчёты» (0.2.5) убран в 0.2.6 — тот же отчёт по
+    // СЕРВИСу теперь встроен прямо в «Дашборд» (см. viewDashboard), который
+    // доступен всем ролям, так что видимость отчёта больше не завязана на роль
+    // Финансиста отдельно.
+    finance: ["dashboard","registry","cashexpenses","team"]
   };
   function navAllowed(view){
     var role = state.me && state.me.role;
@@ -2104,6 +2105,13 @@
   }
 
   /* ============================== VIEWS ============================== */
+  // Дашборд (0.2.6): раньше отчёт по СЕРВИСу жил в отдельном пункте меню
+  // «Отчёты», видимом только Финансисту — по просьбе Антона перенесён прямо
+  // сюда, на «Дашборд», как самая важная информация, вместе с «Требуют
+  // внимания». «Дашборд» открыт всем ролям (см. ROLE_NAV выше), так что теперь
+  // отчёт тоже виден всем, а не только Финансисту — это осознанное следствие
+  // переноса, а не отдельное решение по ролям. Менее важные виджеты (зоны,
+  // ручной снимок портфеля c-lector.ru) отодвинуты вниз, под эти два блока.
   function viewDashboard(){
     var active = state.tickets.filter(isActive);
     var overdue = active.filter(function(t){ return deadlineInfo(t).overdue; });
@@ -2119,11 +2127,37 @@
     var byZone = {1:0,2:0,3:0}; active.forEach(function(t){ if(t.zone) byZone[t.zone]=(byZone[t.zone]||0)+1; });
     var pf = state.portfolio; var pfTotal = {total:0,submitted:0,inWork:0,overdue:0,done:0,rejected:0};
     if(pf && pf.by_hotel){ Object.keys(pf.by_hotel).forEach(function(k){ var r=pf.by_hotel[k]; Object.keys(pfTotal).forEach(function(f){ pfTotal[f]+=(r[f]||0); }); }); }
+    var reportDays = state.reportPeriodDays || 7;
+    var report = buildServiceReport(reportDays);
 
     return h`
       <div class="row-gap">
         ${demoCount>0 ? h`<div class="banner">Показаны примеры заявок для демонстрации процесса — замените их реальными.
           <button class="btn btn-sm" data-action="clear-demo">Удалить примеры</button></div>` : ""}
+        <div class="card card-pad">
+          <div class="section-title">Отчёт по СЕРВИСу заказчику ${infoTip("Текст в том же формате, что уже уходит в Telegram — считается прямо по заявкам платформы, выгрузка из c-lector не нужна. Раз в день платформа сама сохраняет снимок текущих счётчиков по каждому отелю — это и есть точка сравнения «N дней назад». Раздел «МОНТАЖ» сюда не входит — эти цифры по-прежнему приходят вручную от прораба монтажа.")}</div>
+          <div class="field-row" style="grid-template-columns:180px auto;align-items:end;gap:12px;margin-bottom:14px;">
+            <div class="field"><label>Период, дней назад</label><input type="number" id="report-period-days" min="1" max="90" value="${reportDays}"></div>
+            ${report ? h`<button class="btn btn-primary" id="report-copy-btn" style="justify-self:start;">Скопировать текст отчёта</button>` : ''}
+          </div>
+          ${!report ? h`<div class="empty-state"><b>Пока не с чем сравнивать</b>Платформа только начинает копить дневные снимки счётчиков — откройте дашборд ещё раз попозже (или завтра), и появится база для сравнения.</div>` : h`
+            ${report.thin ? h`<div class="banner" style="margin-bottom:12px;">Истории снимков меньше суток — период сравнения получился короче запрошенного. Он станет полноценным через несколько дней, по мере накопления снимков.</div>` : ''}
+            <pre class="report-text" id="report-text">${escapeHtml(report.text)}</pre>`}
+        </div>
+        <div class="card card-pad">
+          <div class="section-title">Требуют внимания</div>
+          ${attention.length===0 ? h`<div class="empty-state"><b>Нет заявок с пометкой «особое внимание»</b>Пометка ставится вручную в карточке заявки.</div>` : h`
+          <div class="table-wrap"><table><thead><tr><th>№ c-lector</th><th>Отель</th><th>Описание</th><th>Статус</th><th>Срок</th></tr></thead><tbody>
+            ${attention.map(function(t){ var hotel=hotelById(t.hotel_id); var di=deadlineInfo(t);
+              return h`<tr data-open-ticket="${t.id}" ${t.attention_flag?'class="attn-row"':''}>
+                <td class="mono">${attentionBadge(t)}${t.external_ref? escapeHtml(t.external_ref) : '<span class="muted">—</span>'}</td>
+                <td><span class="ttl">№${hotel.id} ${hotel.name}</span> ${zoneBadge(t.zone)}</td>
+                <td>${escapeHtml(displayShort(t)).slice(0,54)}${displayShort(t).length>54?"…":""}</td>
+                <td>${t.external_status? externalStatusPill(t.external_status): statusPill(t.status)}</td>
+                <td style="${di.overdue?'color:var(--crit);font-weight:600;':(di.soon?'color:var(--warn);font-weight:600;':'')}" title="${escapeHtml(di.label)}">${di.dateLabel}</td>
+              </tr>`; }).join("")}
+          </tbody></table></div>`}
+        </div>
         <div class="grid-kpi">
           <div class="card kpi"><div class="kpi-label">Активных заявок</div><div class="kpi-value accent">${active.length}</div><div class="kpi-sub">внутри платформы</div></div>
           <div class="card kpi"><div class="kpi-label">Просрочено</div><div class="kpi-value ${overdue.length?'crit':''}">${overdue.length}</div><div class="kpi-sub">нарушен срок прибытия/устранения</div></div>
@@ -2132,34 +2166,18 @@
         </div>
         <div class="two-col">
           <div class="card card-pad">
-            <div class="section-title">Требуют внимания</div>
-            ${attention.length===0 ? h`<div class="empty-state"><b>Нет заявок с пометкой «особое внимание»</b>Пометка ставится вручную в карточке заявки.</div>` : h`
-            <div class="table-wrap"><table><thead><tr><th>№ c-lector</th><th>Отель</th><th>Описание</th><th>Статус</th><th>Срок</th></tr></thead><tbody>
-              ${attention.map(function(t){ var hotel=hotelById(t.hotel_id); var di=deadlineInfo(t);
-                return h`<tr data-open-ticket="${t.id}" ${t.attention_flag?'class="attn-row"':''}>
-                  <td class="mono">${attentionBadge(t)}${t.external_ref? escapeHtml(t.external_ref) : '<span class="muted">—</span>'}</td>
-                  <td><span class="ttl">№${hotel.id} ${hotel.name}</span> ${zoneBadge(t.zone)}</td>
-                  <td>${escapeHtml(displayShort(t)).slice(0,54)}${displayShort(t).length>54?"…":""}</td>
-                  <td>${t.external_status? externalStatusPill(t.external_status): statusPill(t.status)}</td>
-                  <td style="${di.overdue?'color:var(--crit);font-weight:600;':(di.soon?'color:var(--warn);font-weight:600;':'')}" title="${escapeHtml(di.label)}">${di.dateLabel}</td>
-                </tr>`; }).join("")}
-            </tbody></table></div>`}
+            <div class="section-title">Активные заявки по зонам</div>
+            <div class="row-gap" style="gap:10px;">${[1,2,3].map(function(z){ return h`<div class="kv"><span class="k">${ZONE_LABEL[z]}</span><span class="v mono">${byZone[z]||0}</span></div>`; }).join("")}</div>
           </div>
-          <div class="row-gap">
-            <div class="card card-pad">
-              <div class="section-title">Активные заявки по зонам</div>
-              <div class="row-gap" style="gap:10px;">${[1,2,3].map(function(z){ return h`<div class="kv"><span class="k">${ZONE_LABEL[z]}</span><span class="v mono">${byZone[z]||0}</span></div>`; }).join("")}</div>
-            </div>
-            <div class="card card-pad">
-              <div class="section-title">Портфель по c-lector.ru ${pf? h`<span class="muted" style="text-transform:none;font-weight:400;">— снимок ${fmtDateShort(pf.snapshot_date)}</span>`:''}</div>
-              <div class="kv"><span class="k">Всего заявок</span><span class="v mono">${pfTotal.total}</span></div>
-              <div class="kv"><span class="k">В работе</span><span class="v mono">${pfTotal.inWork}</span></div>
-              <div class="kv"><span class="k">Просрочено</span><span class="v mono" style="color:var(--crit)">${pfTotal.overdue}</span></div>
-              <div class="kv"><span class="k">Завершено</span><span class="v mono">${pfTotal.done}</span></div>
-              <div class="kv"><span class="k">% выполнения</span><span class="v mono">${pfTotal.total-pfTotal.rejected>0? Math.round(pfTotal.done/(pfTotal.total-pfTotal.rejected)*1000)/10 : 0}%</span></div>
-              <button class="btn btn-sm" style="margin-top:10px;" data-action="edit-portfolio">Обновить снимок</button>
-              <div class="helptext">Ручной снимок из еженедельной выгрузки VDS (c-lector.ru) — не обновляется автоматически.</div>
-            </div>
+          <div class="card card-pad">
+            <div class="section-title">Портфель по c-lector.ru ${pf? h`<span class="muted" style="text-transform:none;font-weight:400;">— снимок ${fmtDateShort(pf.snapshot_date)}</span>`:''}</div>
+            <div class="kv"><span class="k">Всего заявок</span><span class="v mono">${pfTotal.total}</span></div>
+            <div class="kv"><span class="k">В работе</span><span class="v mono">${pfTotal.inWork}</span></div>
+            <div class="kv"><span class="k">Просрочено</span><span class="v mono" style="color:var(--crit)">${pfTotal.overdue}</span></div>
+            <div class="kv"><span class="k">Завершено</span><span class="v mono">${pfTotal.done}</span></div>
+            <div class="kv"><span class="k">% выполнения</span><span class="v mono">${pfTotal.total-pfTotal.rejected>0? Math.round(pfTotal.done/(pfTotal.total-pfTotal.rejected)*1000)/10 : 0}%</span></div>
+            <button class="btn btn-sm" style="margin-top:10px;" data-action="edit-portfolio">Обновить снимок</button>
+            <div class="helptext">Ручной снимок из еженедельной выгрузки VDS (c-lector.ru) — не обновляется автоматически.</div>
           </div>
         </div>
       </div>`;
@@ -2361,29 +2379,6 @@
         </tbody></table></div>
       </div>`;
     }).join("")}</div>`;
-  }
-
-  // «Отчёты» (0.2.5) — готовый текст еженедельного отчёта заказчику, в том же
-  // формате, что Антон уже отправляет в Telegram, но посчитанный прямо по
-  // заявкам платформы (см. buildServiceReport выше) — только скопировать и
-  // отправить, никакой рассылки из самого приложения нет (по решению Антона).
-  // Раздел «МОНТАЖ» из исходного формата сюда не входит — этих данных в
-  // платформе нет, они по-прежнему приходят вручную от прораба монтажа.
-  function viewReports(){
-    var days = state.reportPeriodDays || 7;
-    var report = buildServiceReport(days);
-    return h`<div class="row-gap">
-      <div class="card card-pad">
-        <div class="section-title">Отчёт по СЕРВИСу заказчику ${infoTip("Текст в том же формате, что уже уходит в Telegram — считается прямо по заявкам платформы, выгрузка из c-lector не нужна. Раз в день платформа сама сохраняет снимок текущих счётчиков по каждому отелю — это и есть точка сравнения «N дней назад». Раздел «МОНТАЖ» сюда не входит — эти цифры по-прежнему приходят вручную от прораба монтажа.")}</div>
-        <div class="field-row" style="grid-template-columns:180px auto;align-items:end;gap:12px;margin-bottom:14px;">
-          <div class="field"><label>Период, дней назад</label><input type="number" id="report-period-days" min="1" max="90" value="${days}"></div>
-          ${report ? h`<button class="btn btn-primary" id="report-copy-btn" style="justify-self:start;">Скопировать текст отчёта</button>` : ''}
-        </div>
-        ${!report ? h`<div class="empty-state"><b>Пока не с чем сравнивать</b>Платформа только начинает копить дневные снимки счётчиков — откройте этот раздел ещё раз попозже (или завтра), и появится база для сравнения.</div>` : h`
-          ${report.thin ? h`<div class="banner" style="margin-bottom:12px;">Истории снимков меньше суток — период сравнения получился короче запрошенного. Он станет полноценным через несколько дней, по мере накопления снимков.</div>` : ''}
-          <pre class="report-text" id="report-text">${escapeHtml(report.text)}</pre>`}
-      </div>
-    </div>`;
   }
 
   // Раньше здесь был отдельный столбец "Зоны" с чекбоксами (1/2/3) на каждого
@@ -3624,12 +3619,12 @@
       return;
     }
     if(!navAllowed(state.route.view)){ state.route = {view: firstAllowedView(), id:null}; }
-    var titleMap = {dashboard:"Дашборд", tickets:"Заявки", team:"Команда", parts:"Склад ЗИП", "import":"Импорт из c-lector", registry:"Финансы · Реестр платежей", cashexpenses:"Финансы · Наличные расходы", map:"Карта", crews:"Бригады", hotels:"Отели", systemdefects:"Системный брак", reports:"Отчёты"};
-    var body = state.route.view==="tickets"?viewTickets(): state.route.view==="team"?viewTeam(): state.route.view==="parts"?viewParts(): state.route.view==="import"?viewImport(): state.route.view==="registry"?viewRegistry(): state.route.view==="cashexpenses"?viewCashExpenses(): state.route.view==="map"?viewMap(): state.route.view==="crews"?viewCrews(): state.route.view==="hotels"?viewHotels(): state.route.view==="systemdefects"?viewSystemDefects(): state.route.view==="reports"?viewReports(): viewDashboard();
+    var titleMap = {dashboard:"Дашборд", tickets:"Заявки", team:"Команда", parts:"Склад ЗИП", "import":"Импорт из c-lector", registry:"Финансы · Реестр платежей", cashexpenses:"Финансы · Наличные расходы", map:"Карта", crews:"Бригады", hotels:"Отели", systemdefects:"Системный брак"};
+    var body = state.route.view==="tickets"?viewTickets(): state.route.view==="team"?viewTeam(): state.route.view==="parts"?viewParts(): state.route.view==="import"?viewImport(): state.route.view==="registry"?viewRegistry(): state.route.view==="cashexpenses"?viewCashExpenses(): state.route.view==="map"?viewMap(): state.route.view==="crews"?viewCrews(): state.route.view==="hotels"?viewHotels(): state.route.view==="systemdefects"?viewSystemDefects(): viewDashboard();
 
     var navItems = [
       ["dashboard","Дашборд"], ["tickets","Заявки"], ["import","Импорт из c-lector"], ["map","Карта"],
-      ["systemdefects","Системный брак"], ["reports","Отчёты"],
+      ["systemdefects","Системный брак"],
       ["team","Команда"], ["crews","Бригады"], ["parts","Склад ЗИП"], ["registry","Финансы",["cashexpenses"]], ["hotels","Отели"]
     ].filter(function(x){ return navAllowed(x[0]); });
     app.innerHTML = h`
