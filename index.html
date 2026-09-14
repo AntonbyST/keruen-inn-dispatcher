@@ -114,9 +114,29 @@
   .pill-warn{ background:var(--warn-soft); color:var(--warn); }
   .pill-crit{ background:var(--crit-soft); color:var(--crit); }
   .zone-badge{ display:inline-flex; align-items:center; padding:2px 8px; border-radius:6px; border:1px solid var(--line); font-size:11px; font-weight:600; color:var(--ink-soft); }
-  .demo-tag{ background:var(--warn-soft); color:var(--warn); font-size:10px; padding:1px 6px; border-radius:5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; }
-  .source-tag{ background:var(--accent-soft); color:var(--accent); font-size:10px; padding:1px 6px; border-radius:5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; }
+  .demo-tag{ background:var(--warn-soft); color:var(--warn); font-size:10px; padding:1px 6px; border-radius:5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; white-space:nowrap; }
+  .source-tag{ background:var(--accent-soft); color:var(--accent); font-size:10px; padding:1px 6px; border-radius:5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; white-space:nowrap; }
   .clector-sync-badge{ display:inline-block; margin-top:5px; background:var(--warn-soft); color:var(--warn); font-size:10.5px; font-weight:600; padding:2px 7px; border-radius:5px; white-space:nowrap; }
+  /* Унифицированные "отметки" в карточке заявки (0.2.12) — "Пометить как
+     дубль" и "Системный брак" визуально выглядят одинаково: пунктирный
+     контур, пока не отмечено (для системного брака — прямо вокруг поля
+     ввода названия), сплошная цветная плашка с крестиком, когда отмечено.
+     Раньше это были два разных по виду элемента управления (кнопка-ссылка
+     и текстовое поле с отдельной кнопкой "Снять пометку") — см. правку
+     "чтобы обе отметки выглядели одинаково". */
+  .flag-row{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .flag-chip{ display:inline-flex; align-items:center; gap:6px; padding:5px 10px 5px 8px; border-radius:20px; font-size:12.5px; font-weight:600; border:1px dashed var(--line); color:var(--ink-soft); background:transparent; cursor:pointer; font-family:inherit; }
+  .flag-chip svg{ width:14px; height:14px; flex:none; }
+  .flag-chip.set{ border-style:solid; cursor:default; }
+  .flag-chip.set.warn{ border-color:transparent; background:var(--warn-soft); color:var(--warn); }
+  .flag-chip.set.crit{ border-color:transparent; background:var(--crit-soft); color:var(--crit); }
+  .flag-chip .x{ display:inline-flex; align-items:center; justify-content:center; margin-left:2px; margin-right:-4px; opacity:.7; cursor:pointer; background:none; border:none; color:inherit; padding:2px; }
+  .flag-chip .x:hover{ opacity:1; }
+  .flag-chip .link-btn{ background:none; border:none; color:inherit; text-decoration:underline; cursor:pointer; font:inherit; font-weight:600; padding:0; }
+  .flag-chip.input-chip{ padding:3px 10px 3px 8px; cursor:text; }
+  .flag-chip.input-chip input{ background:transparent; border:none; color:var(--ink-soft); font:inherit; font-weight:600; padding:0; width:160px; }
+  .flag-chip.input-chip input::placeholder{ color:var(--ink-faint); font-weight:600; }
+  .flag-chip.input-chip input:focus{ outline:none; }
   /* Компактные чекбоксы-фильтры по 4 пунктам чек-листа — сидят прямо в
      заголовке колонки "№ c-lector", ровно над строкой значков в каждой
      строке (statusIconsRow), поэтому занимают минимум места и не требуют
@@ -3548,8 +3568,7 @@
                 ${t.external_status? externalStatusPill(t.external_status): statusPill(t.status)}
               </span>
             </div>
-            <div style="margin-top:8px;">${statusIconsRow(t)}</div>
-            <div style="font-weight:700;font-size:16px;margin-top:8px;">№${hotel.id} ${hotel.name}${t.location ? h` <span class="muted" style="font-weight:400;">— ${escapeHtml(t.location)}</span>` : ""} ${t.demo?'<span class="demo-tag">пример</span>':''} ${t.source==='c-lector'?'<span class="source-tag">c-lector</span>':''}</div>
+            <div style="font-weight:700;font-size:16px;margin-top:10px;">№${hotel.id} ${hotel.name}${t.location ? h` <span class="muted" style="font-weight:400;">— ${escapeHtml(t.location)}</span>` : ""} ${t.demo?'<span class="demo-tag">пример</span>':''} ${t.source==='c-lector'?'<span class="source-tag">c-lector</span>':''}</div>
             ${t.attention_flag && t.attention_note ? h`<div class="muted" style="font-size:12px;margin-top:4px;">⚑ ${escapeHtml(t.attention_note)}</div>` : ""}
           </div>
           <button type="button" class="btn btn-ghost btn-sm" data-action="copy-ticket-link" data-id="${t.id}" title="Скопировать прямую ссылку на эту заявку" style="flex:none;">Ссылка</button>
@@ -3570,21 +3589,34 @@
                 ${feedbackHtml("desc-short-feedback")}
               </div>` : ''}
           </div>
-          <div class="actions-row" style="align-items:center;">
+          <div class="flag-row">
             ${(function(){
-              if(!t.duplicate_of_ticket_id) return h`<button type="button" class="btn btn-ghost btn-sm" data-action="duplicate-set" data-id="${t.id}">Пометить как дубль…</button>`;
+              if(!t.duplicate_of_ticket_id) return h`<button type="button" class="flag-chip" data-action="duplicate-set" data-id="${t.id}">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                Пометить как дубль…
+              </button>`;
               var dup = state.tickets.find(function(x){return x.id===t.duplicate_of_ticket_id;});
               var dupLabel = dup ? (dup.external_ref ? ("№ "+escapeHtml(dup.external_ref)) : escapeHtml(dup.id)) : "заявки (не найдена в списке)";
-              return h`<span class="pill pill-warn">Дубль ${dupLabel}</span>
-                ${dup ? h`<button type="button" class="btn btn-ghost btn-sm" data-open-ticket="${dup.id}">Открыть</button>` : ""}
-                <button type="button" class="btn btn-ghost btn-sm" data-action="duplicate-clear" data-id="${t.id}">Снять пометку</button>`;
+              return h`<span class="flag-chip set warn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                Дубль ${dupLabel}
+                ${dup ? h`<a href="#" class="link-btn" data-open-ticket="${dup.id}">Открыть</a>` : ""}
+                <button type="button" class="x" data-action="duplicate-clear" data-id="${t.id}" title="Снять пометку «дубль»">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="12" height="12"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
+              </span>`;
             })()}
-          </div>
-          <div class="actions-row" style="align-items:center;flex-wrap:wrap;">
-            ${t.system_defect_name ? h`<span class="pill pill-crit">Системный брак: ${escapeHtml(t.system_defect_name)}</span>` : ""}
-            <input type="text" id="system-defect-input" data-id="${t.id}" list="system-defect-names" value="${escapeHtml(t.system_defect_name||"")}" placeholder="Название системного брака…" style="max-width:220px;">
+            ${t.system_defect_name ? h`<span class="flag-chip set crit">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                ${escapeHtml(t.system_defect_name)}
+                <button type="button" class="x" data-action="system-defect-clear" data-id="${t.id}" title="Снять пометку «системный брак»">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="12" height="12"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
+              </span>` : h`<label class="flag-chip input-chip">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                <input type="text" id="system-defect-input" data-id="${t.id}" list="system-defect-names" value="" placeholder="Системный брак…">
+              </label>`}
             <datalist id="system-defect-names">${distinctSystemDefectNames().map(function(n){ return `<option value="${escapeHtml(n)}">`; }).join("")}</datalist>
-            ${t.system_defect_name ? h`<button type="button" class="btn btn-ghost btn-sm" data-action="system-defect-clear" data-id="${t.id}">Снять пометку</button>` : ""}
             ${feedbackHtml("system-defect-feedback")}
           </div>
           <div>
