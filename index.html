@@ -521,14 +521,42 @@
   var OWNER_EMAIL = "anton.byst@gmail.com";
   function isOwner(){ return !!(state.me && state.me.email && state.me.email.toLowerCase() === OWNER_EMAIL.toLowerCase()); }
   // Реестр платежей — по просьбе Антона упрощён до простого списка прикреплённых
-  // счетов: заявка, отель, сам файл и дата. Раньше здесь было 23 колонки 1:1 с
+  // счетов: заявка, отель, сам файл. Раньше здесь было 23 колонки 1:1 с
   // корпоративным Excel-файлом (поставщик, суммы, валюта, НДС, статья бюджета,
   // ERP-поля и т.д.) — все они заполнялись вручную и оказались не нужны прямо
   // в этом приложении.
   // "Оплачено" (версия 0.2.2, п.3) добавлена последней колонкой, чтобы не
   // сдвигать нумерацию/сортировку уже существующих — редактировать её могут
   // только роли, перечисленные в canEditRegistry() выше.
-  var REGISTRY_COLUMN_LABELS = ["№","№ заявки (c-lector)","Отель","Файл","Добавлен в реестр","Сумма","Оплачено"];
+  // 0.2.13.1: "Добавлен в реестр" убрана с экрана и из выгрузки (даты и так
+  // фильтруются полями "с"/"по" в фильтрах — отдельная колонка дублировала их).
+  // Взамен добавлены "Валюта", "НДС", "Налог" и расчётная "Учтено в затратах" —
+  // см. CURRENCY_VAT_RATE/TAX_BASIS_RATE/invoiceCostAccounted() ниже.
+  var REGISTRY_COLUMN_LABELS = ["№","№ заявки (c-lector)","Отель","Файл","Сумма","Валюта","НДС","Налог","Учтено в затратах","Оплачено"];
+
+  // Ставка НДС по валюте платежа (0.2.13.1, по просьбе Антона): KZT — 16%,
+  // RUB/BYN — 20%. Нужна только чтобы снять НДС с суммы, если она указана
+  // "с НДС" — см. invoiceCostAccounted().
+  var CURRENCY_VAT_RATE = { KZT: 0.16, RUB: 0.20, BYN: 0.20 };
+  // Доп. налог/наценка, которую нужно учесть в бюджете сверх суммы без НДС, в
+  // зависимости от того, как оплачен счёт: обычный счёт от плательщика НДС —
+  // 0%, подрядчик на упрощённой системе налогообложения — 20%, наличный
+  // расчёт — 30% (все три значения — по словам Антона).
+  var TAX_BASIS_LABEL = { regular: "Обычный счёт", simplified: "Упрощёнка у подрядчика (+20%)", cash: "Наличный расчёт (+30%)" };
+  var TAX_BASIS_RATE = { regular: 0, simplified: 0.20, cash: 0.30 };
+  // "Учтено в затратах" = сумма без НДС (снятого по ставке валюты, если
+  // "Сумма" указана с НДС) × (1 + доп. налог по способу оплаты). Возвращает
+  // null, пока не заполнены все нужные для расчёта поля — колонка в этом
+  // случае показывает "—", как и незаполненная "Сумма".
+  function invoiceCostAccounted(iv){
+    if(iv.amount==null || iv.vat_included==null || !iv.tax_basis) return null;
+    var vatRate = CURRENCY_VAT_RATE[iv.currency];
+    if(vatRate==null) return null; // валюта не выбрана или не из известных (KZT/RUB/BYN)
+    var taxRate = TAX_BASIS_RATE[iv.tax_basis];
+    if(taxRate==null) return null;
+    var noVat = iv.vat_included ? (iv.amount / (1 + vatRate)) : iv.amount;
+    return noVat * (1 + taxRate);
+  }
 
   function hotelById(id){ var list=state.hotels||[]; for (var i=0;i<list.length;i++){ if (list[i].id===Number(id)) return list[i]; } return null; }
   function fmtDate(iso){ if(!iso) return "—"; var d=new Date(iso); return d.toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit",year:"numeric"})+" "+d.toLocaleTimeString("ru-RU",{hour:"2-digit",minute:"2-digit"}); }
@@ -1140,6 +1168,40 @@
       }
     });
   }
+  // Валюта / НДС / способ оплаты счёта (0.2.13.1) — те же три поля, что нужны
+  // invoiceCostAccounted() для расчёта "Учтено в затратах" в «Реестре
+  // платежей»; тот же принцип локального патча + сохранения в БД, что и у
+  // setInvoiceAmount/setInvoicePaid выше.
+  function setInvoiceCurrency(invoiceId, val){
+    if(!canEditRegistry()){ alert("Указывать валюту счёта может только Администратор, Руководитель или Финансист."); return; }
+    var currency = val || null;
+    var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
+    if(iv) iv.currency = currency;
+    render();
+    sb.from("invoices").update({currency:currency}).eq("id", invoiceId).then(function(){
+      if(iv) addNote(iv.ticket_id, "Указана валюта счёта «"+iv.file_name+"»: "+(currency||"—")+".");
+    });
+  }
+  function setInvoiceVatIncluded(invoiceId, val){
+    if(!canEditRegistry()){ alert("Указывать, включён ли НДС в сумму, может только Администратор, Руководитель или Финансист."); return; }
+    var vatIncluded = val==="with" ? true : (val==="without" ? false : null);
+    var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
+    if(iv) iv.vat_included = vatIncluded;
+    render();
+    sb.from("invoices").update({vat_included:vatIncluded}).eq("id", invoiceId).then(function(){
+      if(iv) addNote(iv.ticket_id, "Указано по счёту «"+iv.file_name+"»: сумма "+(vatIncluded===true?"с НДС":(vatIncluded===false?"без НДС":"—"))+".");
+    });
+  }
+  function setInvoiceTaxBasis(invoiceId, val){
+    if(!canEditRegistry()){ alert("Указывать способ оплаты (для расчёта затрат) может только Администратор, Руководитель или Финансист."); return; }
+    var taxBasis = val || null;
+    var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
+    if(iv) iv.tax_basis = taxBasis;
+    render();
+    sb.from("invoices").update({tax_basis:taxBasis}).eq("id", invoiceId).then(function(){
+      if(iv) addNote(iv.ticket_id, "Указан способ оплаты счёта «"+iv.file_name+"»: "+(TAX_BASIS_LABEL[taxBasis]||"—")+".");
+    });
+  }
 
   // Фото по заявке — рабочий инструмент (до/после, подтверждение выполненных
   // работ), отдельно от c-lector и от счетов. Храним в собственном бакете
@@ -1214,13 +1276,17 @@
     var rows = list.map(function(iv, i){
       var tk = state.tickets.find(function(x){return x.id===iv.ticket_id;});
       var hotel = tk ? hotelById(tk.hotel_id) : null;
+      var accounted = invoiceCostAccounted(iv);
       return [
         i+1,
         tk && tk.external_ref ? tk.external_ref : "",
         hotel ? ("№"+hotel.id+" "+hotel.name) : "",
         iv.file_name || "",
-        iv.added_to_registry_at ? fmtDateShort(iv.added_to_registry_at) : "",
         iv.amount!=null ? iv.amount : "",
+        iv.currency || "",
+        iv.vat_included===true ? "С НДС" : (iv.vat_included===false ? "Без НДС" : ""),
+        iv.tax_basis ? (TAX_BASIS_LABEL[iv.tax_basis]||iv.tax_basis) : "",
+        accounted!=null ? accounted : "",
         iv.paid ? "Да" : "Нет"
       ];
     });
@@ -2798,7 +2864,6 @@
       var hotel = tk ? hotelById(tk.hotel_id) : null;
       if(field==="ref") return (tk && tk.external_ref) || "";
       if(field==="hotel") return hotel ? hotel.name : "";
-      if(field==="added_at") return iv.added_to_registry_at || "";
       return "";
     }
     if(rSortField){
@@ -2814,8 +2879,8 @@
       return h`<th data-action="sort-registry" data-field="${field}" style="cursor:pointer;user-select:none;" title="Сортировать">${label}${active?(rSortDir==="asc"?" ▲":" ▼"):""}</th>`;
     }
     // поле сортировки для каждой колонки — null там, где сортировка не имеет
-    // смысла (порядковый номер, сам файл, галочка "оплачено")
-    var REGISTRY_SORT_FIELDS = [null,"ref","hotel",null,"added_at",null,null];
+    // смысла (порядковый номер, сам файл, суммы/селекты, галочка "оплачено")
+    var REGISTRY_SORT_FIELDS = [null,"ref","hotel",null,null,null,null,null,null,null];
     var editableRegistry = canEditRegistry();
     // Итоги "оплачено"/"к оплате" (0.2.3, п.2) — считаются по тому же списку
     // list, что сейчас показан на экране (с учётом фильтров), а не по всему
@@ -2847,13 +2912,37 @@
               list.map(function(iv, i){
                 var tk = state.tickets.find(function(x){return x.id===iv.ticket_id;});
                 var hotel = tk ? hotelById(tk.hotel_id) : null;
+                var accounted = invoiceCostAccounted(iv);
                 return h`<tr>
                   <td class="mono muted">${i+1}</td>
-                  <td class="mono">${tk && tk.external_ref ? escapeHtml(tk.external_ref) : (tk?h`<a href="#" data-open-ticket="${tk.id}">открыть</a>`:'—')}</td>
+                  <td class="mono">${tk ? h`<a href="#" data-open-ticket="${tk.id}" title="Открыть заявку">${tk.external_ref?escapeHtml(tk.external_ref):'открыть'}</a>` : '—'}</td>
                   <td>${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
                   <td><button class="btn btn-sm" data-action="invoice-open" data-path="${escapeHtml(iv.file_path)}">${escapeHtml(iv.file_name)}</button></td>
-                  <td class="mono muted">${iv.added_to_registry_at? fmtDateShort(iv.added_to_registry_at) : '—'}</td>
-                  <td><input type="number" step="0.01" min="0" data-invoice-amount data-id="${iv.id}" value="${iv.amount!=null?iv.amount:''}" placeholder="—" style="width:110px;" ${editableRegistry?'':'disabled'} title="${editableRegistry?'Указать сумму счёта':'Редактировать может только Администратор, Руководитель или Финансист'}"></td>
+                  <td><input type="number" step="0.01" min="0" data-invoice-amount data-id="${iv.id}" value="${iv.amount!=null?iv.amount:''}" placeholder="—" style="width:100px;" ${editableRegistry?'':'disabled'} title="${editableRegistry?'Указать сумму счёта':'Редактировать может только Администратор, Руководитель или Финансист'}"></td>
+                  <td>
+                    <select data-invoice-currency data-id="${iv.id}" style="width:78px;" ${editableRegistry?'':'disabled'} title="${editableRegistry?'Валюта оплаты счёта (влияет на ставку НДС)':'Редактировать может только Администратор, Руководитель или Финансист'}">
+                      <option value="">—</option>
+                      <option value="KZT" ${iv.currency==='KZT'?'selected':''}>KZT</option>
+                      <option value="RUB" ${iv.currency==='RUB'?'selected':''}>RUB</option>
+                      <option value="BYN" ${iv.currency==='BYN'?'selected':''}>BYN</option>
+                    </select>
+                  </td>
+                  <td>
+                    <select data-invoice-vat data-id="${iv.id}" ${editableRegistry?'':'disabled'} title="${editableRegistry?'Указана ли «Сумма» с учётом НДС':'Редактировать может только Администратор, Руководитель или Финансист'}">
+                      <option value="">—</option>
+                      <option value="with" ${iv.vat_included===true?'selected':''}>С НДС</option>
+                      <option value="without" ${iv.vat_included===false?'selected':''}>Без НДС</option>
+                    </select>
+                  </td>
+                  <td>
+                    <select data-invoice-tax-basis data-id="${iv.id}" ${editableRegistry?'':'disabled'} title="${editableRegistry?'Способ оплаты — влияет на доп. налог в «Учтено в затратах»':'Редактировать может только Администратор, Руководитель или Финансист'}">
+                      <option value="">—</option>
+                      <option value="regular" ${iv.tax_basis==='regular'?'selected':''}>${TAX_BASIS_LABEL.regular}</option>
+                      <option value="simplified" ${iv.tax_basis==='simplified'?'selected':''}>${TAX_BASIS_LABEL.simplified}</option>
+                      <option value="cash" ${iv.tax_basis==='cash'?'selected':''}>${TAX_BASIS_LABEL.cash}</option>
+                    </select>
+                  </td>
+                  <td class="mono" title="Сумма без НДС, скорректированная на доп. налог по способу оплаты">${accounted!=null ? fmtSum(accounted) : '—'}</td>
                   <td><input type="checkbox" data-action="invoice-paid-toggle" data-id="${iv.id}" data-val="${iv.paid?'0':'1'}" ${iv.paid?'checked':''} ${editableRegistry?'':'disabled'} title="${editableRegistry?'Отметить оплату счёта':'Редактировать может только Администратор, Руководитель или Финансист'}"></td>
                 </tr>`;
               }).join("")}
@@ -2861,7 +2950,7 @@
             ${list.length>0 ? h`<tfoot><tr class="registry-totals-row">
               <td colspan="4" class="muted" style="text-align:right;">Итого по показанным ${list.length} счетам${missingAmountCount?' (без суммы: '+missingAmountCount+')':''}:</td>
               <td class="mono"><b>Оплачено: ${fmtSum(sumPaid)}</b><br><span class="muted">К оплате: ${fmtSum(sumDue)}</span></td>
-              <td></td>
+              <td colspan="5"></td>
             </tr></tfoot>` : ""}
             </table></div>
           <div class="helptext" style="padding:10px 16px;">Счёт попадает сюда автоматически при прикреплении к заявке в её карточке. Сумму счёта указывает Администратор, Руководитель или Финансист — по ней считаются итоги «оплачено»/«к оплате» выше.</div>
@@ -4275,6 +4364,9 @@
     if(e.target.matches("[data-registry-filter]")){ state.registryFilters=state.registryFilters||{}; state.registryFilters[e.target.getAttribute("data-registry-filter")]=e.target.value; render(); return; }
     if(e.target.matches("[data-hotel-field]")){ updateHotelField(e.target.getAttribute("data-id"), e.target.getAttribute("data-hotel-field"), e.target.value); return; }
     if(e.target.matches("[data-invoice-amount]")){ setInvoiceAmount(e.target.getAttribute("data-id"), e.target.value); return; }
+    if(e.target.matches("[data-invoice-currency]")){ setInvoiceCurrency(e.target.getAttribute("data-id"), e.target.value); return; }
+    if(e.target.matches("[data-invoice-vat]")){ setInvoiceVatIncluded(e.target.getAttribute("data-id"), e.target.value); return; }
+    if(e.target.matches("[data-invoice-tax-basis]")){ setInvoiceTaxBasis(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.id==="import-file"){ var f=e.target.files&&e.target.files[0]; if(f) loadImportFile(f); return; }
     if(e.target.matches("[data-import-map]")){ state.importMapping[e.target.getAttribute("data-import-map")]=e.target.value; render(); return; }
     if(e.target.matches("[data-cash-import-map]")){ state.cashImportMapping[e.target.getAttribute("data-cash-import-map")]=e.target.value; render(); return; }
