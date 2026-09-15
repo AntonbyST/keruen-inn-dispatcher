@@ -3136,8 +3136,15 @@
       label = iv.vat_included===true?"С НДС":(iv.vat_included===false?"Без":"");
       title = "Указана ли «Сумма» с учётом НДС";
     } else {
-      value = iv.tax_basis||"";
-      label = iv.tax_basis ? (TAX_BASIS_LABEL[iv.tax_basis]||iv.tax_basis) : "";
+      // 0.2.18: "regular" ("Обычный счёт") — значение доп. налога, которое
+      // существовало ДО 0.2.15 и означало те же 0%, что теперь означает
+      // просто прочерк. У старых счетов оно ещё может быть сохранено в базе,
+      // и раньше здесь всё равно показывалась старая подпись "Обычный счёт"
+      // вместо прочерка — рядом со счетами, где прочерк means то же самое,
+      // это выглядело как два разных состояния. Показываем оба одинаково.
+      var taxForDisplay = iv.tax_basis==="regular" ? null : iv.tax_basis;
+      value = taxForDisplay||"";
+      label = taxForDisplay ? (TAX_BASIS_LABEL[taxForDisplay]||taxForDisplay) : "";
       forceDisabled = iv.vat_included===true;
       title = forceDisabled ? "При «с НДС» доп. налог не применяется — ставится автоматически прочерком" : "Способ оплаты — влияет на доп. налог в «Учтено в затратах»";
     }
