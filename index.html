@@ -185,7 +185,8 @@
      обычном экране. table-layout:fixed заставляет колонки уважать ширины из
      <colgroup>, а не растягиваться под самый широкий контент (имя файла). */
   .registry-table{ table-layout:fixed; }
-  .registry-table th{ white-space:normal; line-height:1.25; padding:7px 6px; font-size:10px; }
+  /* 0.2.17 (по просьбе Антона): заголовки колонок реестра — по центру. */
+  .registry-table th{ white-space:normal; line-height:1.25; padding:7px 6px; font-size:10px; text-align:center; }
   .registry-table td{ padding:6px 6px; font-size:12.5px; }
   .registry-table td input[type="number"],
   .registry-table td select{ width:100%; box-sizing:border-box; padding:4px 4px; font-size:12px; }
@@ -197,6 +198,11 @@
   .registry-amount-display{ display:block; width:100%; background:none; border:1px dashed transparent; padding:4px 4px; font:inherit; font-variant-numeric:tabular-nums; text-align:right; cursor:pointer; color:inherit; border-radius:4px; }
   .registry-amount-display:hover:not(:disabled){ border-color:var(--line); }
   .registry-amount-display:disabled{ cursor:default; }
+  /* 0.2.17: «Отели» — «Зона»/«Координаты»/«Лицо от Заказчика» тем же приёмом:
+     обычный текст без рамки, пока заполнено; клик — раскрывает настоящее
+     поле(-я) ввода на его месте. */
+  .hotel-field-display{ display:block; width:100%; background:none; border:1px dashed transparent; padding:3px 4px; font:inherit; text-align:left; cursor:pointer; color:inherit; border-radius:4px; }
+  .hotel-field-display:hover{ border-color:var(--line); }
   .registry-related-line{ font-size:10.5px; line-height:1.4; margin-top:2px; white-space:normal; }
   .registry-related-line a{ white-space:nowrap; }
   table{ width:100%; border-collapse:collapse; font-size:13px; }
@@ -553,7 +559,12 @@
   // см. CURRENCY_VAT_RATE/TAX_BASIS_RATE/invoiceCostAccounted() ниже.
   // 0.2.15: добавлена "Подано в оплату" — промежуточный статус между
   // "счёт прикреплён" и "оплачено" (см. setInvoiceSubmitted).
-  var REGISTRY_COLUMN_LABELS = ["№","№ заявки (c-lector)","Отель","Файл","Сумма","Валюта","НДС","Налог","Учтено в затратах","Подано в оплату","Оплачено"];
+  // 0.2.17 (по просьбе Антона): "Файл" переименован в "Счёт" (сама ячейка
+  // всегда показывает общее слово "счёт", а не имя файла — см. viewRegistry —
+  // чтобы длинное имя не растягивало колонку); "Учтено в затратах" явно
+  // указывает валюту и что НДС уже вычтен (это именно так считается, см.
+  // invoiceAccountedKZT).
+  var REGISTRY_COLUMN_LABELS = ["№","№ заявки (c-lector)","Отель","Счёт","Сумма","Валюта","НДС","Налог","Учтено в затратах, KZT без НДС","Подано в оплату","Оплачено"];
 
   // Ставка НДС по валюте платежа (0.2.13.1, по просьбе Антона): KZT — 16%,
   // RUB/BYN — 20%. Нужна только чтобы снять НДС с суммы, если она указана
@@ -997,6 +1008,17 @@
     // клику — так поле не мозолит глаза, когда уже заполнено. Только один
     // счёт может редактироваться одновременно (id этого счёта — здесь).
     registryEditingAmountId: null,
+    // 0.2.17: тот же приём для «Валюты»/«НДС»/«Налога» в «Реестре платежей» —
+    // ключ "<id счёта>:currency|vat|tax" редактируемого сейчас поля (см.
+    // registrySelectCell).
+    registryEditingFieldKey: null,
+    // 0.2.17: то же самое для «Отелей» — «Зона», «Координаты» и «Лицо от
+    // Заказчика» показываются обычным текстом без рамок ввода, если уже
+    // заполнены, и превращаются в поля ввода по клику. Ключ вида
+    // "<id отеля>:zone" / ":coords" / ":contact" — какая группа полей сейчас
+    // редактируется (одновременно только одна). «Название» сюда не входит —
+    // оно обязательное и всегда остаётся обычным полем ввода.
+    hotelEditingKey: null,
     loaded: false,
     importHeaders: [], importRows: [], importMapping: {}, importResult: null, importBusy: false, importFileError: "",
     // «Финансы» → «Наличные расходы» (0.2.4): вставка таблицы, как импорт c-lector,
@@ -1292,6 +1314,9 @@
     var currency = val || null;
     var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
     if(iv) iv.currency = currency;
+    // 0.2.17: как только выбрано — поле сразу сворачивается обратно в
+    // обычный текст, тем же приёмом, что «Сумма» (0.2.16).
+    if(state.registryEditingFieldKey===(invoiceId+":currency")) state.registryEditingFieldKey = null;
     render();
     sb.from("invoices").update({currency:currency}).eq("id", invoiceId).then(function(){
       if(iv) addNote(iv.ticket_id, "Указана валюта счёта «"+iv.file_name+"»: "+(currency||"—")+".");
@@ -1309,6 +1334,7 @@
     var update = {vat_included:vatIncluded};
     if(vatIncluded===true && iv && iv.tax_basis){ resetTaxBasis = true; update.tax_basis = null; }
     if(iv){ iv.vat_included = vatIncluded; if(resetTaxBasis) iv.tax_basis = null; }
+    if(state.registryEditingFieldKey===(invoiceId+":vat")) state.registryEditingFieldKey = null;
     render();
     sb.from("invoices").update(update).eq("id", invoiceId).then(function(){
       if(iv) addNote(iv.ticket_id, "Указано по счёту «"+iv.file_name+"»: сумма "+(vatIncluded===true?"с НДС":(vatIncluded===false?"без НДС":"—"))+(resetTaxBasis?" (доп. налог сброшен — при «с НДС» ставится автоматически прочерком)":"")+".");
@@ -1322,6 +1348,7 @@
     if(iv && iv.vat_included===true){ alert("При «с НДС» доп. налог ставится автоматически (прочерк) и недоступен для ручного выбора."); return; }
     var taxBasis = val || null;
     if(iv) iv.tax_basis = taxBasis;
+    if(state.registryEditingFieldKey===(invoiceId+":tax")) state.registryEditingFieldKey = null;
     render();
     sb.from("invoices").update({tax_basis:taxBasis}).eq("id", invoiceId).then(function(){
       if(iv) addNote(iv.ticket_id, "Указан способ оплаты счёта «"+iv.file_name+"»: "+(taxBasis?(TAX_BASIS_LABEL[taxBasis]||taxBasis):"—")+".");
@@ -1332,38 +1359,27 @@
   // 2-3 заявкам) — каждое такое прикрепление в базе остаётся своей строкой
   // invoices (см. uploadInvoice: путь файла в сторидже привязан к своей
   // заявке), поэтому в «Реестре платежей» это выглядело как несколько
-  // независимых счетов. related_ticket_ids — просто пометка "эта же сумма
-  // также относится к заявкам №…", чтобы бухгалтер не считал её отдельно по
-  // каждой строке — сама сумма/итоги при этом не пересчитываются, это только
-  // видимая подсказка.
+  // независимых счетов.
+  // 0.2.17 (по просьбе Антона): раньше это отмечалось вручную (номера заявок
+  // через запятую в prompt) — теперь определяется автоматически: если тот же
+  // файл (по имени) отдельно прикреплён и к другим заявкам, они считаются
+  // "также относящимися" без какого-либо ручного ввода. Сама сумма/итоги при
+  // этом по-прежнему не пересчитываются — это только видимая подсказка, чтобы
+  // бухгалтер не считал её отдельно по каждой строке.
   function invoiceRelatedTickets(iv){
-    return ((iv && iv.related_ticket_ids) || []).map(function(tid){
-      return state.tickets.find(function(x){ return x.id===tid; });
-    }).filter(Boolean);
-  }
-  function setInvoiceRelatedTickets(invoiceId){
-    if(!canEditRegistry()){ alert("Указывать, в каких ещё заявках участвует счёт, может только Администратор, Руководитель или Финансист."); return; }
-    var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
-    if(!iv) return;
-    var current = invoiceRelatedTickets(iv).map(function(t){ return t.external_ref || t.id; }).join(", ");
-    var raw = prompt("Номера заявок c-lector, в которых этот же счёт «"+iv.file_name+"» также учитывается (через запятую). Оставьте пустым, чтобы убрать пометку:", current);
-    if(raw==null) return;
-    var refs = raw.split(/[,;\s]+/).map(function(s){ return s.trim(); }).filter(Boolean);
-    var ids = [], notFound = [];
-    refs.forEach(function(ref){
-      var t = findTicketByRef(ref);
-      if(!t) { notFound.push(ref); return; }
-      if(t.id===iv.ticket_id) return; // сама заявка, к которой прикреплён файл — не "также", а основная
-      if(ids.indexOf(t.id)===-1) ids.push(t.id);
+    if(!iv || !iv.file_name) return [];
+    var name = normalizeForMatch(iv.file_name);
+    var seenTickets = {}, out = [];
+    (state.invoices||[]).forEach(function(other){
+      if(other.id===iv.id) return;
+      if(other.ticket_id===iv.ticket_id) return;
+      if(normalizeForMatch(other.file_name||"")!==name) return;
+      if(seenTickets[other.ticket_id]) return;
+      seenTickets[other.ticket_id] = true;
+      var t = state.tickets.find(function(x){ return x.id===other.ticket_id; });
+      if(t) out.push(t);
     });
-    if(notFound.length){ alert("Не найдены заявки с номером c-lector: "+notFound.join(", ")+". Проверьте номера и попробуйте снова."); return; }
-    var relatedTicketIds = ids.length ? ids : null;
-    iv.related_ticket_ids = relatedTicketIds;
-    render();
-    sb.from("invoices").update({related_ticket_ids: relatedTicketIds}).eq("id", invoiceId).then(function(){
-      var labels = ids.map(function(tid){ var t=state.tickets.find(function(x){return x.id===tid;}); return t&&t.external_ref?("№"+t.external_ref):""; }).filter(Boolean).join(", ");
-      addNote(iv.ticket_id, ids.length ? ("Отмечено: счёт «"+iv.file_name+"» также относится к заявкам "+labels+".") : ("Снята пометка «также относится к заявкам» у счёта «"+iv.file_name+"»."));
-    });
+    return out;
   }
 
   // Фото по заявке — рабочий инструмент (до/после, подтверждение выполненных
@@ -1679,18 +1695,25 @@
     // списках (там пояснение излишне, только дата).
     var now = Date.now();
     if(t.status==="closed" || t.status==="rejected") return {label:"—", dateLabel:"—", overdue:false, done:true};
+    // 0.2.17: столбец "Срок" берётся из "сроков" c-lector (resolution_deadline)
+    // НЕЗАВИСИМО от статуса заявки — раньше, пока заявка не "на месте", тут
+    // показывался локально посчитанный "срок прибытия" (по зоне отеля), а
+    // настоящий срок из c-lector появлялся только для статуса "onsite". Раз
+    // c-lector присылает этот срок уже при самом импорте (см. commitImport),
+    // и он не зависит от внутреннего статуса наряда-задания, показываем его
+    // тут при первой возможности, для любого активного статуса.
+    if(t.resolution_deadline){
+      var ms2 = new Date(t.resolution_deadline).getTime()-now;
+      return {label:"Срок (c-lector): "+fmtDate(t.resolution_deadline), dateLabel:fmtDateShort(t.resolution_deadline), overdue: ms2<0, soon: ms2>0 && ms2<24*3600*1000, ms:ms2, kind:"resolution"};
+    }
     if(t.status==="new" || t.status==="dispatched"){
       var ms = new Date(t.arrival_deadline).getTime()-now;
       return {label:"Прибытие к "+fmtDateShort(t.arrival_deadline), dateLabel:fmtDateShort(t.arrival_deadline), overdue: ms<0, soon: ms>0 && ms<4*3600*1000, ms:ms, kind:"arrival"};
     }
     if(t.status==="onsite"){
-      // Срок устранения теперь берётся ТОЛЬКО из данных c-lector (колонка при
-      // импорте) — платформа сама его больше не считает и не сдвигает. Если
-      // в c-lector этот срок не указан/не сопоставлен при импорте, честно
-      // показываем, что данных нет, а не подставляем свою дату.
-      if(!t.resolution_deadline) return {label:"Срок не указан (нет данных c-lector)", dateLabel:"Срок не указан", overdue:false, kind:"resolution"};
-      var ms2 = new Date(t.resolution_deadline).getTime()-now;
-      return {label:"Устранение к "+fmtDate(t.resolution_deadline), dateLabel:fmtDateShort(t.resolution_deadline), overdue: ms2<0, soon: ms2>0 && ms2<24*3600*1000, ms:ms2, kind:"resolution"};
+      // Срок не указан/не сопоставлен при импорте — честно показываем, что
+      // данных нет, а не подставляем свою дату.
+      return {label:"Срок не указан (нет данных c-lector)", dateLabel:"Срок не указан", overdue:false, kind:"resolution"};
     }
     return {label:"—", dateLabel:"—", overdue:false};
   }
@@ -2252,6 +2275,19 @@
   // расходы" можно было переключаться прямо в контенте, не возвращаясь в меню.
   function financeTabs(active){
     var tabs = [["registry","Реестр платежей"], ["cashexpenses","Наличные расходы"]];
+    return h`<div class="finance-tabs">${tabs.map(function(t){
+      return h`<a href="#/${t[0]}" class="finance-tab ${active===t[0]?'active':''}">${t[1]}</a>`;
+    }).join("")}</div>`;
+  }
+  // 0.2.17: тот же приём вкладок, что и у «Финансы», — теперь для «Заявок»,
+  // раз «Импорт из c-lector» стал вкладкой внутри «Заявок», а не отдельным
+  // пунктом меню (см. navItems выше). Показываем вкладку «Импорт», только
+  // если она вообще разрешена этой роли (см. navAllowed('import')) — не у
+  // всех, кому доступны «Заявки», есть доступ к импорту (например,
+  // Заказчик/Специалист/Снабжение).
+  function ticketsTabs(active){
+    if(!navAllowed("import")) return "";
+    var tabs = [["tickets","Заявки"], ["import","Импорт из c-lector"]];
     return h`<div class="finance-tabs">${tabs.map(function(t){
       return h`<a href="#/${t[0]}" class="finance-tab ${active===t[0]?'active':''}">${t[1]}</a>`;
     }).join("")}</div>`;
@@ -2900,6 +2936,7 @@
       </th>`;
     }
     return h`
+      ${ticketsTabs('tickets')}
       <div class="filters">
         <div class="status-filter-group">
           ${statusOptions.map(function(s){ var active = f.statusList.indexOf(s)>-1;
@@ -3059,9 +3096,64 @@
   // корпоративным Excel-файлом (поставщик, суммы, валюта, НДС, статья бюджета,
   // ERP-поля и т.д.) — по просьбе Антона все они убраны и с экрана, и из
   // выгрузки, т.к. заполнялись вручную и в этом приложении не нужны.
+  // 0.2.17 (по просьбе Антона): «Валюта»/«НДС»/«Налог» в «Реестре платежей» —
+  // тот же приём, что и «Сумма» (0.2.16) и поля «Отелей» (0.2.17, п.1): без
+  // рамки, если уже выбрано, клик раскрывает настоящий <select> на его месте.
+  // Только одно поле редактируется одновременно (как у "Сумма") — свой ключ
+  // "<id счёта>:currency|vat|tax" в state.registryEditingFieldKey.
+  function registrySelectRaw(iv, kind, disabled, title){
+    var key = iv.id+":"+kind;
+    if(kind==="currency"){
+      return h`<select data-invoice-currency data-id="${iv.id}" data-registry-edit-focus="${key}" ${disabled?'disabled':''} title="${title}">
+        <option value="">—</option>
+        <option value="KZT" ${iv.currency==='KZT'?'selected':''}>KZT</option>
+        <option value="RUB" ${iv.currency==='RUB'?'selected':''}>RUB</option>
+        <option value="BYN" ${iv.currency==='BYN'?'selected':''}>BYN</option>
+      </select>`;
+    }
+    if(kind==="vat"){
+      return h`<select data-invoice-vat data-id="${iv.id}" data-registry-edit-focus="${key}" ${disabled?'disabled':''} title="${title}">
+        <option value="">—</option>
+        <option value="with" ${iv.vat_included===true?'selected':''}>С НДС</option>
+        <option value="without" ${iv.vat_included===false?'selected':''}>Без</option>
+      </select>`;
+    }
+    var vatOn = iv.vat_included===true;
+    return h`<select data-invoice-tax-basis data-id="${iv.id}" data-registry-edit-focus="${key}" ${disabled?'disabled':''} title="${title}">
+      <option value="">—</option>
+      ${vatOn ? "" : h`<option value="simplified" ${iv.tax_basis==='simplified'?'selected':''}>Упрощ. +20%</option>
+      <option value="cash" ${iv.tax_basis==='cash'?'selected':''}>Нал. +30%</option>`}
+    </select>`;
+  }
+  function registrySelectCell(iv, kind, editableRegistry){
+    var key = iv.id+":"+kind;
+    var value, label, forceDisabled = false, title;
+    if(kind==="currency"){
+      value = iv.currency||""; label = value;
+      title = "Валюта оплаты счёта (влияет на ставку НДС)";
+    } else if(kind==="vat"){
+      value = iv.vat_included===true?"with":(iv.vat_included===false?"without":"");
+      label = iv.vat_included===true?"С НДС":(iv.vat_included===false?"Без":"");
+      title = "Указана ли «Сумма» с учётом НДС";
+    } else {
+      value = iv.tax_basis||"";
+      label = iv.tax_basis ? (TAX_BASIS_LABEL[iv.tax_basis]||iv.tax_basis) : "";
+      forceDisabled = iv.vat_included===true;
+      title = forceDisabled ? "При «с НДС» доп. налог не применяется — ставится автоматически прочерком" : "Способ оплаты — влияет на доп. налог в «Учтено в затратах»";
+    }
+    var roleTitle = editableRegistry ? title : "Редактировать может только Администратор, Руководитель или Финансист";
+    if(editableRegistry && !forceDisabled && state.registryEditingFieldKey!==key && value){
+      return h`<button type="button" class="hotel-field-display" data-action="registry-field-edit" data-key="${key}" title="${roleTitle}">${escapeHtml(label)}</button>`;
+    }
+    return registrySelectRaw(iv, kind, !editableRegistry || forceDisabled, roleTitle);
+  }
   function viewRegistry(){
     var all = (state.invoices||[]).filter(function(iv){ return iv.in_registry; });
-    var rf = state.registryFilters || {q:"", hotel:"", dateFrom:"", dateTo:"", showPaid:false, currency:""};
+    // 0.2.17 (по просьбе Антона): оплаченные счета теперь показываются по
+    // умолчанию (галочка изначально стоит) — реестр остаётся полной картиной
+    // "что оплачено, что ещё предстоит", а не только списком долгов; галочку
+    // можно снять вручную, чтобы временно скрыть уже оплаченное.
+    var rf = state.registryFilters || {q:"", hotel:"", dateFrom:"", dateTo:"", showPaid:true, currency:""};
     var q = normalizeForMatch(rf.q||"");
     // Поиск/фильтр действуют только на то, что показано на экране — выгрузка в
     // Excel всегда забирает ВЕСЬ реестр целиком, чтобы случайно не забытый
@@ -3079,9 +3171,9 @@
       }
       return true;
     });
-    // Оплаченные счета по умолчанию скрыты (по просьбе Антона) — реестр
-    // остаётся списком того, что ещё предстоит оплатить; галочка "Показывать
-    // оплаченные" возвращает их, как showClosed у "Заявок".
+    // 0.2.17: оплаченные счета показываются по умолчанию (см. галочку выше) —
+    // сняв её вручную, можно временно скрыть уже оплаченное и увидеть только
+    // то, что ещё предстоит оплатить.
     var list = rf.showPaid ? preShowPaid : preShowPaid.filter(function(iv){ return !iv.paid; });
     var hiddenPaidCount = preShowPaid.length - list.length;
     var filtersActive = !!(rf.q||rf.hotel||rf.dateFrom||rf.dateTo||rf.currency);
@@ -3147,14 +3239,14 @@
           <div class="chip-toggle"><label><input type="checkbox" data-registry-filter-checkbox="showPaid" ${rf.showPaid?'checked':''}> Показывать оплаченные</label></div>
           ${filtersActive ? h`<a href="#" data-action="clear-registry-filter" style="font-size:12px;">сбросить</a>` : ""}
           <button class="btn btn-sm" data-action="registry-export" ${all.length===0?'disabled':''}>Экспорт в Excel${filtersActive?' (весь реестр)':''}</button>
-          <span class="muted" style="margin-left:auto;">${list.length} из ${all.length}${(!rf.showPaid && hiddenPaidCount>0) ? h` <span title="Оплаченные счета скрыты по умолчанию">(скрыто оплаченных: ${hiddenPaidCount})</span>` : ""}</span>
+          <span class="muted" style="margin-left:auto;">${list.length} из ${all.length}${(!rf.showPaid && hiddenPaidCount>0) ? h` <span title="Снята галочка «Показывать оплаченные»">(скрыто оплаченных: ${hiddenPaidCount})</span>` : ""}</span>
         </div>
         <div class="card">
           <div class="table-wrap"><table class="registry-table">
             <colgroup>
-              <col style="width:30px"><col style="width:64px"><col style="width:104px"><col style="width:170px">
-              <col style="width:76px"><col style="width:56px"><col style="width:66px"><col style="width:96px">
-              <col style="width:92px"><col style="width:78px"><col style="width:44px">
+              <col style="width:28px"><col style="width:60px"><col style="width:110px"><col style="width:56px">
+              <col style="width:70px"><col style="width:56px"><col style="width:50px"><col style="width:76px">
+              <col style="width:96px"><col style="width:60px"><col style="width:56px">
             </colgroup>
             <thead><tr>${REGISTRY_COLUMN_LABELS.map(function(lbl, i){ return registryTh(lbl, REGISTRY_SORT_FIELDS[i]); }).join("")}</tr></thead>
             <tbody>${list.length===0 ? h`<tr><td colspan="${REGISTRY_COLUMN_LABELS.length}"><div class="empty-state"><b>${filtersActive?'Ничего не найдено':(rf.showPaid?'Реестр пуст':'Все счета в реестре оплачены')}</b>${filtersActive?'Попробуйте изменить или сбросить фильтр.':(rf.showPaid?'Прикрепите счёт к заявке — он появится здесь автоматически.':'Включите «Показывать оплаченные», чтобы увидеть их.')}</div></td></tr>` :
@@ -3162,53 +3254,27 @@
                 var tk = state.tickets.find(function(x){return x.id===iv.ticket_id;});
                 var hotel = tk ? hotelById(tk.hotel_id) : null;
                 var accKZT = invoiceAccountedKZT(iv);
-                // 0.2.13.1 (по просьбе Антона): если сумма указана "с НДС", то
-                // "Налог" может быть только "Упрощёнка" или "Наличный расчёт" —
-                // вариант "Обычный счёт" (0%) в этом случае не предлагается.
-                var vatOn = iv.vat_included===true;
                 return h`<tr>
                   <td class="mono muted">${i+1}</td>
                   <td class="mono">${tk ? h`<a href="#" data-open-ticket="${tk.id}" title="Открыть заявку">${tk.external_ref?escapeHtml(tk.external_ref):'открыть'}</a>` : '—'}</td>
                   <td style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${hotel?escapeHtml(hotel.name):''}">${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
                   <td>
-                    <button class="btn btn-sm registry-file-btn" data-action="invoice-open" data-path="${escapeHtml(iv.file_path)}" title="${escapeHtml(iv.file_name)}">${escapeHtml(iv.file_name)}</button>
+                    <button class="btn btn-sm registry-file-btn" data-action="invoice-open" data-path="${escapeHtml(iv.file_path)}" title="${escapeHtml(iv.file_name)}">счёт</button>
                     ${(function(){
+                      // 0.2.17: "также в заявках" теперь определяется автоматически (тот
+                      // же файл, прикреплённый отдельно к другим заявкам — см.
+                      // invoiceRelatedTickets), без ручного ввода.
                       var rel = invoiceRelatedTickets(iv);
-                      // 0.2.13.1 (доп.): один и тот же счёт иногда прикреплён отдельно
-                      // к нескольким заявкам (см. комментарий у setInvoiceRelatedTickets) —
-                      // показываем это под именем файла, чтобы сумма не считалась как
-                      // независимая по каждой такой строке.
-                      if(rel.length){
-                        return h`<div class="muted registry-related-line" title="Этот же счёт также прикреплён к этим заявкам — не считайте его сумму отдельно по каждой">Также: ${rel.map(function(t){ return h`<a href="#" data-open-ticket="${t.id}">№${escapeHtml(t.external_ref||t.id)}</a>`; }).join(", ")}${editableRegistry?h` · <a href="#" data-action="invoice-related-set" data-id="${iv.id}">изменить</a>`:""}</div>`;
-                      }
-                      return editableRegistry ? h`<div class="muted registry-related-line"><a href="#" data-action="invoice-related-set" data-id="${iv.id}">+ также в заявках</a></div>` : "";
+                      if(!rel.length) return "";
+                      return h`<div class="muted registry-related-line" title="Тот же файл также прикреплён к этим заявкам — не считайте его сумму отдельно по каждой">Также: ${rel.map(function(t){ return h`<a href="#" data-open-ticket="${t.id}">№${escapeHtml(t.external_ref||t.id)}</a>`; }).join(", ")}</div>`;
                     })()}
                   </td>
                   <td>${(editableRegistry && state.registryEditingAmountId===iv.id)
                     ? h`<input type="text" inputmode="decimal" class="registry-amount-input" data-invoice-amount data-id="${iv.id}" value="${iv.amount!=null?formatAmountInputValue(String(iv.amount)):''}" placeholder="—">`
                     : h`<button type="button" class="registry-amount-display" data-action="${editableRegistry?'registry-amount-edit':''}" data-id="${iv.id}" ${editableRegistry?'':'disabled'} title="${editableRegistry?'Нажмите, чтобы изменить сумму':'Редактировать может только Администратор, Руководитель или Финансист'}">${iv.amount!=null?fmtSum(iv.amount):'—'}</button>`}</td>
-                  <td>
-                    <select data-invoice-currency data-id="${iv.id}" ${editableRegistry?'':'disabled'} title="${editableRegistry?'Валюта оплаты счёта (влияет на ставку НДС)':'Редактировать может только Администратор, Руководитель или Финансист'}">
-                      <option value="">—</option>
-                      <option value="KZT" ${iv.currency==='KZT'?'selected':''}>KZT</option>
-                      <option value="RUB" ${iv.currency==='RUB'?'selected':''}>RUB</option>
-                      <option value="BYN" ${iv.currency==='BYN'?'selected':''}>BYN</option>
-                    </select>
-                  </td>
-                  <td>
-                    <select data-invoice-vat data-id="${iv.id}" ${editableRegistry?'':'disabled'} title="${editableRegistry?'Указана ли «Сумма» с учётом НДС':'Редактировать может только Администратор, Руководитель или Финансист'}">
-                      <option value="">—</option>
-                      <option value="with" ${iv.vat_included===true?'selected':''}>С НДС</option>
-                      <option value="without" ${iv.vat_included===false?'selected':''}>Без</option>
-                    </select>
-                  </td>
-                  <td>
-                    <select data-invoice-tax-basis data-id="${iv.id}" ${(editableRegistry && !vatOn)?'':'disabled'} title="${vatOn?'При «с НДС» доп. налог не применяется — ставится автоматически прочерком':(editableRegistry?'Способ оплаты — влияет на доп. налог в «Учтено в затратах»':'Редактировать может только Администратор, Руководитель или Финансист')}">
-                      <option value="">—</option>
-                      ${vatOn ? "" : h`<option value="simplified" ${iv.tax_basis==='simplified'?'selected':''}>Упрощ. +20%</option>
-                      <option value="cash" ${iv.tax_basis==='cash'?'selected':''}>Нал. +30%</option>`}
-                    </select>
-                  </td>
+                  <td>${registrySelectCell(iv, "currency", editableRegistry)}</td>
+                  <td>${registrySelectCell(iv, "vat", editableRegistry)}</td>
+                  <td>${registrySelectCell(iv, "tax", editableRegistry)}</td>
                   <td class="mono" style="text-align:right;" title="${accKZT.currency ? 'Сумма без НДС и с доп. налогом, переведена в KZT по курсу Нацбанка РК'+(iv.paid?' на день оплаты':' на сегодня — пересчитается на день оплаты') : 'Сумма без НДС, скорректированная на доп. налог по способу оплаты'}">
                     ${accKZT.state==="ok" ? (fmtSum(accKZT.value) + (accKZT.currency ? h`<div class="muted" style="font-size:10px;">${fmtSum(accKZT.original)} ${accKZT.currency}</div>` : "")) :
                       accKZT.state==="pending" ? h`<span class="muted">курс…</span>` :
@@ -3220,11 +3286,9 @@
               }).join("")}
             </tbody>
             ${list.length>0 ? h`<tfoot><tr class="registry-totals-row">
-              <td colspan="4" class="muted" style="text-align:right;">Итого по показанным ${list.length} счетам${missingAmountCount?' (без данных для расчёта: '+missingAmountCount+')':''}${pendingRateCount?' (ожидание курса НБ РК: '+pendingRateCount+')':''}:</td>
-              <td colspan="4" class="mono" style="text-align:right;"><b>Оплачено: ${fmtSum(sumPaid)}</b> · <span class="muted">К оплате: ${fmtSum(sumDue)}</span></td>
-              <td></td>
-              <td></td>
-              <td></td>
+              <td colspan="8" class="muted" style="text-align:right;">Итого по показанным ${list.length} счетам${missingAmountCount?' (без данных для расчёта: '+missingAmountCount+')':''}${pendingRateCount?' (ожидание курса НБ РК: '+pendingRateCount+')':''}:</td>
+              <td class="mono" style="text-align:right;font-size:11px;" title="«Оплачено»/«К оплате» — это «Учтено в затратах», т.е. KZT без НДС"><b>Оплачено: ${fmtSum(sumPaid)}</b><br><span class="muted">К оплате: ${fmtSum(sumDue)}</span></td>
+              <td colspan="2"></td>
             </tr></tfoot>` : ""}
             </table></div>
           <div class="helptext" style="padding:10px 16px;">Счёт попадает сюда автоматически при прикреплении к заявке в её карточке. Сумму счёта указывает Администратор, Руководитель или Финансист — по ней считаются итоги «оплачено»/«к оплате» выше.</div>
@@ -3726,6 +3790,54 @@
     if(!confirm("Удалить отель?")) return;
     sb.from("hotels").delete().eq("id", id).then(function(){});
   }
+  // 0.2.17: «Зона» / «Координаты» / «Лицо от Заказчика» в «Отелях» — обычный
+  // текст без рамки поля ввода, если уже заполнено; клик раскрывает
+  // настоящее поле (или группу полей) ввода на его месте — тот же приём,
+  // что и у «Суммы» в «Реестре платежей» (0.2.16). Пока поле пустое,
+  // раскрытым остаётся сразу поле ввода (заполнять есть что). «Название» в
+  // этот приём не входит — оно обязательное и всегда обычный input.
+  function hotelZoneCell(x){
+    var key = x.id+":zone";
+    if(state.hotelEditingKey!==key && x.zone){
+      return h`<button type="button" class="hotel-field-display" data-action="hotel-field-edit" data-key="${key}">Зона ${x.zone}</button>`;
+    }
+    return h`<div data-hotel-edit-group="${key}">
+      <select data-hotel-field="zone" data-id="${x.id}" data-hotel-edit-focus="${key}">
+        <option value="">—</option>
+        ${[1,2,3].map(function(z){return h`<option value="${z}" ${x.zone===z?'selected':''}>Зона ${z}</option>`;}).join("")}
+      </select>
+    </div>`;
+  }
+  function hotelCoordsCell(x){
+    var key = x.id+":coords";
+    var filled = x.lat!=null && x.lat!=="" && x.lng!=null && x.lng!=="";
+    if(state.hotelEditingKey!==key && filled){
+      return h`<button type="button" class="hotel-field-display" data-action="hotel-field-edit" data-key="${key}">${x.lat}, ${x.lng}</button>`;
+    }
+    return h`<div data-hotel-edit-group="${key}" style="display:flex;gap:4px;">
+      <input type="number" step="0.0001" data-hotel-field="lat" data-id="${x.id}" data-hotel-edit-focus="${key}" value="${x.lat!=null?x.lat:''}" placeholder="широта" style="width:96px;">
+      <input type="number" step="0.0001" data-hotel-field="lng" data-id="${x.id}" value="${x.lng!=null?x.lng:''}" placeholder="долгота" style="width:96px;">
+    </div>`;
+  }
+  function hotelContactCell(x){
+    var key = x.id+":contact";
+    var filled = !!(x.client_contact_name || x.client_contact_position || x.client_contact_phone);
+    if(state.hotelEditingKey!==key && filled){
+      return h`<button type="button" class="hotel-field-display" data-action="hotel-field-edit" data-key="${key}">
+          ${x.client_contact_name?escapeHtml(x.client_contact_name):h`<span class="muted">без ФИО</span>`}
+          ${x.client_contact_position?h`<div class="muted" style="font-size:11px;">${escapeHtml(x.client_contact_position)}</div>`:""}
+          ${x.client_contact_phone?h`<div style="font-size:11px;">${escapeHtml(x.client_contact_phone)}</div>`:""}
+        </button>${x.client_contact_phone ? h`<a href="tel:${escapeHtml(x.client_contact_phone.replace(/[^\d+]/g,''))}" style="font-size:11px;">Позвонить</a>` : ""}`;
+    }
+    return h`<div data-hotel-edit-group="${key}">
+      <input type="text" data-hotel-field="client_contact_name" data-id="${x.id}" data-hotel-edit-focus="${key}" value="${escapeHtml(x.client_contact_name||'')}" placeholder="ФИО (необязательно)" style="width:100%;margin-bottom:3px;">
+      <div style="display:flex;gap:4px;">
+        <input type="text" data-hotel-field="client_contact_position" data-id="${x.id}" value="${escapeHtml(x.client_contact_position||'')}" placeholder="должность" style="flex:1;min-width:0;font-size:12px;">
+        <input type="text" data-hotel-field="client_contact_phone" data-id="${x.id}" value="${escapeHtml(x.client_contact_phone||'')}" placeholder="телефон" style="flex:1;min-width:0;font-size:12px;">
+      </div>
+      ${x.client_contact_phone ? h`<a href="tel:${escapeHtml(x.client_contact_phone.replace(/[^\d+]/g,''))}" style="font-size:11px;">Позвонить</a>` : ""}
+    </div>`;
+  }
   function viewHotels(){
     var list = state.hotels.slice().sort(function(a,b){ return a.id-b.id; });
     return h`
@@ -3738,24 +3850,9 @@
                 return h`<tr>
                   <td class="mono muted">№${x.id}</td>
                   <td><input type="text" data-hotel-field="name" data-id="${x.id}" value="${escapeHtml(x.name)}" style="min-width:150px;"></td>
-                  <td>
-                    <select data-hotel-field="zone" data-id="${x.id}">
-                      <option value="">—</option>
-                      ${[1,2,3].map(function(z){return h`<option value="${z}" ${x.zone===z?'selected':''}>Зона ${z}</option>`;}).join("")}
-                    </select>
-                  </td>
-                  <td>
-                    <input type="number" step="0.0001" data-hotel-field="lat" data-id="${x.id}" value="${x.lat!=null?x.lat:''}" placeholder="широта" style="width:96px;">
-                    <input type="number" step="0.0001" data-hotel-field="lng" data-id="${x.id}" value="${x.lng!=null?x.lng:''}" placeholder="долгота" style="width:96px;">
-                  </td>
-                  <td style="min-width:180px;">
-                    <input type="text" data-hotel-field="client_contact_name" data-id="${x.id}" value="${escapeHtml(x.client_contact_name||'')}" placeholder="ФИО (необязательно)" style="width:100%;margin-bottom:3px;">
-                    <div style="display:flex;gap:4px;">
-                      <input type="text" data-hotel-field="client_contact_position" data-id="${x.id}" value="${escapeHtml(x.client_contact_position||'')}" placeholder="должность" style="flex:1;min-width:0;font-size:12px;">
-                      <input type="text" data-hotel-field="client_contact_phone" data-id="${x.id}" value="${escapeHtml(x.client_contact_phone||'')}" placeholder="телефон" style="flex:1;min-width:0;font-size:12px;">
-                    </div>
-                    ${x.client_contact_phone ? h`<a href="tel:${escapeHtml(x.client_contact_phone.replace(/[^\d+]/g,''))}" style="font-size:11px;">Позвонить</a>` : ""}
-                  </td>
+                  <td>${hotelZoneCell(x)}</td>
+                  <td>${hotelCoordsCell(x)}</td>
+                  <td style="min-width:180px;">${hotelContactCell(x)}</td>
                   <td><button class="btn btn-sm ${x.in_service===false?'':'btn-ghost'}" data-action="hotel-toggle-active" data-id="${x.id}" data-val="${x.in_service===false?1:0}">${x.in_service===false?'Включить':'В эксплуатации'}</button></td>
                   <td><button class="btn btn-sm btn-ghost btn-danger" data-action="hotel-delete" data-id="${x.id}">Удалить</button></td>
                 </tr>`;
@@ -3777,6 +3874,9 @@
   }
 
   function viewImport(){
+    return ticketsTabs('import') + viewImportInner();
+  }
+  function viewImportInner(){
     if(state.importResult){
       var c = state.importResult.counts;
       return h`
@@ -4321,7 +4421,22 @@
   // автоматически при каждом импорте из c-lector, см. updatePortfolioFromImport().
 
   /* ============================== ROOT RENDER ============================== */
+  // 0.2.17: render() полностью пересобирает #app через innerHTML — если в
+  // этот момент фокус стоит в раскрытом по клику поле (группа «Отелей»
+  // Зона/Координаты/Лицо от Заказчика, поля «Реестра платежей»), удаление
+  // старого узла из DOM само по себе порождает "чужой" focusout (без
+  // реального ухода пользователя из поля/группы), который без этого флага
+  // ошибочно схлопывал бы поле обратно в разгар заполнения (например, между
+  // «change» по одному полю группы и ещё не введёнными остальными — реальный
+  // сценарий из-за асинхронной перезагрузки после сохранения через
+  // realtime). Пока render() выполняется, такие focusout игнорируются в
+  // обработчиках ниже.
+  var renderInProgress = false;
   function render(){
+    renderInProgress = true;
+    try{ renderInner(); } finally { renderInProgress = false; }
+  }
+  function renderInner(){
     if(!CONFIGURED){
       document.getElementById("app").innerHTML = h`<div class="card configwarn">
         <h2 style="margin-top:0;">Настройка не завершена</h2>
@@ -4391,11 +4506,15 @@
       return;
     }
     if(!navAllowed(state.route.view)){ state.route = {view: firstAllowedView(), id:null}; }
-    var titleMap = {dashboard:"Дашборд", tickets:"Заявки", team:"Команда", parts:"Склад ЗИП", "import":"Импорт из c-lector", registry:"Финансы · Реестр платежей", cashexpenses:"Финансы · Наличные расходы", map:"Карта", crews:"Бригады", hotels:"Отели", systemdefects:"Системный брак"};
+    var titleMap = {dashboard:"Дашборд", tickets:"Заявки", team:"Команда", parts:"Склад ЗИП", "import":"Заявки · Импорт из c-lector", registry:"Финансы · Реестр платежей", cashexpenses:"Финансы · Наличные расходы", map:"Карта", crews:"Бригады", hotels:"Отели", systemdefects:"Системный брак"};
     var body = state.route.view==="tickets"?viewTickets(): state.route.view==="team"?viewTeam(): state.route.view==="parts"?viewParts(): state.route.view==="import"?viewImport(): state.route.view==="registry"?viewRegistry(): state.route.view==="cashexpenses"?viewCashExpenses(): state.route.view==="map"?viewMap(): state.route.view==="crews"?viewCrews(): state.route.view==="hotels"?viewHotels(): state.route.view==="systemdefects"?viewSystemDefects(): viewDashboard();
 
+    // 0.2.17: «Импорт из c-lector» больше не отдельный пункт меню — он почти
+    // всё подтягивает автоматически, отдельного раздела для него не нужно.
+    // Теперь это вкладка ВНУТРИ «Заявок» (см. ticketsTabs), тем же приёмом,
+    // что и «Финансы» → «Реестр платежей»/«Наличные расходы» ниже.
     var navItems = [
-      ["dashboard","Дашборд"], ["tickets","Заявки"], ["import","Импорт из c-lector"], ["map","Карта"],
+      ["dashboard","Дашборд"], ["tickets","Заявки",["import"]], ["map","Карта"],
       ["systemdefects","Системный брак"],
       ["team","Команда"], ["crews","Бригады"], ["parts","Склад ЗИП"], ["registry","Финансы",["cashexpenses"]], ["hotels","Отели"]
     ].filter(function(x){ return navAllowed(x[0]); });
@@ -4561,7 +4680,6 @@
       if(action==="invoice-delete") return deleteInvoice(id, actionEl.getAttribute("data-path"));
       if(action==="invoice-paid-toggle") return setInvoicePaid(id, actionEl.getAttribute("data-val")==="1");
       if(action==="invoice-submitted-toggle") return setInvoiceSubmitted(id, actionEl.getAttribute("data-val")==="1");
-      if(action==="invoice-related-set") { e.preventDefault(); return setInvoiceRelatedTickets(id); }
       if(action==="registry-amount-edit"){
         if(!canEditRegistry()) return;
         state.registryEditingAmountId = id;
@@ -4570,6 +4688,23 @@
         // кликать по нему ещё раз, чтобы начать вводить цифры.
         var newAmountInput = document.querySelector('.registry-amount-input[data-id="'+id+'"]');
         if(newAmountInput){ newAmountInput.focus(); newAmountInput.select(); }
+        return;
+      }
+      if(action==="registry-field-edit"){
+        if(!canEditRegistry()) return;
+        var registryKey = actionEl.getAttribute("data-key");
+        state.registryEditingFieldKey = registryKey;
+        render();
+        var newRegistryField = document.querySelector('[data-registry-edit-focus="'+registryKey+'"]');
+        if(newRegistryField){ newRegistryField.focus(); }
+        return;
+      }
+      if(action==="hotel-field-edit"){
+        var hotelKey = actionEl.getAttribute("data-key");
+        state.hotelEditingKey = hotelKey;
+        render();
+        var newHotelField = document.querySelector('[data-hotel-edit-focus="'+hotelKey+'"]');
+        if(newHotelField){ newHotelField.focus(); if(newHotelField.select) newHotelField.select(); }
         return;
       }
       if(action==="telegram-chatid-help"){
@@ -4790,6 +4925,53 @@
       state.registryEditingAmountId = null;
       render();
     }
+  });
+  // 0.2.17: «Валюта»/«НДС»/«Налог» в «Реестре платежей» — уход фокуса без
+  // изменения значения (setInvoiceCurrency/Vat/TaxBasis уже сворачивают поле
+  // сами при реальном изменении, см. выше) тоже должен свернуть поле обратно.
+  document.addEventListener("focusout", function(e){
+    if(renderInProgress) return;
+    if(!state.registryEditingFieldKey) return;
+    if(!e.target.matches('[data-registry-edit-focus="'+state.registryEditingFieldKey+'"]')) return;
+    state.registryEditingFieldKey = null;
+    render();
+  });
+
+  // 0.2.17: то же самое для групп полей «Отелей» (Зона/Координаты/Лицо от
+  // Заказчика) — но тут группа может состоять из НЕСКОЛЬКИХ полей ввода
+  // (например lat+lng, или ФИО+должность+телефон), поэтому просто "потеря
+  // фокуса элементом" недостаточна: перевод фокуса клавишей Tab с одного
+  // поля группы на соседнее — это ещё не "ушли из группы". Проверяем
+  // e.relatedTarget (куда фокус переходит) относительно общего
+  // data-hotel-edit-group — сворачиваем обратно, только если фокус ушёл ЗА
+  // пределы этой группы (или вовсе никуда, например клик по не-фокусируемому
+  // месту страницы).
+  document.addEventListener("focusout", function(e){
+    // Побочный focusout от собственной пересборки DOM — не считается уходом
+    // пользователя из поля (см. комментарий у render()/renderInProgress).
+    if(renderInProgress) return;
+    if(!state.hotelEditingKey) return;
+    var group = e.target.closest && e.target.closest('[data-hotel-edit-group="'+state.hotelEditingKey+'"]');
+    if(!group) return;
+    var related = e.relatedTarget;
+    if(related && group.contains(related)) return;
+    state.hotelEditingKey = null;
+    render();
+  });
+  // Группа «Отелей» может быть УЖЕ пустой (значит, изначально показана как
+  // обычные поля ввода, без единого клика по display — см. hotelZoneCell/
+  // hotelCoordsCell/hotelContactCell). Если пользователь начинает вписывать
+  // значение прямо в такую пустую группу (первое поле заполнилось раньше
+  // остальных — например, вписали ФИО, а должность/телефон ещё пустые),
+  // ререндер после "change" по одному полю не должен схлопнуть всю группу,
+  // пока не заполнены остальные — иначе оставшиеся поля исчезнут из-под
+  // курсора. Поэтому как только фокус попадает в любое поле группы —
+  // фиксируем это как "сейчас редактируется", не дожидаясь клика по display
+  // (без render() здесь — просто запоминаем, чтобы следующий ререндер, если
+  // он случится, не свернул группу раньше времени).
+  document.addEventListener("focusin", function(e){
+    var group = e.target.closest && e.target.closest("[data-hotel-edit-group]");
+    if(group) state.hotelEditingKey = group.getAttribute("data-hotel-edit-group");
   });
 
   // 0.2.16: разряды в поле "Сумма" пробелом по мере ввода (без запятой в
