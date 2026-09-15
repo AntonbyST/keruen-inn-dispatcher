@@ -190,6 +190,8 @@
   .registry-table td input[type="number"],
   .registry-table td select{ width:100%; box-sizing:border-box; padding:4px 4px; font-size:12px; }
   .registry-file-btn{ display:inline-block; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; vertical-align:middle; }
+  .registry-related-line{ font-size:10.5px; line-height:1.4; margin-top:2px; white-space:normal; }
+  .registry-related-line a{ white-space:nowrap; }
   table{ width:100%; border-collapse:collapse; font-size:13px; }
   th{ text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-faint); font-weight:600; padding:9px 12px; border-bottom:1px solid var(--line); white-space:nowrap; }
   td{ padding:11px 12px; border-bottom:1px solid var(--line); vertical-align:middle; }
@@ -1218,6 +1220,44 @@
       if(iv) addNote(iv.ticket_id, "Указан способ оплаты счёта «"+iv.file_name+"»: "+(TAX_BASIS_LABEL[taxBasis]||"—")+".");
     });
   }
+  // 0.2.13.1 (доп.): один и тот же счёт иногда прикладывают отдельно к
+  // нескольким заявкам сразу (например, счёт поставщика покрывает работы по
+  // 2-3 заявкам) — каждое такое прикрепление в базе остаётся своей строкой
+  // invoices (см. uploadInvoice: путь файла в сторидже привязан к своей
+  // заявке), поэтому в «Реестре платежей» это выглядело как несколько
+  // независимых счетов. related_ticket_ids — просто пометка "эта же сумма
+  // также относится к заявкам №…", чтобы бухгалтер не считал её отдельно по
+  // каждой строке — сама сумма/итоги при этом не пересчитываются, это только
+  // видимая подсказка.
+  function invoiceRelatedTickets(iv){
+    return ((iv && iv.related_ticket_ids) || []).map(function(tid){
+      return state.tickets.find(function(x){ return x.id===tid; });
+    }).filter(Boolean);
+  }
+  function setInvoiceRelatedTickets(invoiceId){
+    if(!canEditRegistry()){ alert("Указывать, в каких ещё заявках участвует счёт, может только Администратор, Руководитель или Финансист."); return; }
+    var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
+    if(!iv) return;
+    var current = invoiceRelatedTickets(iv).map(function(t){ return t.external_ref || t.id; }).join(", ");
+    var raw = prompt("Номера заявок c-lector, в которых этот же счёт «"+iv.file_name+"» также учитывается (через запятую). Оставьте пустым, чтобы убрать пометку:", current);
+    if(raw==null) return;
+    var refs = raw.split(/[,;\s]+/).map(function(s){ return s.trim(); }).filter(Boolean);
+    var ids = [], notFound = [];
+    refs.forEach(function(ref){
+      var t = findTicketByRef(ref);
+      if(!t) { notFound.push(ref); return; }
+      if(t.id===iv.ticket_id) return; // сама заявка, к которой прикреплён файл — не "также", а основная
+      if(ids.indexOf(t.id)===-1) ids.push(t.id);
+    });
+    if(notFound.length){ alert("Не найдены заявки с номером c-lector: "+notFound.join(", ")+". Проверьте номера и попробуйте снова."); return; }
+    var relatedTicketIds = ids.length ? ids : null;
+    iv.related_ticket_ids = relatedTicketIds;
+    render();
+    sb.from("invoices").update({related_ticket_ids: relatedTicketIds}).eq("id", invoiceId).then(function(){
+      var labels = ids.map(function(tid){ var t=state.tickets.find(function(x){return x.id===tid;}); return t&&t.external_ref?("№"+t.external_ref):""; }).filter(Boolean).join(", ");
+      addNote(iv.ticket_id, ids.length ? ("Отмечено: счёт «"+iv.file_name+"» также относится к заявкам "+labels+".") : ("Снята пометка «также относится к заявкам» у счёта «"+iv.file_name+"»."));
+    });
+  }
 
   // Фото по заявке — рабочий инструмент (до/после, подтверждение выполненных
   // работ), отдельно от c-lector и от счетов. Храним в собственном бакете
@@ -1285,7 +1325,10 @@
     return f(monday)+"–"+f(sunday)+"."+sunday.getFullYear();
   }
   // Выгрузка реестра платежей в Excel — те же колонки, что и на экране
-  // (REGISTRY_COLUMN_LABELS): простой список прикреплённых счетов.
+  // (REGISTRY_COLUMN_LABELS), плюс отдельная колонка "Также в заявках"
+  // (0.2.13.1, доп.) — на экране это подпись под именем файла, а не отдельная
+  // колонка (не хватало бы места), но в выгрузке колонка не мешает.
+  var REGISTRY_EXPORT_COLUMN_LABELS = REGISTRY_COLUMN_LABELS.concat(["Также в заявках"]);
   function exportRegistryExcel(){
     if(typeof XLSX==="undefined" || !XLSX.utils){ alert("Модуль Excel не загрузился (возможно, заблокирован интернет/VPN) — обновите страницу и попробуйте снова."); return; }
     var list = (state.invoices||[]).filter(function(iv){ return iv.in_registry; });
@@ -1293,6 +1336,7 @@
       var tk = state.tickets.find(function(x){return x.id===iv.ticket_id;});
       var hotel = tk ? hotelById(tk.hotel_id) : null;
       var accounted = invoiceCostAccounted(iv);
+      var related = invoiceRelatedTickets(iv).map(function(t){ return t.external_ref || t.id; }).join(", ");
       return [
         i+1,
         tk && tk.external_ref ? tk.external_ref : "",
@@ -1303,12 +1347,13 @@
         iv.vat_included===true ? "С НДС" : (iv.vat_included===false ? "Без НДС" : ""),
         iv.tax_basis ? (TAX_BASIS_LABEL[iv.tax_basis]||iv.tax_basis) : "",
         accounted!=null ? accounted : "",
-        iv.paid ? "Да" : "Нет"
+        iv.paid ? "Да" : "Нет",
+        related
       ];
     });
-    var aoa = [REGISTRY_COLUMN_LABELS].concat(rows);
+    var aoa = [REGISTRY_EXPORT_COLUMN_LABELS].concat(rows);
     var ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws["!cols"] = REGISTRY_COLUMN_LABELS.map(function(){ return {wch:20}; });
+    ws["!cols"] = REGISTRY_EXPORT_COLUMN_LABELS.map(function(){ return {wch:20}; });
     var wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Реестр платежей");
     XLSX.writeFile(wb, "Реестр_платежей_Keruen_Inn_"+new Date().toISOString().slice(0,10)+".xlsx");
@@ -2787,9 +2832,10 @@
           ${!owner ? h`<div class="helptext" style="margin-bottom:10px;">Роль и удаление сотрудников редактирует только руководитель службы.</div>` : ""}
           ${state.profiles.length===0 ? h`<div class="empty-state"><b>Пока никто не входил</b>Поделитесь ссылкой на это приложение с коллегами.</div>` : h`
           <div class="table-wrap"><table>
-            <thead><tr><th>Имя</th><th>Почта</th><th>Роль</th><th>Статус</th>${owner?h`<th></th>`:''}</tr></thead>
+            <thead><tr><th>Имя</th><th>Почта</th><th>Роль</th><th>Статус</th><th>Telegram</th>${owner?h`<th></th>`:''}</tr></thead>
             <tbody>${state.profiles.map(function(m){
               var isSelf = state.me && m.id===state.me.id;
+              var chatIdFilled = !!(m.telegram_chat_id && String(m.telegram_chat_id).trim());
               return h`<tr>
                 <td class="ttl">${escapeHtml(m.name||"—")}</td>
                 <td class="muted">${escapeHtml(m.email)}</td>
@@ -2801,6 +2847,15 @@
                 <td>${owner
                   ? h`<button class="btn btn-sm ${m.active===false?'':'btn-ghost'}" data-action="profile-toggle-active" data-id="${m.id}" data-val="${m.active===false?1:0}">${m.active===false?'Включить':'Активен'}</button>`
                   : h`<span class="pill ${m.active===false?'pill-neutral':'pill-ok'}">${m.active===false?'Отключён':'Активен'}</span>`}</td>
+                <td>${owner ? h`
+                  <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                    <input type="text" data-profile-telegram-chatid="${m.id}" value="${escapeHtml(m.telegram_chat_id||'')}" placeholder="chat_id" style="width:100px;" title="chat_id этого человека в Telegram — см. подсказку «Как узнать chat_id?» ниже">
+                    <label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--ink-soft);margin:0;" title="${chatIdFilled?'Присылать этому человеку сообщение о каждой новой заявке':'Сначала укажите chat_id — без него уведомления отправлять некуда'}">
+                      <input type="checkbox" data-profile-telegram-notify="${m.id}" ${m.telegram_notify_tickets?'checked':''} ${chatIdFilled?'':'disabled'}> увед.
+                    </label>
+                  </div>`
+                  : (m.telegram_notify_tickets && chatIdFilled ? h`<span class="pill pill-ok">включены</span>` : h`<span class="muted">—</span>`)}
+                </td>
                 ${owner ? h`<td style="white-space:nowrap;">
                   <button class="btn btn-sm btn-ghost" data-action="edit-permissions" data-id="${m.id}" title="Разделы и права, которые ДОБАВЛЯЮТСЯ этому человеку сверх того, что уже даёт роль">Права</button>
                   ${isSelf?'':h`<button class="btn btn-sm btn-ghost btn-danger" data-action="profile-delete" data-id="${m.id}" data-label="${escapeHtml(m.name||m.email)}">Удалить</button>`}
@@ -2809,6 +2864,7 @@
             }).join("")}</tbody>
           </table></div>`}
           <div class="helptext" style="margin-top:12px;">Новые коллеги появляются здесь автоматически после первого входа по ссылке — сразу назначьте им роль.</div>
+          ${owner ? h`<div class="helptext" style="margin-top:6px;"><a href="#" data-action="telegram-chatid-help">Как узнать chat_id для уведомлений в Telegram?</a></div>` : ""}
         </div>
         <div class="card card-pad">
           <div class="section-title">Пригласить коллегу</div>
@@ -2935,7 +2991,7 @@
         <div class="card">
           <div class="table-wrap"><table class="registry-table">
             <colgroup>
-              <col style="width:30px"><col style="width:64px"><col style="width:104px"><col>
+              <col style="width:30px"><col style="width:64px"><col style="width:104px"><col style="width:170px">
               <col style="width:76px"><col style="width:56px"><col style="width:66px"><col style="width:96px">
               <col style="width:92px"><col style="width:44px">
             </colgroup>
@@ -2953,7 +3009,20 @@
                   <td class="mono muted">${i+1}</td>
                   <td class="mono">${tk ? h`<a href="#" data-open-ticket="${tk.id}" title="Открыть заявку">${tk.external_ref?escapeHtml(tk.external_ref):'открыть'}</a>` : '—'}</td>
                   <td style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${hotel?escapeHtml(hotel.name):''}">${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
-                  <td><button class="btn btn-sm registry-file-btn" data-action="invoice-open" data-path="${escapeHtml(iv.file_path)}" title="${escapeHtml(iv.file_name)}">${escapeHtml(iv.file_name)}</button></td>
+                  <td>
+                    <button class="btn btn-sm registry-file-btn" data-action="invoice-open" data-path="${escapeHtml(iv.file_path)}" title="${escapeHtml(iv.file_name)}">${escapeHtml(iv.file_name)}</button>
+                    ${(function(){
+                      var rel = invoiceRelatedTickets(iv);
+                      // 0.2.13.1 (доп.): один и тот же счёт иногда прикреплён отдельно
+                      // к нескольким заявкам (см. комментарий у setInvoiceRelatedTickets) —
+                      // показываем это под именем файла, чтобы сумма не считалась как
+                      // независимая по каждой такой строке.
+                      if(rel.length){
+                        return h`<div class="muted registry-related-line" title="Этот же счёт также прикреплён к этим заявкам — не считайте его сумму отдельно по каждой">Также: ${rel.map(function(t){ return h`<a href="#" data-open-ticket="${t.id}">№${escapeHtml(t.external_ref||t.id)}</a>`; }).join(", ")}${editableRegistry?h` · <a href="#" data-action="invoice-related-set" data-id="${iv.id}">изменить</a>`:""}</div>`;
+                      }
+                      return editableRegistry ? h`<div class="muted registry-related-line"><a href="#" data-action="invoice-related-set" data-id="${iv.id}">+ также в заявках</a></div>` : "";
+                    })()}
+                  </td>
                   <td><input type="number" step="0.01" min="0" data-invoice-amount data-id="${iv.id}" value="${iv.amount!=null?iv.amount:''}" placeholder="—" ${editableRegistry?'':'disabled'} title="${editableRegistry?'Указать сумму счёта':'Редактировать может только Администратор, Руководитель или Финансист'}"></td>
                   <td>
                     <select data-invoice-currency data-id="${iv.id}" ${editableRegistry?'':'disabled'} title="${editableRegistry?'Валюта оплаты счёта (влияет на ставку НДС)':'Редактировать может только Администратор, Руководитель или Финансист'}">
@@ -4302,6 +4371,18 @@
       if(action==="invoice-open") return openInvoiceFile(actionEl.getAttribute("data-path"));
       if(action==="invoice-delete") return deleteInvoice(id, actionEl.getAttribute("data-path"));
       if(action==="invoice-paid-toggle") return setInvoicePaid(id, actionEl.getAttribute("data-val")==="1");
+      if(action==="invoice-related-set") { e.preventDefault(); return setInvoiceRelatedTickets(id); }
+      if(action==="telegram-chatid-help"){
+        e.preventDefault();
+        alert(
+          "Как узнать chat_id сотрудника для Telegram-уведомлений:\n\n"+
+          "1. Попросите его написать вашему боту в Telegram любое сообщение (например «привет»).\n"+
+          "2. Откройте в браузере: https://api.telegram.org/bot<ТОКЕН_БОТА>/getUpdates (вместо <ТОКЕН_БОТА> — токен, который вы получили от @BotFather).\n"+
+          "3. В ответе найдите последнее сообщение от этого человека — в нём есть \"chat\":{\"id\": ЧИСЛО, ...} — это и есть chat_id.\n"+
+          "4. Впишите это число в поле «chat_id» напротив его имени и поставьте галочку «увед.»."
+        );
+        return;
+      }
       if(action==="registry-export") return exportRegistryExcel();
       if(action==="tickets-export") return exportTicketsExcel();
       if(action==="toggle-status-filter"){
@@ -4441,6 +4522,21 @@
     if(e.target.matches("[data-crew-rename]")) renameCrew(e.target.getAttribute("data-crew-rename"), e.target.value);
     if(e.target.matches("[data-part-qty]")) updatePartQty(e.target.getAttribute("data-part-qty"), e.target.value);
     if(e.target.matches("[data-profile-role]")){ if(!isOwner()) return; updateProfile(e.target.getAttribute("data-profile-role"), {role:e.target.value}); }
+    if(e.target.matches("[data-profile-telegram-chatid]")){
+      if(!isOwner()) return;
+      var tgId = e.target.getAttribute("data-profile-telegram-chatid");
+      var tgVal = e.target.value.trim()||null;
+      var patch = {telegram_chat_id: tgVal};
+      // без chat_id галочка "увед." всё равно ничего не отправит — снимаем
+      // её сразу, чтобы состояние в базе не выглядело противоречиво.
+      if(!tgVal){
+        var mProf = state.profiles.find(function(x){return x.id===tgId;});
+        if(mProf && mProf.telegram_notify_tickets) patch.telegram_notify_tickets = false;
+      }
+      updateProfile(tgId, patch);
+      return;
+    }
+    if(e.target.matches("[data-profile-telegram-notify]")){ if(!isOwner()) return; updateProfile(e.target.getAttribute("data-profile-telegram-notify"), {telegram_notify_tickets: e.target.checked}); return; }
     // Кнопки "прикрепить" прямо в строке чек-листа "Ход работ" (milestoneAttachControl) —
     // в отличие от прежних форм с отдельной кнопкой "Отправить", загрузка начинается
     // сразу при выборе файла(ов), можно выбрать несколько штук за один раз.
