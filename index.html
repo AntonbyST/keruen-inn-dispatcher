@@ -544,7 +544,9 @@
   // фильтруются полями "с"/"по" в фильтрах — отдельная колонка дублировала их).
   // Взамен добавлены "Валюта", "НДС", "Налог" и расчётная "Учтено в затратах" —
   // см. CURRENCY_VAT_RATE/TAX_BASIS_RATE/invoiceCostAccounted() ниже.
-  var REGISTRY_COLUMN_LABELS = ["№","№ заявки (c-lector)","Отель","Файл","Сумма","Валюта","НДС","Налог","Учтено в затратах","Оплачено"];
+  // 0.2.15: добавлена "Подано в оплату" — промежуточный статус между
+  // "счёт прикреплён" и "оплачено" (см. setInvoiceSubmitted).
+  var REGISTRY_COLUMN_LABELS = ["№","№ заявки (c-lector)","Отель","Файл","Сумма","Валюта","НДС","Налог","Учтено в затратах","Подано в оплату","Оплачено"];
 
   // Ставка НДС по валюте платежа (0.2.13.1, по просьбе Антона): KZT — 16%,
   // RUB/BYN — 20%. Нужна только чтобы снять НДС с суммы, если она указана
@@ -554,18 +556,24 @@
   // зависимости от того, как оплачен счёт: обычный счёт от плательщика НДС —
   // 0%, подрядчик на упрощённой системе налогообложения — 20%, наличный
   // расчёт — 30% (все три значения — по словам Антона).
+  // 0.2.15: "Обычный счёт" (0%) больше не отдельный пункт списка — если
+  // доп. налог не указан (прочерк), он и означает 0%, как раньше означал
+  // выбор "Обычный счёт". "regular" в TAX_BASIS_RATE оставлен только ради
+  // старых счетов, у которых это значение уже сохранено в базе.
   var TAX_BASIS_LABEL = { regular: "Обычный счёт", simplified: "Упрощёнка у подрядчика (+20%)", cash: "Наличный расчёт (+30%)" };
   var TAX_BASIS_RATE = { regular: 0, simplified: 0.20, cash: 0.30 };
   // "Учтено в затратах" = сумма без НДС (снятого по ставке валюты, если
   // "Сумма" указана с НДС) × (1 + доп. налог по способу оплаты). Возвращает
-  // null, пока не заполнены все нужные для расчёта поля — колонка в этом
-  // случае показывает "—", как и незаполненная "Сумма".
+  // null, пока не заполнены сумма/валюта/отметка НДС — колонка в этом случае
+  // показывает "—", как и незаполненная "Сумма". Начиная с 0.2.15 пустой
+  // "Налог" (прочерк) — это ЗНАЧЕНИЕ "без доп. налога" (0%), а не признак
+  // незаполненности: при "с НДС" он теперь ставится автоматически.
   function invoiceCostAccounted(iv){
-    if(iv.amount==null || iv.vat_included==null || !iv.tax_basis) return null;
+    if(iv.amount==null || iv.vat_included==null) return null;
     var vatRate = CURRENCY_VAT_RATE[iv.currency];
     if(vatRate==null) return null; // валюта не выбрана или не из известных (KZT/RUB/BYN)
-    var taxRate = TAX_BASIS_RATE[iv.tax_basis];
-    if(taxRate==null) return null;
+    var taxRate = iv.tax_basis ? TAX_BASIS_RATE[iv.tax_basis] : 0;
+    if(taxRate==null) return null; // на случай неизвестного значения в базе
     var noVat = iv.vat_included ? (iv.amount / (1 + vatRate)) : iv.amount;
     return noVat * (1 + taxRate);
   }
@@ -1180,6 +1188,19 @@
       }
     });
   }
+  // 0.2.15: промежуточная отметка между "прикреплён" и "оплачено" — счёт
+  // уже передан в бухгалтерию/банк на оплату, но деньги ещё не ушли.
+  // Никак не влияет на расчёты (Учтено в затратах/Оплачено/К оплате) —
+  // это только видимый статус для отслеживания движения счетов.
+  function setInvoiceSubmitted(invoiceId, val){
+    if(!canEditRegistry()){ alert("Отмечать «подано в оплату» может только Администратор, Руководитель или Финансист."); return; }
+    var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
+    if(iv) iv.submitted_for_payment = val;
+    render();
+    sb.from("invoices").update({submitted_for_payment:val}).eq("id", invoiceId).then(function(){
+      if(iv) addNote(iv.ticket_id, val ? "Счёт «"+iv.file_name+"» подан в оплату." : "Отметка «подано в оплату» снята со счёта «"+iv.file_name+"».");
+    });
+  }
   // Валюта / НДС / способ оплаты счёта (0.2.13.1) — те же три поля, что нужны
   // invoiceCostAccounted() для расчёта "Учтено в затратах" в «Реестре
   // платежей»; тот же принцип локального патча + сохранения в БД, что и у
@@ -1198,26 +1219,30 @@
     if(!canEditRegistry()){ alert("Указывать, включён ли НДС в сумму, может только Администратор, Руководитель или Финансист."); return; }
     var vatIncluded = val==="with" ? true : (val==="without" ? false : null);
     var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
-    // Если сумма "с НДС", вариант "Обычный счёт" в "Налоге" больше не
-    // предлагается (0.2.13.1) — если он был выбран раньше, сбрасываем его,
-    // чтобы не остаться с недопустимым сочетанием.
+    // 0.2.15 (по просьбе Антона): если сумма "с НДС", доп. налог в "Налоге"
+    // теперь ставится автоматически прочерком (0%) и поле недоступно для
+    // выбора — "Упрощёнка"/"Наличный" имеют смысл только для счетов "без
+    // НДС". Раньше сбрасывали только "regular", теперь — любое значение.
     var resetTaxBasis = false;
     var update = {vat_included:vatIncluded};
-    if(vatIncluded===true && iv && iv.tax_basis==="regular"){ resetTaxBasis = true; update.tax_basis = null; }
+    if(vatIncluded===true && iv && iv.tax_basis){ resetTaxBasis = true; update.tax_basis = null; }
     if(iv){ iv.vat_included = vatIncluded; if(resetTaxBasis) iv.tax_basis = null; }
     render();
     sb.from("invoices").update(update).eq("id", invoiceId).then(function(){
-      if(iv) addNote(iv.ticket_id, "Указано по счёту «"+iv.file_name+"»: сумма "+(vatIncluded===true?"с НДС":(vatIncluded===false?"без НДС":"—"))+(resetTaxBasis?" (способ оплаты сброшен — «Обычный счёт» недоступен при «с НДС»)":"")+".");
+      if(iv) addNote(iv.ticket_id, "Указано по счёту «"+iv.file_name+"»: сумма "+(vatIncluded===true?"с НДС":(vatIncluded===false?"без НДС":"—"))+(resetTaxBasis?" (доп. налог сброшен — при «с НДС» ставится автоматически прочерком)":"")+".");
     });
   }
   function setInvoiceTaxBasis(invoiceId, val){
     if(!canEditRegistry()){ alert("Указывать способ оплаты (для расчёта затрат) может только Администратор, Руководитель или Финансист."); return; }
-    var taxBasis = val || null;
     var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
+    // 0.2.15: при "с НДС" доп. налог не выбирается вручную (см.
+    // setInvoiceVatIncluded) — эта проверка на случай прямого вызова.
+    if(iv && iv.vat_included===true){ alert("При «с НДС» доп. налог ставится автоматически (прочерк) и недоступен для ручного выбора."); return; }
+    var taxBasis = val || null;
     if(iv) iv.tax_basis = taxBasis;
     render();
     sb.from("invoices").update({tax_basis:taxBasis}).eq("id", invoiceId).then(function(){
-      if(iv) addNote(iv.ticket_id, "Указан способ оплаты счёта «"+iv.file_name+"»: "+(TAX_BASIS_LABEL[taxBasis]||"—")+".");
+      if(iv) addNote(iv.ticket_id, "Указан способ оплаты счёта «"+iv.file_name+"»: "+(taxBasis?(TAX_BASIS_LABEL[taxBasis]||taxBasis):"—")+".");
     });
   }
   // 0.2.13.1 (доп.): один и тот же счёт иногда прикладывают отдельно к
@@ -1347,6 +1372,7 @@
         iv.vat_included===true ? "С НДС" : (iv.vat_included===false ? "Без НДС" : ""),
         iv.tax_basis ? (TAX_BASIS_LABEL[iv.tax_basis]||iv.tax_basis) : "",
         accounted!=null ? accounted : "",
+        iv.submitted_for_payment ? "Да" : "Нет",
         iv.paid ? "Да" : "Нет",
         related
       ];
@@ -2849,8 +2875,8 @@
                   : h`<span class="pill ${m.active===false?'pill-neutral':'pill-ok'}">${m.active===false?'Отключён':'Активен'}</span>`}</td>
                 <td>${owner ? h`
                   <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-                    <input type="text" data-profile-telegram-chatid="${m.id}" value="${escapeHtml(m.telegram_chat_id||'')}" placeholder="chat_id" style="width:100px;" title="chat_id этого человека в Telegram — см. подсказку «Как узнать chat_id?» ниже">
-                    <label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--ink-soft);margin:0;" title="${chatIdFilled?'Присылать этому человеку сообщение о каждой новой заявке':'Сначала укажите chat_id — без него уведомления отправлять некуда'}">
+                    <input type="text" data-profile-telegram-chatid="${m.id}" value="${escapeHtml(m.telegram_chat_id||'')}" placeholder="Telegram ID" style="width:100px;" title="ID этого человека в Telegram — см. подсказку «Как узнать Telegram ID?» ниже">
+                    <label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--ink-soft);margin:0;" title="${chatIdFilled?'Присылать этому человеку сообщение о каждой новой заявке':'Сначала укажите Telegram ID — без него уведомления отправлять некуда'}">
                       <input type="checkbox" data-profile-telegram-notify="${m.id}" ${m.telegram_notify_tickets?'checked':''} ${chatIdFilled?'':'disabled'}> увед.
                     </label>
                   </div>`
@@ -2864,7 +2890,7 @@
             }).join("")}</tbody>
           </table></div>`}
           <div class="helptext" style="margin-top:12px;">Новые коллеги появляются здесь автоматически после первого входа по ссылке — сразу назначьте им роль.</div>
-          ${owner ? h`<div class="helptext" style="margin-top:6px;"><a href="#" data-action="telegram-chatid-help">Как узнать chat_id для уведомлений в Telegram?</a></div>` : ""}
+          ${owner ? h`<div class="helptext" style="margin-top:6px;"><a href="#" data-action="telegram-chatid-help">Как узнать Telegram ID для уведомлений?</a></div>` : ""}
         </div>
         <div class="card card-pad">
           <div class="section-title">Пригласить коллегу</div>
@@ -2909,7 +2935,7 @@
   // выгрузки, т.к. заполнялись вручную и в этом приложении не нужны.
   function viewRegistry(){
     var all = (state.invoices||[]).filter(function(iv){ return iv.in_registry; });
-    var rf = state.registryFilters || {q:"", hotel:"", dateFrom:"", dateTo:"", showPaid:false};
+    var rf = state.registryFilters || {q:"", hotel:"", dateFrom:"", dateTo:"", showPaid:false, currency:""};
     var q = normalizeForMatch(rf.q||"");
     // Поиск/фильтр действуют только на то, что показано на экране — выгрузка в
     // Excel всегда забирает ВЕСЬ реестр целиком, чтобы случайно не забытый
@@ -2918,6 +2944,7 @@
       var tk = state.tickets.find(function(x){return x.id===iv.ticket_id;});
       var hotel = tk ? hotelById(tk.hotel_id) : null;
       if(rf.hotel && (!hotel || String(hotel.id)!==rf.hotel)) return false;
+      if(rf.currency && iv.currency!==rf.currency) return false;
       if(rf.dateFrom && (!iv.added_to_registry_at || iv.added_to_registry_at < rf.dateFrom)) return false;
       if(rf.dateTo && (!iv.added_to_registry_at || iv.added_to_registry_at > (rf.dateTo+"T23:59:59"))) return false;
       if(q){
@@ -2931,7 +2958,7 @@
     // оплаченные" возвращает их, как showClosed у "Заявок".
     var list = rf.showPaid ? preShowPaid : preShowPaid.filter(function(iv){ return !iv.paid; });
     var hiddenPaidCount = preShowPaid.length - list.length;
-    var filtersActive = !!(rf.q||rf.hotel||rf.dateFrom||rf.dateTo);
+    var filtersActive = !!(rf.q||rf.hotel||rf.dateFrom||rf.dateTo||rf.currency);
     // Сортировка по клику на заголовок — как в «Заявках». На выгрузку в Excel не
     // влияет — она всегда идёт по всему реестру целиком (см. комментарий выше).
     var rsort = rf.sort || {};
@@ -2956,8 +2983,8 @@
       return h`<th data-action="sort-registry" data-field="${field}" style="cursor:pointer;user-select:none;" title="Сортировать">${label}${active?(rSortDir==="asc"?" ▲":" ▼"):""}</th>`;
     }
     // поле сортировки для каждой колонки — null там, где сортировка не имеет
-    // смысла (порядковый номер, сам файл, суммы/селекты, галочка "оплачено")
-    var REGISTRY_SORT_FIELDS = [null,"ref","hotel",null,null,null,null,null,null,null];
+    // смысла (порядковый номер, сам файл, суммы/селекты, галочки "подано"/"оплачено")
+    var REGISTRY_SORT_FIELDS = [null,"ref","hotel",null,null,null,null,null,null,null,null];
     var editableRegistry = canEditRegistry();
     // Итоги "оплачено"/"к оплате" (0.2.3, п.2; с 0.2.13.1 — по просьбе Антона
     // считаются по "Учтено в затратах", а не по сырой "Сумма", т.к. это и есть
@@ -2981,6 +3008,7 @@
         <div class="filters">
           <input type="text" data-registry-filter="q" value="${escapeHtml(rf.q||"")}" placeholder="Поиск: № заявки, отель, файл…" style="min-width:220px;">
           <select data-registry-filter="hotel"><option value="">Все отели</option>${state.hotels.filter(function(x){return x.in_service;}).map(function(x){return h`<option value="${x.id}" ${rf.hotel===String(x.id)?'selected':''}>№${x.id} ${x.name}</option>`;}).join("")}</select>
+          <select data-registry-filter="currency"><option value="">Все валюты</option><option value="KZT" ${rf.currency==='KZT'?'selected':''}>KZT</option><option value="RUB" ${rf.currency==='RUB'?'selected':''}>RUB</option><option value="BYN" ${rf.currency==='BYN'?'selected':''}>BYN</option></select>
           <label style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ink-soft);margin:0;">с <input type="date" data-registry-filter="dateFrom" value="${rf.dateFrom||''}" style="width:auto;"></label>
           <label style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ink-soft);margin:0;">по <input type="date" data-registry-filter="dateTo" value="${rf.dateTo||''}" style="width:auto;"></label>
           <div class="chip-toggle"><label><input type="checkbox" data-registry-filter-checkbox="showPaid" ${rf.showPaid?'checked':''}> Показывать оплаченные</label></div>
@@ -2993,7 +3021,7 @@
             <colgroup>
               <col style="width:30px"><col style="width:64px"><col style="width:104px"><col style="width:170px">
               <col style="width:76px"><col style="width:56px"><col style="width:66px"><col style="width:96px">
-              <col style="width:92px"><col style="width:44px">
+              <col style="width:92px"><col style="width:78px"><col style="width:44px">
             </colgroup>
             <thead><tr>${REGISTRY_COLUMN_LABELS.map(function(lbl, i){ return registryTh(lbl, REGISTRY_SORT_FIELDS[i]); }).join("")}</tr></thead>
             <tbody>${list.length===0 ? h`<tr><td colspan="${REGISTRY_COLUMN_LABELS.length}"><div class="empty-state"><b>${filtersActive?'Ничего не найдено':(rf.showPaid?'Реестр пуст':'Все счета в реестре оплачены')}</b>${filtersActive?'Попробуйте изменить или сбросить фильтр.':(rf.showPaid?'Прикрепите счёт к заявке — он появится здесь автоматически.':'Включите «Показывать оплаченные», чтобы увидеть их.')}</div></td></tr>` :
@@ -3040,14 +3068,14 @@
                     </select>
                   </td>
                   <td>
-                    <select data-invoice-tax-basis data-id="${iv.id}" ${editableRegistry?'':'disabled'} title="${editableRegistry?(vatOn?'Способ оплаты — при «с НДС» доступны только «Упрощёнка» и «Нал. расчёт»':'Способ оплаты — влияет на доп. налог в «Учтено в затратах»'):'Редактировать может только Администратор, Руководитель или Финансист'}">
+                    <select data-invoice-tax-basis data-id="${iv.id}" ${(editableRegistry && !vatOn)?'':'disabled'} title="${vatOn?'При «с НДС» доп. налог не применяется — ставится автоматически прочерком':(editableRegistry?'Способ оплаты — влияет на доп. налог в «Учтено в затратах»':'Редактировать может только Администратор, Руководитель или Финансист')}">
                       <option value="">—</option>
-                      ${vatOn ? "" : h`<option value="regular" ${iv.tax_basis==='regular'?'selected':''}>Обычный</option>`}
-                      <option value="simplified" ${iv.tax_basis==='simplified'?'selected':''}>Упрощ. +20%</option>
-                      <option value="cash" ${iv.tax_basis==='cash'?'selected':''}>Нал. +30%</option>
+                      ${vatOn ? "" : h`<option value="simplified" ${iv.tax_basis==='simplified'?'selected':''}>Упрощ. +20%</option>
+                      <option value="cash" ${iv.tax_basis==='cash'?'selected':''}>Нал. +30%</option>`}
                     </select>
                   </td>
                   <td class="mono" style="text-align:right;" title="Сумма без НДС, скорректированная на доп. налог по способу оплаты">${accounted!=null ? fmtSum(accounted) : '—'}</td>
+                  <td style="text-align:center;"><input type="checkbox" data-action="invoice-submitted-toggle" data-id="${iv.id}" data-val="${iv.submitted_for_payment?'0':'1'}" ${iv.submitted_for_payment?'checked':''} ${editableRegistry?'':'disabled'} title="${editableRegistry?'Отметить, что счёт передан в бухгалтерию/банк на оплату':'Редактировать может только Администратор, Руководитель или Финансист'}"></td>
                   <td style="text-align:center;"><input type="checkbox" data-action="invoice-paid-toggle" data-id="${iv.id}" data-val="${iv.paid?'0':'1'}" ${iv.paid?'checked':''} ${editableRegistry?'':'disabled'} title="${editableRegistry?'Отметить оплату счёта':'Редактировать может только Администратор, Руководитель или Финансист'}"></td>
                 </tr>`;
               }).join("")}
@@ -3055,6 +3083,7 @@
             ${list.length>0 ? h`<tfoot><tr class="registry-totals-row">
               <td colspan="4" class="muted" style="text-align:right;">Итого по показанным ${list.length} счетам${missingAmountCount?' (без данных для расчёта: '+missingAmountCount+')':''}:</td>
               <td colspan="4" class="mono" style="text-align:right;"><b>Оплачено: ${fmtSum(sumPaid)}</b> · <span class="muted">К оплате: ${fmtSum(sumDue)}</span></td>
+              <td></td>
               <td></td>
               <td></td>
             </tr></tfoot>` : ""}
@@ -4371,15 +4400,16 @@
       if(action==="invoice-open") return openInvoiceFile(actionEl.getAttribute("data-path"));
       if(action==="invoice-delete") return deleteInvoice(id, actionEl.getAttribute("data-path"));
       if(action==="invoice-paid-toggle") return setInvoicePaid(id, actionEl.getAttribute("data-val")==="1");
+      if(action==="invoice-submitted-toggle") return setInvoiceSubmitted(id, actionEl.getAttribute("data-val")==="1");
       if(action==="invoice-related-set") { e.preventDefault(); return setInvoiceRelatedTickets(id); }
       if(action==="telegram-chatid-help"){
         e.preventDefault();
         alert(
-          "Как узнать chat_id сотрудника для Telegram-уведомлений:\n\n"+
+          "Как узнать Telegram ID сотрудника для уведомлений:\n\n"+
           "1. Попросите его написать вашему боту в Telegram любое сообщение (например «привет»).\n"+
           "2. Откройте в браузере: https://api.telegram.org/bot<ТОКЕН_БОТА>/getUpdates (вместо <ТОКЕН_БОТА> — токен, который вы получили от @BotFather).\n"+
-          "3. В ответе найдите последнее сообщение от этого человека — в нём есть \"chat\":{\"id\": ЧИСЛО, ...} — это и есть chat_id.\n"+
-          "4. Впишите это число в поле «chat_id» напротив его имени и поставьте галочку «увед.»."
+          "3. В ответе найдите последнее сообщение от этого человека — в нём есть \"id\": ЧИСЛО (в блоке \"from\" или \"chat\" — для личных сообщений это одно и то же число) — это и есть его Telegram ID.\n"+
+          "4. Впишите это число в поле «Telegram ID» напротив его имени и поставьте галочку «увед.»."
         );
         return;
       }
@@ -4408,7 +4438,7 @@
         state.filters.sort = (curSort.field===sfield) ? {field:sfield, dir: curSort.dir==="asc"?"desc":"asc"} : {field:sfield, dir:"asc"};
         render(); return;
       }
-      if(action==="clear-registry-filter"){ e.preventDefault(); var keepSort = (state.registryFilters||{}).sort; state.registryFilters = {q:"", hotel:"", dateFrom:"", dateTo:"", sort: keepSort}; render(); return; }
+      if(action==="clear-registry-filter"){ e.preventDefault(); var keepSort = (state.registryFilters||{}).sort; var keepShowPaid = (state.registryFilters||{}).showPaid; state.registryFilters = {q:"", hotel:"", currency:"", dateFrom:"", dateTo:"", showPaid: keepShowPaid, sort: keepSort}; render(); return; }
       if(action==="sort-registry"){
         var rfield = actionEl.getAttribute("data-field");
         state.registryFilters = state.registryFilters||{};
