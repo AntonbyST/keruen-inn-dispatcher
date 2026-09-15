@@ -180,6 +180,16 @@
   /* ---------- table ---------- */
   .table-wrap{ overflow-x:auto; }
   .registry-totals-row td{ background:var(--surface-2); border-top:2px solid var(--line); padding-top:8px; padding-bottom:8px; }
+  /* 0.2.13.1: реестр платежей стал 10-колоночным (валюта/НДС/налог/учтено) —
+     компактный режим, чтобы всё помещалось без горизонтальной прокрутки на
+     обычном экране. table-layout:fixed заставляет колонки уважать ширины из
+     <colgroup>, а не растягиваться под самый широкий контент (имя файла). */
+  .registry-table{ table-layout:fixed; }
+  .registry-table th{ white-space:normal; line-height:1.25; padding:7px 6px; font-size:10px; }
+  .registry-table td{ padding:6px 6px; font-size:12.5px; }
+  .registry-table td input[type="number"],
+  .registry-table td select{ width:100%; box-sizing:border-box; padding:4px 4px; font-size:12px; }
+  .registry-file-btn{ display:inline-block; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; vertical-align:middle; }
   table{ width:100%; border-collapse:collapse; font-size:13px; }
   th{ text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-faint); font-weight:600; padding:9px 12px; border-bottom:1px solid var(--line); white-space:nowrap; }
   td{ padding:11px 12px; border-bottom:1px solid var(--line); vertical-align:middle; }
@@ -1186,10 +1196,16 @@
     if(!canEditRegistry()){ alert("Указывать, включён ли НДС в сумму, может только Администратор, Руководитель или Финансист."); return; }
     var vatIncluded = val==="with" ? true : (val==="without" ? false : null);
     var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
-    if(iv) iv.vat_included = vatIncluded;
+    // Если сумма "с НДС", вариант "Обычный счёт" в "Налоге" больше не
+    // предлагается (0.2.13.1) — если он был выбран раньше, сбрасываем его,
+    // чтобы не остаться с недопустимым сочетанием.
+    var resetTaxBasis = false;
+    var update = {vat_included:vatIncluded};
+    if(vatIncluded===true && iv && iv.tax_basis==="regular"){ resetTaxBasis = true; update.tax_basis = null; }
+    if(iv){ iv.vat_included = vatIncluded; if(resetTaxBasis) iv.tax_basis = null; }
     render();
-    sb.from("invoices").update({vat_included:vatIncluded}).eq("id", invoiceId).then(function(){
-      if(iv) addNote(iv.ticket_id, "Указано по счёту «"+iv.file_name+"»: сумма "+(vatIncluded===true?"с НДС":(vatIncluded===false?"без НДС":"—"))+".");
+    sb.from("invoices").update(update).eq("id", invoiceId).then(function(){
+      if(iv) addNote(iv.ticket_id, "Указано по счёту «"+iv.file_name+"»: сумма "+(vatIncluded===true?"с НДС":(vatIncluded===false?"без НДС":"—"))+(resetTaxBasis?" (способ оплаты сброшен — «Обычный счёт» недоступен при «с НДС»)":"")+".");
     });
   }
   function setInvoiceTaxBasis(invoiceId, val){
@@ -2837,12 +2853,12 @@
   // выгрузки, т.к. заполнялись вручную и в этом приложении не нужны.
   function viewRegistry(){
     var all = (state.invoices||[]).filter(function(iv){ return iv.in_registry; });
-    var rf = state.registryFilters || {q:"", hotel:"", dateFrom:"", dateTo:""};
+    var rf = state.registryFilters || {q:"", hotel:"", dateFrom:"", dateTo:"", showPaid:false};
     var q = normalizeForMatch(rf.q||"");
     // Поиск/фильтр действуют только на то, что показано на экране — выгрузка в
     // Excel всегда забирает ВЕСЬ реестр целиком, чтобы случайно не забытый
     // фильтр не «съел» часть строк из официальной выгрузки.
-    var list = all.filter(function(iv){
+    var preShowPaid = all.filter(function(iv){
       var tk = state.tickets.find(function(x){return x.id===iv.ticket_id;});
       var hotel = tk ? hotelById(tk.hotel_id) : null;
       if(rf.hotel && (!hotel || String(hotel.id)!==rf.hotel)) return false;
@@ -2854,6 +2870,11 @@
       }
       return true;
     });
+    // Оплаченные счета по умолчанию скрыты (по просьбе Антона) — реестр
+    // остаётся списком того, что ещё предстоит оплатить; галочка "Показывать
+    // оплаченные" возвращает их, как showClosed у "Заявок".
+    var list = rf.showPaid ? preShowPaid : preShowPaid.filter(function(iv){ return !iv.paid; });
+    var hiddenPaidCount = preShowPaid.length - list.length;
     var filtersActive = !!(rf.q||rf.hotel||rf.dateFrom||rf.dateTo);
     // Сортировка по клику на заголовок — как в «Заявках». На выгрузку в Excel не
     // влияет — она всегда идёт по всему реестру целиком (см. комментарий выше).
@@ -2882,15 +2903,20 @@
     // смысла (порядковый номер, сам файл, суммы/селекты, галочка "оплачено")
     var REGISTRY_SORT_FIELDS = [null,"ref","hotel",null,null,null,null,null,null,null];
     var editableRegistry = canEditRegistry();
-    // Итоги "оплачено"/"к оплате" (0.2.3, п.2) — считаются по тому же списку
-    // list, что сейчас показан на экране (с учётом фильтров), а не по всему
-    // реестру — та же логика, что и у счётчика "N из M" выше. Счета без
-    // указанной суммы просто не участвуют в сумме (считаются как 0), но их
-    // количество показываем отдельно, чтобы итог не выглядел как "полный".
+    // Итоги "оплачено"/"к оплате" (0.2.3, п.2; с 0.2.13.1 — по просьбе Антона
+    // считаются по "Учтено в затратах", а не по сырой "Сумма", т.к. это и есть
+    // сумма без НДС с поправкой на доп. налог — реальная величина для бюджета)
+    // — считаются по тому же списку list, что сейчас показан на экране (с
+    // учётом фильтров), а не по всему реестру — та же логика, что и у
+    // счётчика "N из M" выше. Счета, для которых ещё не заполнены все поля,
+    // нужные для расчёта (сумма/валюта/НДС/налог), просто не участвуют в
+    // сумме, но их количество показываем отдельно, чтобы итог не выглядел
+    // как "полный".
     var sumPaid = 0, sumDue = 0, missingAmountCount = 0;
     list.forEach(function(iv){
-      if(iv.amount==null){ missingAmountCount++; return; }
-      if(iv.paid) sumPaid += iv.amount; else sumDue += iv.amount;
+      var accounted = invoiceCostAccounted(iv);
+      if(accounted==null){ missingAmountCount++; return; }
+      if(iv.paid) sumPaid += accounted; else sumDue += accounted;
     });
     function fmtSum(n){ return n.toLocaleString("ru-RU", {minimumFractionDigits:0, maximumFractionDigits:2}); }
     return h`
@@ -2901,26 +2927,36 @@
           <select data-registry-filter="hotel"><option value="">Все отели</option>${state.hotels.filter(function(x){return x.in_service;}).map(function(x){return h`<option value="${x.id}" ${rf.hotel===String(x.id)?'selected':''}>№${x.id} ${x.name}</option>`;}).join("")}</select>
           <label style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ink-soft);margin:0;">с <input type="date" data-registry-filter="dateFrom" value="${rf.dateFrom||''}" style="width:auto;"></label>
           <label style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ink-soft);margin:0;">по <input type="date" data-registry-filter="dateTo" value="${rf.dateTo||''}" style="width:auto;"></label>
+          <div class="chip-toggle"><label><input type="checkbox" data-registry-filter-checkbox="showPaid" ${rf.showPaid?'checked':''}> Показывать оплаченные</label></div>
           ${filtersActive ? h`<a href="#" data-action="clear-registry-filter" style="font-size:12px;">сбросить</a>` : ""}
           <button class="btn btn-sm" data-action="registry-export" ${all.length===0?'disabled':''}>Экспорт в Excel${filtersActive?' (весь реестр)':''}</button>
-          <span class="muted" style="margin-left:auto;">${list.length} из ${all.length}</span>
+          <span class="muted" style="margin-left:auto;">${list.length} из ${all.length}${(!rf.showPaid && hiddenPaidCount>0) ? h` <span title="Оплаченные счета скрыты по умолчанию">(скрыто оплаченных: ${hiddenPaidCount})</span>` : ""}</span>
         </div>
         <div class="card">
-          <div class="table-wrap"><table>
+          <div class="table-wrap"><table class="registry-table">
+            <colgroup>
+              <col style="width:30px"><col style="width:64px"><col style="width:104px"><col>
+              <col style="width:76px"><col style="width:56px"><col style="width:66px"><col style="width:96px">
+              <col style="width:92px"><col style="width:44px">
+            </colgroup>
             <thead><tr>${REGISTRY_COLUMN_LABELS.map(function(lbl, i){ return registryTh(lbl, REGISTRY_SORT_FIELDS[i]); }).join("")}</tr></thead>
-            <tbody>${list.length===0 ? h`<tr><td colspan="${REGISTRY_COLUMN_LABELS.length}"><div class="empty-state"><b>${filtersActive?'Ничего не найдено':'Реестр пуст'}</b>${filtersActive?'Попробуйте изменить или сбросить фильтр.':'Прикрепите счёт к заявке — он появится здесь автоматически.'}</div></td></tr>` :
+            <tbody>${list.length===0 ? h`<tr><td colspan="${REGISTRY_COLUMN_LABELS.length}"><div class="empty-state"><b>${filtersActive?'Ничего не найдено':(rf.showPaid?'Реестр пуст':'Все счета в реестре оплачены')}</b>${filtersActive?'Попробуйте изменить или сбросить фильтр.':(rf.showPaid?'Прикрепите счёт к заявке — он появится здесь автоматически.':'Включите «Показывать оплаченные», чтобы увидеть их.')}</div></td></tr>` :
               list.map(function(iv, i){
                 var tk = state.tickets.find(function(x){return x.id===iv.ticket_id;});
                 var hotel = tk ? hotelById(tk.hotel_id) : null;
                 var accounted = invoiceCostAccounted(iv);
+                // 0.2.13.1 (по просьбе Антона): если сумма указана "с НДС", то
+                // "Налог" может быть только "Упрощёнка" или "Наличный расчёт" —
+                // вариант "Обычный счёт" (0%) в этом случае не предлагается.
+                var vatOn = iv.vat_included===true;
                 return h`<tr>
                   <td class="mono muted">${i+1}</td>
                   <td class="mono">${tk ? h`<a href="#" data-open-ticket="${tk.id}" title="Открыть заявку">${tk.external_ref?escapeHtml(tk.external_ref):'открыть'}</a>` : '—'}</td>
-                  <td>${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
-                  <td><button class="btn btn-sm" data-action="invoice-open" data-path="${escapeHtml(iv.file_path)}">${escapeHtml(iv.file_name)}</button></td>
-                  <td><input type="number" step="0.01" min="0" data-invoice-amount data-id="${iv.id}" value="${iv.amount!=null?iv.amount:''}" placeholder="—" style="width:100px;" ${editableRegistry?'':'disabled'} title="${editableRegistry?'Указать сумму счёта':'Редактировать может только Администратор, Руководитель или Финансист'}"></td>
+                  <td style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${hotel?escapeHtml(hotel.name):''}">${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
+                  <td><button class="btn btn-sm registry-file-btn" data-action="invoice-open" data-path="${escapeHtml(iv.file_path)}" title="${escapeHtml(iv.file_name)}">${escapeHtml(iv.file_name)}</button></td>
+                  <td><input type="number" step="0.01" min="0" data-invoice-amount data-id="${iv.id}" value="${iv.amount!=null?iv.amount:''}" placeholder="—" ${editableRegistry?'':'disabled'} title="${editableRegistry?'Указать сумму счёта':'Редактировать может только Администратор, Руководитель или Финансист'}"></td>
                   <td>
-                    <select data-invoice-currency data-id="${iv.id}" style="width:78px;" ${editableRegistry?'':'disabled'} title="${editableRegistry?'Валюта оплаты счёта (влияет на ставку НДС)':'Редактировать может только Администратор, Руководитель или Финансист'}">
+                    <select data-invoice-currency data-id="${iv.id}" ${editableRegistry?'':'disabled'} title="${editableRegistry?'Валюта оплаты счёта (влияет на ставку НДС)':'Редактировать может только Администратор, Руководитель или Финансист'}">
                       <option value="">—</option>
                       <option value="KZT" ${iv.currency==='KZT'?'selected':''}>KZT</option>
                       <option value="RUB" ${iv.currency==='RUB'?'selected':''}>RUB</option>
@@ -2931,26 +2967,27 @@
                     <select data-invoice-vat data-id="${iv.id}" ${editableRegistry?'':'disabled'} title="${editableRegistry?'Указана ли «Сумма» с учётом НДС':'Редактировать может только Администратор, Руководитель или Финансист'}">
                       <option value="">—</option>
                       <option value="with" ${iv.vat_included===true?'selected':''}>С НДС</option>
-                      <option value="without" ${iv.vat_included===false?'selected':''}>Без НДС</option>
+                      <option value="without" ${iv.vat_included===false?'selected':''}>Без</option>
                     </select>
                   </td>
                   <td>
-                    <select data-invoice-tax-basis data-id="${iv.id}" ${editableRegistry?'':'disabled'} title="${editableRegistry?'Способ оплаты — влияет на доп. налог в «Учтено в затратах»':'Редактировать может только Администратор, Руководитель или Финансист'}">
+                    <select data-invoice-tax-basis data-id="${iv.id}" ${editableRegistry?'':'disabled'} title="${editableRegistry?(vatOn?'Способ оплаты — при «с НДС» доступны только «Упрощёнка» и «Нал. расчёт»':'Способ оплаты — влияет на доп. налог в «Учтено в затратах»'):'Редактировать может только Администратор, Руководитель или Финансист'}">
                       <option value="">—</option>
-                      <option value="regular" ${iv.tax_basis==='regular'?'selected':''}>${TAX_BASIS_LABEL.regular}</option>
-                      <option value="simplified" ${iv.tax_basis==='simplified'?'selected':''}>${TAX_BASIS_LABEL.simplified}</option>
-                      <option value="cash" ${iv.tax_basis==='cash'?'selected':''}>${TAX_BASIS_LABEL.cash}</option>
+                      ${vatOn ? "" : h`<option value="regular" ${iv.tax_basis==='regular'?'selected':''}>Обычный</option>`}
+                      <option value="simplified" ${iv.tax_basis==='simplified'?'selected':''}>Упрощ. +20%</option>
+                      <option value="cash" ${iv.tax_basis==='cash'?'selected':''}>Нал. +30%</option>
                     </select>
                   </td>
-                  <td class="mono" title="Сумма без НДС, скорректированная на доп. налог по способу оплаты">${accounted!=null ? fmtSum(accounted) : '—'}</td>
-                  <td><input type="checkbox" data-action="invoice-paid-toggle" data-id="${iv.id}" data-val="${iv.paid?'0':'1'}" ${iv.paid?'checked':''} ${editableRegistry?'':'disabled'} title="${editableRegistry?'Отметить оплату счёта':'Редактировать может только Администратор, Руководитель или Финансист'}"></td>
+                  <td class="mono" style="text-align:right;" title="Сумма без НДС, скорректированная на доп. налог по способу оплаты">${accounted!=null ? fmtSum(accounted) : '—'}</td>
+                  <td style="text-align:center;"><input type="checkbox" data-action="invoice-paid-toggle" data-id="${iv.id}" data-val="${iv.paid?'0':'1'}" ${iv.paid?'checked':''} ${editableRegistry?'':'disabled'} title="${editableRegistry?'Отметить оплату счёта':'Редактировать может только Администратор, Руководитель или Финансист'}"></td>
                 </tr>`;
               }).join("")}
             </tbody>
             ${list.length>0 ? h`<tfoot><tr class="registry-totals-row">
-              <td colspan="4" class="muted" style="text-align:right;">Итого по показанным ${list.length} счетам${missingAmountCount?' (без суммы: '+missingAmountCount+')':''}:</td>
-              <td class="mono"><b>Оплачено: ${fmtSum(sumPaid)}</b><br><span class="muted">К оплате: ${fmtSum(sumDue)}</span></td>
-              <td colspan="5"></td>
+              <td colspan="4" class="muted" style="text-align:right;">Итого по показанным ${list.length} счетам${missingAmountCount?' (без данных для расчёта: '+missingAmountCount+')':''}:</td>
+              <td colspan="4" class="mono" style="text-align:right;"><b>Оплачено: ${fmtSum(sumPaid)}</b> · <span class="muted">К оплате: ${fmtSum(sumDue)}</span></td>
+              <td></td>
+              <td></td>
             </tr></tfoot>` : ""}
             </table></div>
           <div class="helptext" style="padding:10px 16px;">Счёт попадает сюда автоматически при прикреплении к заявке в её карточке. Сумму счёта указывает Администратор, Руководитель или Финансист — по ней считаются итоги «оплачено»/«к оплате» выше.</div>
@@ -4362,6 +4399,7 @@
     if(e.target.matches("[data-filter-checkbox]")){ state.filters=state.filters||{}; state.filters[e.target.getAttribute("data-filter-checkbox")]=e.target.checked; render(); return; }
     if(e.target.matches("[data-tag-filter]")){ state.filters=state.filters||{}; state.filters.tagFilters=state.filters.tagFilters||{}; state.filters.tagFilters[e.target.getAttribute("data-tag-filter")]=e.target.checked; render(); return; }
     if(e.target.matches("[data-registry-filter]")){ state.registryFilters=state.registryFilters||{}; state.registryFilters[e.target.getAttribute("data-registry-filter")]=e.target.value; render(); return; }
+    if(e.target.matches("[data-registry-filter-checkbox]")){ state.registryFilters=state.registryFilters||{}; state.registryFilters[e.target.getAttribute("data-registry-filter-checkbox")]=e.target.checked; render(); return; }
     if(e.target.matches("[data-hotel-field]")){ updateHotelField(e.target.getAttribute("data-id"), e.target.getAttribute("data-hotel-field"), e.target.value); return; }
     if(e.target.matches("[data-invoice-amount]")){ setInvoiceAmount(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.matches("[data-invoice-currency]")){ setInvoiceCurrency(e.target.getAttribute("data-id"), e.target.value); return; }
