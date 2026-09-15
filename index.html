@@ -184,6 +184,9 @@
   /* ---------- table ---------- */
   .table-wrap{ overflow-x:auto; }
   .registry-totals-row td{ background:var(--surface-2); border-top:2px solid var(--line); padding-top:8px; padding-bottom:8px; }
+  /* 0.2.19: строка-разделитель месяца оплаты внутри «Реестра платежей» (см.
+     paidMonthDividerRow) — легче строки итогов, чтобы не спутать с ней. */
+  .registry-month-divider td{ background:var(--surface-2); font-weight:600; padding-top:6px; padding-bottom:6px; color:var(--ink-soft); }
   /* 0.2.13.1: реестр платежей стал 10-колоночным (валюта/НДС/налог/учтено) —
      компактный режим, чтобы всё помещалось без горизонтальной прокрутки на
      обычном экране. table-layout:fixed заставляет колонки уважать ширины из
@@ -653,6 +656,20 @@
   function hotelById(id){ var list=state.hotels||[]; for (var i=0;i<list.length;i++){ if (list[i].id===Number(id)) return list[i]; } return null; }
   function fmtDate(iso){ if(!iso) return "—"; var d=new Date(iso); return d.toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit",year:"numeric"})+" "+d.toLocaleTimeString("ru-RU",{hour:"2-digit",minute:"2-digit"}); }
   function fmtDateShort(iso){ if(!iso) return "—"; var d=new Date(iso); return d.toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit",year:"2-digit"}); }
+  // 0.2.19: группировка оплаченных счетов в «Реестре платежей» по месяцу
+  // ОПЛАТЫ (invoices.paid_at), по просьбе Антона. paidMonthKey — ключ вида
+  // "YYYY-MM" для сортировки/группировки (сортируется как обычная строка,
+  // так что localeCompare/сравнение строк даёт верный хронологический
+  // порядок); monthLabelRu — то же самое человеком читаемым текстом
+  // ("Сентябрь 2026"). Счёт без paid_at (например, отмечен оплаченным ещё до
+  // 0.2.16, когда этой колонки не было) не попадает ни в один месяц —
+  // группируется отдельно, в самом конце.
+  function paidMonthKey(iv){ return (iv.paid && iv.paid_at) ? iv.paid_at.slice(0,7) : null; }
+  function monthLabelRu(key){
+    var d = new Date(key+"-02T00:00:00");
+    var s = d.toLocaleDateString("ru-RU", {month:"long", year:"numeric"});
+    return s.charAt(0).toUpperCase()+s.slice(1);
+  }
   // Для еженедельного отчёта клиенту (0.2.5, "Отчёты") — без времени, но с
   // полным годом ("Период: 20.08.2026 → 28.08.2026") либо совсем коротко, как
   // в шапке телеграм-отчёта ("Отчет 28.08").
@@ -3198,6 +3215,62 @@
     }
     return registrySelectRaw(iv, kind, !editableRegistry || forceDisabled, roleTitle);
   }
+  // Одна строка счёта в «Реестре платежей» — вынесена в отдельную функцию в
+  // 0.2.19, чтобы использовать и для неоплаченных счетов (без группировки),
+  // и внутри каждой группы "оплачено в месяце X" (см. viewRegistry).
+  function registryInvoiceRow(iv, rowNum, editableRegistry, fmtSum){
+    var tk = state.tickets.find(function(x){return x.id===iv.ticket_id;});
+    var hotel = tk ? hotelById(tk.hotel_id) : null;
+    var accKZT = invoiceAccountedKZT(iv);
+    return h`<tr>
+      <td class="mono muted">${rowNum}</td>
+      <td class="mono">${tk ? h`<a href="#" data-open-ticket="${tk.id}" title="Открыть заявку">${tk.external_ref?escapeHtml(tk.external_ref):'открыть'}</a>` : '—'}</td>
+      <td style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${hotel?escapeHtml(hotel.name):''}">${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
+      <td>
+        <button class="btn btn-sm registry-file-btn" data-action="invoice-open" data-path="${escapeHtml(iv.file_path)}" title="${escapeHtml(iv.file_name)}">счёт</button>
+        ${(function(){
+          // 0.2.17: "также в заявках" теперь определяется автоматически (тот
+          // же файл, прикреплённый отдельно к другим заявкам — см.
+          // invoiceRelatedTickets), без ручного ввода.
+          var rel = invoiceRelatedTickets(iv);
+          if(!rel.length) return "";
+          return h`<div class="muted registry-related-line" title="Тот же файл также прикреплён к этим заявкам — не считайте его сумму отдельно по каждой">Также: ${rel.map(function(t){ return h`<a href="#" data-open-ticket="${t.id}">№${escapeHtml(t.external_ref||t.id)}</a>`; }).join(", ")}</div>`;
+        })()}
+      </td>
+      <td>${(editableRegistry && state.registryEditingAmountId===iv.id)
+        ? h`<input type="text" inputmode="decimal" class="registry-amount-input" data-invoice-amount data-id="${iv.id}" value="${iv.amount!=null?formatAmountInputValue(String(iv.amount)):''}" placeholder="—">`
+        : h`<button type="button" class="registry-amount-display" data-action="${editableRegistry?'registry-amount-edit':''}" data-id="${iv.id}" ${editableRegistry?'':'disabled'} title="${editableRegistry?'Нажмите, чтобы изменить сумму':'Редактировать может только Администратор, Руководитель или Финансист'}">${iv.amount!=null?fmtSum(iv.amount):'—'}</button>`}</td>
+      <td>${registrySelectCell(iv, "currency", editableRegistry)}</td>
+      <td>${registrySelectCell(iv, "vat", editableRegistry)}</td>
+      <td>${registrySelectCell(iv, "tax", editableRegistry)}</td>
+      <td class="mono" style="text-align:right;" title="${accKZT.currency ? 'Сумма без НДС и с доп. налогом, переведена в KZT по курсу Нацбанка РК'+(iv.paid?' на день оплаты':' на сегодня — пересчитается на день оплаты') : 'Сумма без НДС, скорректированная на доп. налог по способу оплаты'}">
+        ${accKZT.state==="ok" ? (fmtSum(accKZT.value) + (accKZT.currency ? h`<div class="muted" style="font-size:10px;">${fmtSum(accKZT.original)} ${accKZT.currency}</div>` : "")) :
+          accKZT.state==="pending" ? h`<span class="muted">курс…</span>` :
+          accKZT.state==="error" ? h`<span class="muted" title="Не удалось получить курс Нацбанка РК">${fmtSum(accKZT.original)} ${accKZT.currency} (?)</span>` : '—'}
+      </td>
+      <td style="text-align:center;"><input type="checkbox" data-action="invoice-submitted-toggle" data-id="${iv.id}" data-val="${iv.submitted_for_payment?'0':'1'}" ${iv.submitted_for_payment?'checked':''} ${editableRegistry?'':'disabled'} title="${editableRegistry?'Отметить, что счёт передан в бухгалтерию/банк на оплату':'Редактировать может только Администратор, Руководитель или Финансист'}"></td>
+      <td style="text-align:center;"><input type="checkbox" data-action="invoice-paid-toggle" data-id="${iv.id}" data-val="${iv.paid?'0':'1'}" ${iv.paid?'checked':''} ${editableRegistry?'':'disabled'} title="${editableRegistry?'Отметить оплату счёта':'Редактировать может только Администратор, Руководитель или Финансист'}"></td>
+    </tr>`;
+  }
+  // Строка-разделитель месяца оплаты (0.2.19) — вместе с подписью месяца
+  // показывает, сколько счетов и на какую сумму (KZT без НДС, как и итоги
+  // внизу) оплачено именно в этом месяце.
+  function paidMonthDividerRow(key, items){
+    var label = key==="unknown" ? "Дата оплаты не указана" : monthLabelRu(key);
+    var sum = 0, pendingCount = 0, missingCount = 0;
+    items.forEach(function(iv){
+      var acc = invoiceAccountedKZT(iv);
+      if(acc.state==="pending"){ pendingCount++; return; }
+      if(acc.value==null){ missingCount++; return; }
+      sum += acc.value;
+    });
+    var fmtSum = function(n){ return n.toLocaleString("ru-RU", {minimumFractionDigits:0, maximumFractionDigits:2}); };
+    return h`<tr class="registry-month-divider">
+      <td colspan="8">${escapeHtml(label)} — ${items.length} ${pluralRu(items.length,'счёт','счёта','счетов')}${pendingCount?' (ожидание курса: '+pendingCount+')':''}${missingCount?' (без данных: '+missingCount+')':''}</td>
+      <td class="mono" style="text-align:right;">${fmtSum(sum)}</td>
+      <td colspan="2"></td>
+    </tr>`;
+  }
   function viewRegistry(){
     var all = (state.invoices||[]).filter(function(iv){ return iv.in_registry; });
     // 0.2.17 (по просьбе Антона): оплаченные счета теперь показываются по
@@ -3301,40 +3374,43 @@
             </colgroup>
             <thead><tr>${REGISTRY_COLUMN_LABELS.map(function(lbl, i){ return registryTh(lbl, REGISTRY_SORT_FIELDS[i]); }).join("")}</tr></thead>
             <tbody>${list.length===0 ? h`<tr><td colspan="${REGISTRY_COLUMN_LABELS.length}"><div class="empty-state"><b>${filtersActive?'Ничего не найдено':(rf.showPaid?'Реестр пуст':'Все счета в реестре оплачены')}</b>${filtersActive?'Попробуйте изменить или сбросить фильтр.':(rf.showPaid?'Прикрепите счёт к заявке — он появится здесь автоматически.':'Включите «Показывать оплаченные», чтобы увидеть их.')}</div></td></tr>` :
-              list.map(function(iv, i){
-                var tk = state.tickets.find(function(x){return x.id===iv.ticket_id;});
-                var hotel = tk ? hotelById(tk.hotel_id) : null;
-                var accKZT = invoiceAccountedKZT(iv);
-                return h`<tr>
-                  <td class="mono muted">${i+1}</td>
-                  <td class="mono">${tk ? h`<a href="#" data-open-ticket="${tk.id}" title="Открыть заявку">${tk.external_ref?escapeHtml(tk.external_ref):'открыть'}</a>` : '—'}</td>
-                  <td style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${hotel?escapeHtml(hotel.name):''}">${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
-                  <td>
-                    <button class="btn btn-sm registry-file-btn" data-action="invoice-open" data-path="${escapeHtml(iv.file_path)}" title="${escapeHtml(iv.file_name)}">счёт</button>
-                    ${(function(){
-                      // 0.2.17: "также в заявках" теперь определяется автоматически (тот
-                      // же файл, прикреплённый отдельно к другим заявкам — см.
-                      // invoiceRelatedTickets), без ручного ввода.
-                      var rel = invoiceRelatedTickets(iv);
-                      if(!rel.length) return "";
-                      return h`<div class="muted registry-related-line" title="Тот же файл также прикреплён к этим заявкам — не считайте его сумму отдельно по каждой">Также: ${rel.map(function(t){ return h`<a href="#" data-open-ticket="${t.id}">№${escapeHtml(t.external_ref||t.id)}</a>`; }).join(", ")}</div>`;
-                    })()}
-                  </td>
-                  <td>${(editableRegistry && state.registryEditingAmountId===iv.id)
-                    ? h`<input type="text" inputmode="decimal" class="registry-amount-input" data-invoice-amount data-id="${iv.id}" value="${iv.amount!=null?formatAmountInputValue(String(iv.amount)):''}" placeholder="—">`
-                    : h`<button type="button" class="registry-amount-display" data-action="${editableRegistry?'registry-amount-edit':''}" data-id="${iv.id}" ${editableRegistry?'':'disabled'} title="${editableRegistry?'Нажмите, чтобы изменить сумму':'Редактировать может только Администратор, Руководитель или Финансист'}">${iv.amount!=null?fmtSum(iv.amount):'—'}</button>`}</td>
-                  <td>${registrySelectCell(iv, "currency", editableRegistry)}</td>
-                  <td>${registrySelectCell(iv, "vat", editableRegistry)}</td>
-                  <td>${registrySelectCell(iv, "tax", editableRegistry)}</td>
-                  <td class="mono" style="text-align:right;" title="${accKZT.currency ? 'Сумма без НДС и с доп. налогом, переведена в KZT по курсу Нацбанка РК'+(iv.paid?' на день оплаты':' на сегодня — пересчитается на день оплаты') : 'Сумма без НДС, скорректированная на доп. налог по способу оплаты'}">
-                    ${accKZT.state==="ok" ? (fmtSum(accKZT.value) + (accKZT.currency ? h`<div class="muted" style="font-size:10px;">${fmtSum(accKZT.original)} ${accKZT.currency}</div>` : "")) :
-                      accKZT.state==="pending" ? h`<span class="muted">курс…</span>` :
-                      accKZT.state==="error" ? h`<span class="muted" title="Не удалось получить курс Нацбанка РК">${fmtSum(accKZT.original)} ${accKZT.currency} (?)</span>` : '—'}
-                  </td>
-                  <td style="text-align:center;"><input type="checkbox" data-action="invoice-submitted-toggle" data-id="${iv.id}" data-val="${iv.submitted_for_payment?'0':'1'}" ${iv.submitted_for_payment?'checked':''} ${editableRegistry?'':'disabled'} title="${editableRegistry?'Отметить, что счёт передан в бухгалтерию/банк на оплату':'Редактировать может только Администратор, Руководитель или Финансист'}"></td>
-                  <td style="text-align:center;"><input type="checkbox" data-action="invoice-paid-toggle" data-id="${iv.id}" data-val="${iv.paid?'0':'1'}" ${iv.paid?'checked':''} ${editableRegistry?'':'disabled'} title="${editableRegistry?'Отметить оплату счёта':'Редактировать может только Администратор, Руководитель или Финансист'}"></td>
-                </tr>`;
-              }).join("")}
+              (function(){
+                // 0.2.19 (по просьбе Антона): оплаченные счета группируются по
+                // месяцу ОПЛАТЫ (invoices.paid_at), а не идут общим плоским
+                // списком — иначе за месяц вручную не свести. Неоплаченные (без
+                // даты оплаты — группировать их по этому признаку не по чему)
+                // остаются обычным плоским списком сверху, как и раньше.
+                var rowNum = 0;
+                var out = [];
+                list.filter(function(iv){ return !iv.paid; }).forEach(function(iv){
+                  rowNum++;
+                  out.push(registryInvoiceRow(iv, rowNum, editableRegistry, fmtSum));
+                });
+                var paidGroupsMap = {};
+                list.filter(function(iv){ return iv.paid; }).forEach(function(iv){
+                  var key = paidMonthKey(iv) || "unknown";
+                  (paidGroupsMap[key] = paidGroupsMap[key]||[]).push(iv);
+                });
+                var paidGroupKeys = Object.keys(paidGroupsMap).sort(function(a,b){
+                  if(a==="unknown") return 1;
+                  if(b==="unknown") return -1;
+                  return b.localeCompare(a); // сначала последний оплаченный месяц
+                });
+                paidGroupKeys.forEach(function(key){
+                  var items = paidGroupsMap[key];
+                  // Пока не выбрана сортировка по колонке — внутри месяца
+                  // показываем сначала недавно оплаченное; клик по заголовку
+                  // ("№ заявки"/"Отель") переопределяет это, как и для
+                  // неоплаченных выше.
+                  if(!rSortField) items = items.slice().sort(function(a,b){ return (b.paid_at||"").localeCompare(a.paid_at||""); });
+                  out.push(paidMonthDividerRow(key, items));
+                  items.forEach(function(iv){
+                    rowNum++;
+                    out.push(registryInvoiceRow(iv, rowNum, editableRegistry, fmtSum));
+                  });
+                });
+                return out.join("");
+              })()}
             </tbody>
             ${list.length>0 ? h`<tfoot><tr class="registry-totals-row">
               <td colspan="8" class="muted" style="text-align:right;">Итого по показанным ${list.length} счетам${missingAmountCount?' (без данных для расчёта: '+missingAmountCount+')':''}${pendingRateCount?' (ожидание курса НБ РК: '+pendingRateCount+')':''}:</td>
