@@ -189,7 +189,14 @@
   .registry-table td{ padding:6px 6px; font-size:12.5px; }
   .registry-table td input[type="number"],
   .registry-table td select{ width:100%; box-sizing:border-box; padding:4px 4px; font-size:12px; }
+  .registry-table td input.registry-amount-input{ width:100%; box-sizing:border-box; padding:4px 4px; font-size:12px; text-align:right; font-variant-numeric:tabular-nums; }
   .registry-file-btn{ display:inline-block; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; vertical-align:middle; }
+  /* 0.2.16: "Сумма" — обычный текст (разряды через пробел), пока по нему не
+     кликнут; тогда вместо него на месте появляется поле ввода (см. change/
+     focusout выше). Прочерк — как обычно, "не заполнено". */
+  .registry-amount-display{ display:block; width:100%; background:none; border:1px dashed transparent; padding:4px 4px; font:inherit; font-variant-numeric:tabular-nums; text-align:right; cursor:pointer; color:inherit; border-radius:4px; }
+  .registry-amount-display:hover:not(:disabled){ border-color:var(--line); }
+  .registry-amount-display:disabled{ cursor:default; }
   .registry-related-line{ font-size:10.5px; line-height:1.4; margin-top:2px; white-space:normal; }
   .registry-related-line a{ white-space:nowrap; }
   table{ width:100%; border-collapse:collapse; font-size:13px; }
@@ -578,6 +585,46 @@
     return noVat * (1 + taxRate);
   }
 
+  // 0.2.16: "Учтено в затратах" для RUB/BYN счетов переводится в KZT по
+  // курсу Нацбанка РК — иначе итоги "Оплачено"/"К оплате" в реестре складывали
+  // бы суммы в разных валютах как одну. Курс берём: для уже оплаченных счетов —
+  // на дату оплаты (paid_at), для ещё не оплаченных — на сегодня (по просьбе
+  // Антона: показывает актуальную оценку, после реальной оплаты пересчитается
+  // на дату оплаты). Курс приходит из Edge Function (nbk-rate) асинхронно —
+  // тот же приём, что и ensurePhotoUrl: кэш + фоновая загрузка + render()
+  // по готовности, вызывающий код получает {state:"pending"} на первый показ.
+  var nbkRateCache = {}; // ключ "ВАЛЮТА|ГГГГ-ММ-ДД" -> "pending" | "error" | {rate,quant}
+  function isoToDDMMYYYY(iso){ var p=iso.split("-"); return p[2]+"."+p[1]+"."+p[0]; }
+  function ensureNbkRate(currency, dateIso){
+    var key = currency+"|"+dateIso;
+    if(nbkRateCache.hasOwnProperty(key)) return;
+    if(!sb || !sb.functions){ nbkRateCache[key]="error"; return; }
+    nbkRateCache[key] = "pending";
+    sb.functions.invoke("nbk-rate", { body: { currency: currency, date: isoToDDMMYYYY(dateIso) } }).then(function(res){
+      var d = res && res.data;
+      if(d && d.rate!=null && d.quant){ nbkRateCache[key] = { rate:d.rate, quant:d.quant }; }
+      else { nbkRateCache[key] = "error"; }
+      render();
+    }).catch(function(){ nbkRateCache[key] = "error"; render(); });
+  }
+  // Возвращает {value, state, original, currency}: value — сумма в KZT (или
+  // null, пока не готова/неизвестна), state — "ok"/"pending"/"error"/"missing"
+  // (missing — как и раньше у invoiceCostAccounted, нет данных для расчёта
+  // вообще), original/currency — исходная сумма и валюта (для показа рядом
+  // с KZT-суммой, если валюта не KZT).
+  function invoiceAccountedKZT(iv){
+    var accounted = invoiceCostAccounted(iv);
+    if(accounted==null) return { value:null, state:"missing" };
+    var cur = iv.currency;
+    if(!cur || cur==="KZT") return { value:accounted, state:"ok" };
+    var dateIso = (iv.paid && iv.paid_at) ? iv.paid_at.slice(0,10) : new Date().toISOString().slice(0,10);
+    ensureNbkRate(cur, dateIso);
+    var r = nbkRateCache[cur+"|"+dateIso];
+    if(!r || r==="pending") return { value:null, state:"pending", original:accounted, currency:cur };
+    if(r==="error") return { value:null, state:"error", original:accounted, currency:cur };
+    return { value: accounted * (r.rate/r.quant), state:"ok", original:accounted, currency:cur };
+  }
+
   function hotelById(id){ var list=state.hotels||[]; for (var i=0;i<list.length;i++){ if (list[i].id===Number(id)) return list[i]; } return null; }
   function fmtDate(iso){ if(!iso) return "—"; var d=new Date(iso); return d.toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit",year:"numeric"})+" "+d.toLocaleTimeString("ru-RU",{hour:"2-digit",minute:"2-digit"}); }
   function fmtDateShort(iso){ if(!iso) return "—"; var d=new Date(iso); return d.toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit",year:"2-digit"}); }
@@ -945,6 +992,11 @@
     // сравниваем, меняется прямо на экране (по умолчанию неделя).
     statsSnapshots: [], reportPeriodDays: 7, statsSnapshotRecorded: false,
     selectedTicketId: null, ticketNotes: [], editingNoteId: null, milestoneOpen: {}, editingDescShort: false,
+    // 0.2.16: "Сумма" в «Реестре платежей» показывается как обычный текст
+    // (с разрядами через пробел) и превращается в поле ввода только по
+    // клику — так поле не мозолит глаза, когда уже заполнено. Только один
+    // счёт может редактироваться одновременно (id этого счёта — здесь).
+    registryEditingAmountId: null,
     loaded: false,
     importHeaders: [], importRows: [], importMapping: {}, importResult: null, importBusy: false, importFileError: "",
     // «Финансы» → «Наличные расходы» (0.2.4): вставка таблицы, как импорт c-lector,
@@ -1165,12 +1217,36 @@
   // только ролям из canEditRegistry(); нужна для подсчёта итогов "оплачено"/
   // "к оплате" внизу реестра. Локально патчим состояние по тому же принципу,
   // что и setInvoicePaid выше — итоговая строка пересчитывается сразу же.
+  // 0.2.16: поле "Сумма" в реестре теперь текстовое (не number), чтобы во
+  // время ввода можно было показывать разряды пробелом ("1 234,5") — это
+  // требует своего форматирования (см. слушатель "input" ниже) и разбора
+  // обратно в число при сохранении.
+  function formatAmountInputValue(raw){
+    var s = String(raw==null?"":raw).replace(/[^\d.,]/g, "");
+    var sepIdx = -1;
+    for(var i=0;i<s.length;i++){ if(s[i]==="."||s[i]===","){ sepIdx=i; break; } }
+    var intPart, fracPart=null;
+    if(sepIdx===-1){ intPart = s; }
+    else { intPart = s.slice(0, sepIdx); fracPart = s.slice(sepIdx+1).replace(/[.,]/g, "").slice(0,2); }
+    intPart = intPart.replace(/\D/g, "").replace(/^0+(?=\d)/, "");
+    var grouped = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+    return fracPart!==null ? (grouped+","+fracPart) : grouped;
+  }
+  function parseAmountInputValue(val){
+    if(val==null) return "";
+    return String(val).replace(/[\s ]/g, "").replace(",", ".");
+  }
   function setInvoiceAmount(invoiceId, val){
     if(!canEditRegistry()){ alert("Указывать сумму счёта может только Администратор, Руководитель или Финансист."); return; }
-    var amount = (val==null || val==="") ? null : Number(val);
+    var raw = parseAmountInputValue(val);
+    var amount = (raw==="") ? null : Number(raw);
     if(amount!=null && isNaN(amount)){ render(); return; }
     var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
     if(iv) iv.amount = amount;
+    // 0.2.16: как только сумма сохранена, поле сразу сворачивается обратно в
+    // обычный текст — не дожидаясь потери фокуса (см. просьбу "после внесения
+    // цифр... чтобы пропадало окошко для ввода").
+    if(state.registryEditingAmountId===invoiceId) state.registryEditingAmountId = null;
     render();
     sb.from("invoices").update({amount:amount}).eq("id", invoiceId).then(function(){
       if(iv) addNote(iv.ticket_id, "Указана сумма счёта «"+iv.file_name+"»: "+(amount!=null?amount:"—")+".");
@@ -1179,9 +1255,15 @@
   function setInvoicePaid(invoiceId, val){
     if(!canEditRegistry()){ alert("Отмечать оплату счетов может только Администратор, Руководитель или Финансист."); return; }
     var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
-    if(iv) iv.paid = val;
+    // 0.2.16: paid_at — момент отметки "оплачено", нужен для курса Нацбанка
+    // РК "на день оплаты" (см. invoiceAccountedKZT). Снятие галочки оставляет
+    // paid_at как есть (не обнуляем) — так при повторной отметке "оплачено"
+    // без изменений это будет более-менее та же дата, а если дата всё же
+    // изменится — обновится ниже.
+    var paidAt = val ? new Date().toISOString() : (iv ? iv.paid_at : null);
+    if(iv){ iv.paid = val; iv.paid_at = paidAt; }
     render();
-    sb.from("invoices").update({paid:val}).eq("id", invoiceId).then(function(){
+    sb.from("invoices").update({paid:val, paid_at:paidAt}).eq("id", invoiceId).then(function(){
       if(iv){
         addNote(iv.ticket_id, val ? "Счёт «"+iv.file_name+"» отмечен оплаченным." : "Отметка «оплачено» снята со счёта «"+iv.file_name+"».");
         if(val) maybeAutoComplete(iv.ticket_id);
@@ -1750,6 +1832,38 @@
       if(val) maybeAutoComplete(id);
     });
   }
+  // "Оплачено за наличные" (0.2.16) — не все материалы идут по счёту от
+  // поставщика: иногда прораб платит сразу наличными, счёта вообще не будет.
+  // Галочка переводит "Материал" в жёлтый (ожидание) вместо нейтрального —
+  // это осознанно отмеченное намерение, а не забытый пункт. Сама галочка НЕ
+  // снимает потребность в реальной записи расхода — как только она появится в
+  // «Финансы → Наличные расходы» (категория «Материал», привязка к этой
+  // заявке), maybeClearMaterialsCashPending() снимет галочку автоматически и
+  // подтянет сумму (см. materialsState()/milestoneRow "materials" в карточке).
+  function setMaterialsCashPending(id, val){
+    var patch = {materials_cash_pending:val};
+    patchTicketLocal(id, patch);
+    renderTicketPanel();
+    sb.from("tickets").update(patch).eq("id",id).then(function(){
+      addNote(id, val ? "Отмечено: материал по этой заявке оплачивается наличными (ждём запись в «Наличные расходы»)." : "Отметка «оплачено за наличные» по материалу снята.");
+    });
+  }
+  // Вызывается после успешного сохранения наличного расхода категории
+  // "Материал" с привязкой к заявке (addCashExpense/commitCashImport) — если у
+  // заявки была включена галочка "оплачено за наличные", снимаем её (расход
+  // уже подвязался сам по себе через cashExpensesFor(), галочка своё
+  // отслужила) и сообщаем об этом в журнале.
+  function maybeClearMaterialsCashPending(ticketId){
+    if(!ticketId) return;
+    var t = state.tickets.find(function(x){ return x.id===ticketId; });
+    if(!t || !t.materials_cash_pending) return;
+    patchTicketLocal(ticketId, {materials_cash_pending:false});
+    render();
+    sb.from("tickets").update({materials_cash_pending:false}).eq("id", ticketId).then(function(){
+      addNote(ticketId, "«Материал»: наличный расход внесён — отметка «оплачено за наличные» снята автоматически, статус стал зелёным.");
+      maybeAutoComplete(ticketId);
+    });
+  }
   // "Бригада не нужна" (версия 0.2.2) — заменяет прежнюю безымянную ручную
   // отметку crew_manual_done ("выполнено вручную" без указания, кто именно):
   // теперь пункт "Бригада" зелёный либо когда реально назначен исполнитель
@@ -2204,6 +2318,15 @@
     if(hasUnpaidInvoice) return "warn";
     if(invs.length) return "ok";
     if(cashExpensesFor(t, "materials").length) return "ok";
+    // 0.2.16: галочка «оплачено за наличные» — не все материалы идут по счёту
+    // от поставщика, иногда прораб просто платит наличными сразу на месте, и
+    // счёта не будет вообще. Пока сама наличная запись ещё не внесена в
+    // «Финансы → Наличные расходы», статус жёлтый (ожидание), а не нейтральный —
+    // это осознанно отмеченное намерение, а не забытый пункт. Как только
+    // появится наличный расход категории «Материал» по этой заявке, сработает
+    // проверка выше (cashExpensesFor(...).length) и статус станет зелёным
+    // (см. maybeClearMaterialsCashPending, которая заодно снимает саму галочку).
+    if(t.materials_cash_pending) return "warn";
     return "neutral";
   }
   function materialsIsGreen(t){ return materialsState(t)==="ok"; }
@@ -2221,7 +2344,10 @@
           if(invoicesFor(t,"materials").length) return "Материал оплачен";
           return "Материал оплачен наличными (прораб)";
         }
-        if(s==="warn") return "Материал: счёт приложен, ещё не оплачен";
+        if(s==="warn"){
+          if(invoicesFor(t,"materials").some(function(iv){ return !iv.paid; })) return "Материал: счёт приложен, ещё не оплачен";
+          return "Материал: отмечено «оплачено за наличные», ждём запись в «Наличные расходы»";
+        }
         return "Материал ещё не приобретён";
       } },
     { key:'work', svg:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>',
@@ -2995,11 +3121,18 @@
     // нужные для расчёта (сумма/валюта/НДС/налог), просто не участвуют в
     // сумме, но их количество показываем отдельно, чтобы итог не выглядел
     // как "полный".
-    var sumPaid = 0, sumDue = 0, missingAmountCount = 0;
+    // 0.2.16: суммы теперь в KZT (invoiceAccountedKZT переводит RUB/BYN по
+    // курсу Нацбанка РК) — иначе "Оплачено"/"К оплате" складывали бы разные
+    // валюты как одну. pendingRateCount — курс ещё грузится (Edge Function
+    // асинхронна) — отдельно от missingAmountCount (там правда нет данных
+    // для расчёта), т.к. это временное состояние, которое само разрешится
+    // (см. ensureNbkRate/render()).
+    var sumPaid = 0, sumDue = 0, missingAmountCount = 0, pendingRateCount = 0;
     list.forEach(function(iv){
-      var accounted = invoiceCostAccounted(iv);
-      if(accounted==null){ missingAmountCount++; return; }
-      if(iv.paid) sumPaid += accounted; else sumDue += accounted;
+      var acc = invoiceAccountedKZT(iv);
+      if(acc.state==="pending"){ pendingRateCount++; return; }
+      if(acc.value==null){ missingAmountCount++; return; }
+      if(iv.paid) sumPaid += acc.value; else sumDue += acc.value;
     });
     function fmtSum(n){ return n.toLocaleString("ru-RU", {minimumFractionDigits:0, maximumFractionDigits:2}); }
     return h`
@@ -3028,7 +3161,7 @@
               list.map(function(iv, i){
                 var tk = state.tickets.find(function(x){return x.id===iv.ticket_id;});
                 var hotel = tk ? hotelById(tk.hotel_id) : null;
-                var accounted = invoiceCostAccounted(iv);
+                var accKZT = invoiceAccountedKZT(iv);
                 // 0.2.13.1 (по просьбе Антона): если сумма указана "с НДС", то
                 // "Налог" может быть только "Упрощёнка" или "Наличный расчёт" —
                 // вариант "Обычный счёт" (0%) в этом случае не предлагается.
@@ -3051,7 +3184,9 @@
                       return editableRegistry ? h`<div class="muted registry-related-line"><a href="#" data-action="invoice-related-set" data-id="${iv.id}">+ также в заявках</a></div>` : "";
                     })()}
                   </td>
-                  <td><input type="number" step="0.01" min="0" data-invoice-amount data-id="${iv.id}" value="${iv.amount!=null?iv.amount:''}" placeholder="—" ${editableRegistry?'':'disabled'} title="${editableRegistry?'Указать сумму счёта':'Редактировать может только Администратор, Руководитель или Финансист'}"></td>
+                  <td>${(editableRegistry && state.registryEditingAmountId===iv.id)
+                    ? h`<input type="text" inputmode="decimal" class="registry-amount-input" data-invoice-amount data-id="${iv.id}" value="${iv.amount!=null?formatAmountInputValue(String(iv.amount)):''}" placeholder="—">`
+                    : h`<button type="button" class="registry-amount-display" data-action="${editableRegistry?'registry-amount-edit':''}" data-id="${iv.id}" ${editableRegistry?'':'disabled'} title="${editableRegistry?'Нажмите, чтобы изменить сумму':'Редактировать может только Администратор, Руководитель или Финансист'}">${iv.amount!=null?fmtSum(iv.amount):'—'}</button>`}</td>
                   <td>
                     <select data-invoice-currency data-id="${iv.id}" ${editableRegistry?'':'disabled'} title="${editableRegistry?'Валюта оплаты счёта (влияет на ставку НДС)':'Редактировать может только Администратор, Руководитель или Финансист'}">
                       <option value="">—</option>
@@ -3074,14 +3209,18 @@
                       <option value="cash" ${iv.tax_basis==='cash'?'selected':''}>Нал. +30%</option>`}
                     </select>
                   </td>
-                  <td class="mono" style="text-align:right;" title="Сумма без НДС, скорректированная на доп. налог по способу оплаты">${accounted!=null ? fmtSum(accounted) : '—'}</td>
+                  <td class="mono" style="text-align:right;" title="${accKZT.currency ? 'Сумма без НДС и с доп. налогом, переведена в KZT по курсу Нацбанка РК'+(iv.paid?' на день оплаты':' на сегодня — пересчитается на день оплаты') : 'Сумма без НДС, скорректированная на доп. налог по способу оплаты'}">
+                    ${accKZT.state==="ok" ? (fmtSum(accKZT.value) + (accKZT.currency ? h`<div class="muted" style="font-size:10px;">${fmtSum(accKZT.original)} ${accKZT.currency}</div>` : "")) :
+                      accKZT.state==="pending" ? h`<span class="muted">курс…</span>` :
+                      accKZT.state==="error" ? h`<span class="muted" title="Не удалось получить курс Нацбанка РК">${fmtSum(accKZT.original)} ${accKZT.currency} (?)</span>` : '—'}
+                  </td>
                   <td style="text-align:center;"><input type="checkbox" data-action="invoice-submitted-toggle" data-id="${iv.id}" data-val="${iv.submitted_for_payment?'0':'1'}" ${iv.submitted_for_payment?'checked':''} ${editableRegistry?'':'disabled'} title="${editableRegistry?'Отметить, что счёт передан в бухгалтерию/банк на оплату':'Редактировать может только Администратор, Руководитель или Финансист'}"></td>
                   <td style="text-align:center;"><input type="checkbox" data-action="invoice-paid-toggle" data-id="${iv.id}" data-val="${iv.paid?'0':'1'}" ${iv.paid?'checked':''} ${editableRegistry?'':'disabled'} title="${editableRegistry?'Отметить оплату счёта':'Редактировать может только Администратор, Руководитель или Финансист'}"></td>
                 </tr>`;
               }).join("")}
             </tbody>
             ${list.length>0 ? h`<tfoot><tr class="registry-totals-row">
-              <td colspan="4" class="muted" style="text-align:right;">Итого по показанным ${list.length} счетам${missingAmountCount?' (без данных для расчёта: '+missingAmountCount+')':''}:</td>
+              <td colspan="4" class="muted" style="text-align:right;">Итого по показанным ${list.length} счетам${missingAmountCount?' (без данных для расчёта: '+missingAmountCount+')':''}${pendingRateCount?' (ожидание курса НБ РК: '+pendingRateCount+')':''}:</td>
               <td colspan="4" class="mono" style="text-align:right;"><b>Оплачено: ${fmtSum(sumPaid)}</b> · <span class="muted">К оплате: ${fmtSum(sumDue)}</span></td>
               <td></td>
               <td></td>
@@ -3163,14 +3302,19 @@
     if(!person || !description){ alert("Укажите наименование и кто потратил."); return false; }
     var qty = Number(data.qty) || 1;
     var unitCost = Number(data.unit_cost) || 0;
+    var category = data.category==="other" ? "other" : "materials";
+    var expTicketId = resolveTicketRef(data.ticket_ref);
     sb.from("cash_expenses").insert({
       date: data.date || new Date().toISOString().slice(0,10),
       description: description, qty: qty, unit_cost: unitCost, amount: qty*unitCost,
       hotel_id: data.hotel_id ? Number(data.hotel_id) : null,
-      ticket_id: resolveTicketRef(data.ticket_ref),
-      category: data.category==="other" ? "other" : "materials",
+      ticket_id: expTicketId,
+      category: category,
       person: person, created_by: myLabelWithRole()
-    }).then(function(res){ if(res && res.error) alert("Не удалось сохранить расход: " + res.error.message); });
+    }).then(function(res){
+      if(res && res.error){ alert("Не удалось сохранить расход: " + res.error.message); return; }
+      if(category==="materials" && expTicketId) maybeClearMaterialsCashPending(expTicketId);
+    });
     return true;
   }
   function deleteCashExpense(id){
@@ -3260,6 +3404,9 @@
       state.cashImportResult = { count: payload.length };
       state.cashImportHeaders = []; state.cashImportRows = []; state.cashImportMapping = {};
       render();
+      if(category==="materials"){
+        payload.forEach(function(p){ if(p.ticket_id) maybeClearMaterialsCashPending(p.ticket_id); });
+      }
     });
   }
   function resetCashImport(){ state.cashImportHeaders=[]; state.cashImportRows=[]; state.cashImportMapping={}; state.cashImportResult=null; state.cashImportFileError=""; render(); }
@@ -3844,10 +3991,13 @@
             ${feedbackHtml("system-defect-feedback")}
           </div>
           <div>
-            <div class="section-title">Ход работ ${infoTip("«Бригада» становится зелёной, когда назначен исполнитель, либо по галочке «бригада не нужна». «Материал» — жёлтый, пока приложенный счёт не отмечен «Оплачено» в «Реестре платежей» (наличные это не отменяют), и зелёный по галочке «материал не нужен», или когда все приложенные счета оплачены, или когда по заявке есть наличный расход категории «Материал» из раздела «Финансы» (напр. счёт на плитку + нал на крестики под неё). «Работа» — ручной флажок (для случаев, когда сделано по факту, а подтверждения в системе нет). «Акт» подтверждается прикреплённым файлом, либо тоже вручную, пока файла нет. Во всех случаях тот же значок сразу подсвечивается вверху карточки, у номера заявки. Когда отмечены все 4 пункта (и «Материал» именно зелёный, а не жёлтый), заявка автоматически переходит в статус «Выполнено».")}</div>
+            <div class="section-title">Ход работ ${infoTip("«Бригада» становится зелёной, когда назначен исполнитель, либо по галочке «бригада не нужна». «Материал» — жёлтый, пока приложенный счёт не отмечен «Оплачено» в «Реестре платежей» (наличные это не отменяют) ЛИБО пока отмечена галочка «оплачено за наличные», но соответствующий расход ещё не внесён в «Наличные расходы»; и зелёный по галочке «материал не нужен», или когда все приложенные счета оплачены, или когда по заявке есть наличный расход категории «Материал» из раздела «Финансы» (напр. счёт на плитку + нал на крестики под неё, либо просто оплата наличными без счёта вообще — тогда сначала ставится галочка «оплачено за наличные», а после того как прораб внесёт сам расход, она снимается автоматически и сумма подтягивается сюда). «Работа» — ручной флажок (для случаев, когда сделано по факту, а подтверждения в системе нет). «Акт» подтверждается прикреплённым файлом, либо тоже вручную, пока файла нет. Во всех случаях тот же значок сразу подсвечивается вверху карточки, у номера заявки. Когда отмечены все 4 пункта (и «Материал» именно зелёный, а не жёлтый), заявка автоматически переходит в статус «Выполнено».")}</div>
             ${(function(){
               var crewFiles = invoicesFor(t, "crew").length;
               var materialsFiles = invoicesFor(t, "materials").length;
+              var materialsCash = cashExpensesFor(t, "materials");
+              var materialsCashTotal = materialsCash.reduce(function(sum,ce){ return sum + (Number(ce.amount)||0); }, 0);
+              var fmtCashSum = function(n){ return (Number(n)||0).toLocaleString("ru-RU", {maximumFractionDigits:2}); };
               var actPhotoCount = (state.photos||[]).filter(function(p){return p.ticket_id===t.id && p.category==="act";}).length;
               // "Бригада"/"Материал" (версия 0.2.2) больше не переключаются кликом
               // по значку — у них теперь свои явные элементы управления в теле
@@ -3911,7 +4061,7 @@
                 done: materialsDone,
                 warn: materialsWarn,
                 clickable: false,
-                title: materialsDone ? (t.materials_not_needed ? "Материал не требуется" : "Материал оплачен") : (materialsWarn ? "Счёт приложен, ещё не оплачен" : "Материал ещё не приобретён"),
+                title: materialsDone ? (t.materials_not_needed ? "Материал не требуется" : "Материал оплачен") : (materialsWarn ? (invoicesFor(t,"materials").some(function(iv){return !iv.paid;}) ? "Счёт приложен, ещё не оплачен" : "Отмечено «оплачено за наличные», ждём запись в «Наличные расходы»") : "Материал ещё не приобретён"),
                 meta: h`
                   ${materialsFiles ? h`<span class="milestone-meta">${materialsFiles} ${ruPlural(materialsFiles,["файл","файла","файлов"])}</span>` : ""}
                   ${milestoneAttachControl({cls:"ms-quick-attach", id:t.id, category:"materials", accept:"application/pdf,image/*", multiple:true, title:"Прикрепить счёт/накладную (можно сразу несколько)"})}`,
@@ -3922,6 +4072,15 @@
                       Материал не нужен
                     </label>
                   </div>
+                  ${(!t.materials_not_needed && !materialsCash.length) ? h`
+                  <div class="actions-row" style="margin-bottom:8px;align-items:center;">
+                    <label style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:400;margin:0;">
+                      <input type="checkbox" data-action="materials-cash-pending-toggle" data-id="${t.id}" data-val="${t.materials_cash_pending?'0':'1'}" ${t.materials_cash_pending?'checked':''}>
+                      Оплачено за наличные
+                    </label>
+                  </div>
+                  ${t.materials_cash_pending ? h`<div class="helptext" style="margin-bottom:8px;">Ожидает записи в «Финансы → Наличные расходы» (категория «Материал», эта заявка) — как только прораб внесёт расход, подвяжется сюда автоматически и статус станет зелёным.</div>` : ""}` : ""}
+                  ${materialsCash.length ? h`<div class="helptext" style="margin-bottom:8px;">Оплачено наличными: ${fmtCashSum(materialsCashTotal)} (${materialsCash.length} ${ruPlural(materialsCash.length,["запись","записи","записей"])}) — подтянуто автоматически из «Наличные расходы».</div>` : ""}
                   ${t.status==="onsite" ? h`<div class="actions-row" style="margin-bottom:8px;"><button class="btn btn-sm" data-action="materials" data-id="${t.id}">Нужны материалы…</button></div>` : ""}
                   ${t.materials_wait ? h`<div class="helptext" style="margin-bottom:8px;">Ожидаются материалы (срок поставки: ${fmtDateShort(t.materials_eta)}).</div>` : ""}
                   ${materialsFiles ? h`<div class="helptext" style="margin-bottom:8px;">Оплата счёта отмечается галочкой «Оплачено» в «Реестре платежей».</div>` : ""}
@@ -4388,6 +4547,7 @@
       if(action==="arrived") return markArrived(id);
       if(action==="materials") return openMaterialsEtaModal(id);
       if(action==="materials-not-needed-toggle") return setMaterialsNotNeeded(id, actionEl.getAttribute("data-val")==="1");
+      if(action==="materials-cash-pending-toggle") return setMaterialsCashPending(id, actionEl.getAttribute("data-val")==="1");
       if(action==="crew-not-needed-toggle") return setCrewNotNeeded(id, actionEl.getAttribute("data-val")==="1");
       if(action==="work-manual-toggle") return setWorkManualDone(id, actionEl.getAttribute("data-val")==="1");
       if(action==="act-signed-toggle") return setActSigned(id, actionEl.getAttribute("data-val")==="1");
@@ -4402,6 +4562,16 @@
       if(action==="invoice-paid-toggle") return setInvoicePaid(id, actionEl.getAttribute("data-val")==="1");
       if(action==="invoice-submitted-toggle") return setInvoiceSubmitted(id, actionEl.getAttribute("data-val")==="1");
       if(action==="invoice-related-set") { e.preventDefault(); return setInvoiceRelatedTickets(id); }
+      if(action==="registry-amount-edit"){
+        if(!canEditRegistry()) return;
+        state.registryEditingAmountId = id;
+        render();
+        // фокусируемся на только что появившемся поле — иначе пришлось бы
+        // кликать по нему ещё раз, чтобы начать вводить цифры.
+        var newAmountInput = document.querySelector('.registry-amount-input[data-id="'+id+'"]');
+        if(newAmountInput){ newAmountInput.focus(); newAmountInput.select(); }
+        return;
+      }
       if(action==="telegram-chatid-help"){
         e.preventDefault();
         alert(
@@ -4609,6 +4779,40 @@
       uploadTimesheetFile(qtsId, qtsFile).then(function(){ e.target.value=""; });
       return;
     }
+  });
+
+  // 0.2.16: поле "Сумма" в «Реестре платежей» сворачивается обратно в
+  // обычный (нередактируемый) текст, как только из него уходит фокус — не
+  // важно, изменилось ли значение (тогда это уже сделал "change" выше) или
+  // нет (тогда это единственное место, где режим редактирования снимается).
+  document.addEventListener("focusout", function(e){
+    if(e.target.matches(".registry-amount-input") && state.registryEditingAmountId){
+      state.registryEditingAmountId = null;
+      render();
+    }
+  });
+
+  // 0.2.16: разряды в поле "Сумма" пробелом по мере ввода (без запятой в
+  // качестве разделителя тысяч — запятая используется только для дробной
+  // части, как в обычной русской записи "1 234,5"). Курсор стараемся не
+  // "прыгать" — считаем, сколько значащих символов было до курсора, и
+  // ставим курсор после того же по счёту символа в переформатированной
+  // строке.
+  document.addEventListener("input", function(e){
+    if(!e.target.matches(".registry-amount-input")) return;
+    var el = e.target;
+    var caret = el.selectionStart==null ? el.value.length : el.selectionStart;
+    var before = el.value.slice(0, caret);
+    var significantBefore = (before.match(/[\d.,]/g)||[]).length;
+    var formatted = formatAmountInputValue(el.value);
+    el.value = formatted;
+    var count = 0, pos = formatted.length;
+    for(var i=0;i<formatted.length;i++){
+      if(/[\d.,]/.test(formatted[i])) count++;
+      if(count>=significantBefore){ pos = i+1; break; }
+    }
+    if(significantBefore===0) pos = 0;
+    el.setSelectionRange(pos, pos);
   });
 
   document.addEventListener("submit", function(e){
