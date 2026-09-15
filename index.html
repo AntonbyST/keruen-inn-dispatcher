@@ -117,6 +117,10 @@
   .demo-tag{ background:var(--warn-soft); color:var(--warn); font-size:10px; padding:1px 6px; border-radius:5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; white-space:nowrap; }
   .source-tag{ background:var(--accent-soft); color:var(--accent); font-size:10px; padding:1px 6px; border-radius:5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; white-space:nowrap; }
   .clector-sync-badge{ display:inline-block; margin-top:5px; background:var(--warn-soft); color:var(--warn); font-size:10.5px; font-weight:600; padding:2px 7px; border-radius:5px; white-space:nowrap; }
+  /* 0.2.18: заявка, которую автосинхронизация c-lector пометила удалённой на
+     источнике (tickets.clector_deleted_at) — см. clectorDeletedBadge(). */
+  .clector-deleted-badge{ display:inline-block; margin-top:5px; background:var(--crit-soft); color:var(--crit); font-size:10.5px; font-weight:600; padding:2px 7px; border-radius:5px; white-space:nowrap; }
+  .clector-deleted-banner{ background:var(--crit-soft); color:var(--crit); font-size:12.5px; font-weight:600; padding:8px 12px; border-radius:8px; margin-bottom:10px; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
   /* Унифицированные "отметки" в карточке заявки (0.2.12) — "Пометить как
      дубль" и "Системный брак" визуально выглядят одинаково: пунктирный
      контур, пока не отмечено (для системного брака — прямо вокруг поля
@@ -536,6 +540,16 @@
     var role = state.me && state.me.role;
     if(role==="dispatcher" || role==="head" || role==="finance") return true;
     return !!(state.me && state.me.can_edit_registry);
+  }
+  // 0.2.18: ручное удаление заявки из карточки (по просьбе Антона — например,
+  // когда заявку удалили в c-lector и её уже не нужно держать в системе, или
+  // завели по ошибке). Удаление необратимо и каскадом стирает всё, что
+  // привязано к заявке (счета, фото, журнал — см. "on delete cascade" в
+  // supabase_schema.sql), поэтому доступно только Администратору/Руководителю,
+  // как и самые чувствительные операции в «Команде»/«Отелях».
+  function canDeleteTicket(){
+    var role = state.me && state.me.role;
+    return role==="dispatcher" || role==="head";
   }
   // Единственный email, которому в разделе «Команда» доступны изменение
   // роли/зон, включение/отключение и удаление сотрудника — по просьбе Антона
@@ -2108,6 +2122,21 @@
       addNote(id, "Пометка «дубль» снята.");
     });
   }
+  // 0.2.18: ручное удаление заявки (кнопка в карточке — см. canDeleteTicket()
+  // и renderTicketPanel). Необратимо: счета/фото/журнал этой заявки удаляются
+  // каскадом вместе с ней (see supabase_schema.sql, on delete cascade);
+  // наличные расходы и заявки, ссылавшиеся на неё как на дубль/табель, просто
+  // теряют эту ссылку (on delete set null), а не удаляются сами.
+  function deleteTicket(id){
+    if(!canDeleteTicket()) return;
+    var t = state.tickets.find(function(x){return x.id===id;});
+    if(!t) return;
+    var label = t.external_ref ? ("№ "+t.external_ref) : "без номера c-lector";
+    if(!confirm("Удалить заявку "+label+" насовсем?\n\nВместе с ней безвозвратно удалятся все привязанные к ней счета, фото и записи журнала. Наличные расходы и другие заявки, ссылавшиеся на неё (дубль/табель), просто потеряют эту ссылку.\n\nОтменить это действие нельзя.")) return;
+    state.selectedTicketId = null;
+    renderTicketPanel();
+    sb.from("tickets").delete().eq("id", id).then(function(){});
+  }
   // "Системный брак" — название задаётся вручную в карточке (текстовое поле с
   // подсказкой уже введённых названий через <datalist>, чтобы не плодить
   // варианты написания одного и того же брака) — см. viewSystemDefects ниже,
@@ -2305,6 +2334,12 @@
     return h`<span class="pill ${cls}">${escapeHtml(text)}</span>`;
   }
   function isClosedExternalStatus(text){ return !!text && /выполн|заверш|устранен[оы]|закрыт/i.test(text); }
+  // 0.2.18: заявка удалена на стороне c-lector — ставится автосинхронизацией
+  // по API (clector-sync.ts пишет tickets.clector_deleted_at, когда c-lector
+  // сообщает deleted_at по этой заявке); ручной перенос (вставка/файл) такой
+  // сигнал в принципе не может дать — сравнивать не с чем, там просто нет
+  // строки в выгрузке. Раньше приложение вообще не смотрело на эту колонку.
+  function isDeletedInClector(t){ return !!t.clector_deleted_at; }
   // Внутренний статус наряда-задания — второстепенная метка рядом со статусом c-lector,
   // когда у заявки уже есть внешний статус (иначе внутренний и есть единственный статус).
   function internalStageTag(status){ return h`<span class="pill pill-neutral" style="opacity:.65;font-weight:500;" title="Статус внутреннего наряда-задания">наряд: ${STATUS_LABEL[status]}</span>`; }
@@ -2320,6 +2355,10 @@
   // "Выполнена", "Отклонена" и т.п.), а если внешнего статуса нет — по
   // внутреннему статусу наряда-задания.
   function isTicketDone(t){
+    // 0.2.18: удалённую в c-lector заявку тоже прячем по умолчанию (галочка
+    // "Показывать закрытые/отклонённые/удалённые из c-lector" их раскрывает) —
+    // с ней уже нечего делать, как и с закрытой/отклонённой.
+    if(isDeletedInClector(t)) return true;
     if(t.external_status) return /выполн|заверш|устранен[оы]|закрыт|отклон|отказ/i.test(t.external_status);
     return t.status==="closed" || t.status==="rejected";
   }
@@ -2642,6 +2681,11 @@
     if(isClosedExternalStatus(t.external_status)) return "";
     return h`<div class="clector-sync-badge" title="Акт подписан — не забудьте изменить статус этой заявки на сайте c-lector.ru">⟳ изменить статус в c-lector</div>`;
   }
+  // 0.2.18: значок "Удалена в c-lector" в списке заявок (см. isDeletedInClector).
+  function clectorDeletedBadge(t){
+    if(!isDeletedInClector(t)) return "";
+    return h`<div class="clector-deleted-badge" title="${escapeHtml("Удалена в c-lector"+(t.clector_deleted_at?(" "+fmtDate(t.clector_deleted_at)):"")+" — данные и история остались здесь, но в самом c-lector этой заявки больше нет")}">Удалена в c-lector</div>`;
+  }
   // Показывает, какую заявку дублирует текущая (см. setDuplicateOf выше) — в
   // списке заявок, рядом с номером, чтобы диспетчер сразу видел, что по этой
   // поломке уже есть другая заявка в работе.
@@ -2953,11 +2997,11 @@
         <select data-filter="zone"><option value="">Все зоны</option>${[1,2,3].map(function(z){return h`<option value="${z}" ${f.zone===String(z)?'selected':''}>Зона ${z}</option>`;}).join("")}</select>
         <select data-filter="hotel"><option value="">Все отели</option>${state.hotels.filter(function(x){return x.in_service;}).map(function(x){return h`<option value="${x.id}" ${f.hotel===String(x.id)?'selected':''}>№${x.id} ${x.name}</option>`;}).join("")}</select>
         <input type="text" data-filter="q" value="${escapeHtml(f.q||"")}" placeholder="Поиск по описанию или № заявки…" style="min-width:220px;">
-        <div class="chip-toggle"><label><input type="checkbox" data-filter-checkbox="showClosed" ${f.showClosed?'checked':''}> Показывать закрытые/отклонённые</label></div>
+        <div class="chip-toggle"><label><input type="checkbox" data-filter-checkbox="showClosed" ${f.showClosed?'checked':''}> Показывать закрытые/отклонённые/удалённые из c-lector</label></div>
         <div class="chip-toggle"><label><input type="checkbox" data-filter-checkbox="attentionOnly" ${f.attentionOnly?'checked':''}> Только с пометкой «особое внимание»</label></div>
         <div class="chip-toggle"><label><input type="checkbox" data-filter-checkbox="systemDefectOnly" ${f.systemDefectOnly?'checked':''}> Только системный брак</label></div>
         <button class="btn btn-sm" data-action="tickets-export" ${list.length===0?'disabled':''}>Экспорт в Excel</button>
-        <span class="muted" style="margin-left:auto;">${list.length} заявок${(!f.showClosed && hiddenClosedCount>0) ? h` <span title="Закрытые и отклонённые скрыты по умолчанию">(скрыто: ${hiddenClosedCount})</span>` : ""}</span>
+        <span class="muted" style="margin-left:auto;">${list.length} заявок${(!f.showClosed && hiddenClosedCount>0) ? h` <span title="Закрытые, отклонённые и удалённые из c-lector скрыты по умолчанию">(скрыто: ${hiddenClosedCount})</span>` : ""}</span>
       </div>
       <div class="card"><div class="table-wrap"><table>
         <thead><tr>${refTh()}${sortableTh("Отель","hotel")}${sortableTh("Описание","desc")}${sortableTh("Статус","status")}${sortableTh("Срок","deadline")}</tr></thead>
@@ -2974,7 +3018,7 @@
                 <div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap;">${zoneBadge(t.zone)}${t.demo?' <span class="demo-tag">пример</span>':''}${t.source==='c-lector'?' <span class="source-tag">c-lector</span>':''}</div>
               </td>
               <td><div class="line-clamp-2" style="max-width:360px;" title="${escapeHtml(displayShort(t))}">${escapeHtml(displayShort(t))}</div></td>
-              <td>${t.external_status? externalStatusPill(t.external_status): statusPill(t.status)}${clectorSyncBadge(t)}</td>
+              <td>${t.external_status? externalStatusPill(t.external_status): statusPill(t.status)}${clectorSyncBadge(t)}${clectorDeletedBadge(t)}</td>
               <td style="${di.overdue?'color:var(--crit);font-weight:600;':(di.soon?'color:var(--warn);font-weight:600;':'')}" title="${escapeHtml(di.label)}">${di.dateLabel}</td>
             </tr>`; }).join("")}
         </tbody></table></div></div>`;
@@ -4050,9 +4094,14 @@
             ${t.attention_flag && t.attention_note ? h`<div class="muted" style="font-size:12px;margin-top:4px;">⚑ ${escapeHtml(t.attention_note)}</div>` : ""}
           </div>
           <button type="button" class="btn btn-ghost btn-sm" data-action="copy-ticket-link" data-id="${t.id}" title="Скопировать прямую ссылку на эту заявку" style="flex:none;">Ссылка</button>
+          ${canDeleteTicket() ? h`<button type="button" class="btn btn-ghost btn-sm btn-danger" data-action="ticket-delete" data-id="${t.id}" title="Удалить эту заявку насовсем (вместе со счетами, фото и журналом)" style="flex:none;">Удалить</button>` : ""}
           <button class="btn btn-ghost panel-close" data-close-panel>✕</button>
         </div>
         <div class="panel-body">
+          ${isDeletedInClector(t) ? h`<div class="clector-deleted-banner">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16" style="flex:none;"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            <span>Эта заявка удалена в c-lector${t.clector_deleted_at ? (" "+escapeHtml(fmtDate(t.clector_deleted_at))) : ""} — данные и история остались здесь, но в самом c-lector её больше нет.${canDeleteTicket() ? " Можно оставить как есть или удалить насовсем кнопкой «Удалить» выше." : ""}</span>
+          </div>` : ""}
           <div><div class="section-title">Описание</div>
             <div style="display:flex;align-items:baseline;gap:8px;">
               <div style="font-size:14.5px;font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(displayShort(t))}">${escapeHtml(displayShort(t))}${!t.description_short?h` <span class="muted" style="font-weight:400;font-size:11px;">(черновик)</span>`:''}</div>
@@ -4799,6 +4848,7 @@
       }
       if(action==="duplicate-set") return setDuplicateOf(id);
       if(action==="duplicate-clear") return clearDuplicateOf(id);
+      if(action==="ticket-delete") return deleteTicket(id);
       if(action==="system-defect-clear") return clearSystemDefectName(id);
       if(action==="photo-open") return openPhotoFile(actionEl.getAttribute("data-path"));
       if(action==="photo-delete"){ deletePhoto(id, actionEl.getAttribute("data-path")); return; }
