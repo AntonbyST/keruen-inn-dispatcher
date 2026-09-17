@@ -212,6 +212,11 @@
   .hotel-field-display:hover{ border-color:var(--line); }
   .registry-related-line{ font-size:10.5px; line-height:1.4; margin-top:2px; white-space:normal; }
   .registry-related-line a{ white-space:nowrap; }
+  /* 0.2.20: счёт, общий сразу на несколько заявок (см. registryGroupRow) —
+     разворачивается в построчную разбивку доли каждой заявки. */
+  .registry-expand-btn{ padding:1px 5px; margin-right:4px; font-size:11px; line-height:1; vertical-align:middle; }
+  .registry-alloc-row td{ background:var(--surface-2); border-top:none; padding-top:3px; padding-bottom:3px; }
+  .registry-alloc-row input{ box-sizing:border-box; padding:2px 4px; font-size:12px; text-align:right; font-variant-numeric:tabular-nums; }
   table{ width:100%; border-collapse:collapse; font-size:13px; }
   th{ text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-faint); font-weight:600; padding:9px 12px; border-bottom:1px solid var(--line); white-space:nowrap; }
   td{ padding:11px 12px; border-bottom:1px solid var(--line); vertical-align:middle; }
@@ -652,6 +657,71 @@
     if(r==="error") return { value:null, state:"error", original:accounted, currency:cur };
     return { value: accounted * (r.rate/r.quant), state:"ok", original:accounted, currency:cur };
   }
+  function fmtKZT(n){ return (Number(n)||0).toLocaleString("ru-RU", {minimumFractionDigits:0, maximumFractionDigits:2}); }
+
+  // 0.2.20: в «Реестре платежей» один и тот же файл счёта иногда прикреплён по
+  // отдельности сразу к нескольким заявкам (см. invoiceRelatedTickets ниже) —
+  // в базе это разные строки invoices с одинаковым file_name. Раньше каждая
+  // такая строка была отдельной "непонятной" строкой реестра с пустыми
+  // Сумма/Валюта/НДС — теперь их группируем в одну строку (см.
+  // registryGroupRow), а сумму делят между заявками по проценту
+  // (invoices.extra.alloc_percent, задаётся в развёрнутом виде группы).
+  function invoiceGroupMembers(iv){
+    if(!iv || !iv.file_name) return [iv];
+    // По имени файла совпадение иногда бывает случайным (два разных счёта,
+    // отсканированных под одинаковым обобщённым именем вроде "скан.pdf") — раз
+    // это ложно объединяет их в реестре в одну строку, даём отменить это
+    // вручную конкретно для одной из копий (см. ungroupInvoice/"Это другой
+    // счёт" в развёрнутом виде группы): помеченная extra.ungrouped копия
+    // больше никогда не считается той же группой, что и остальные.
+    if(iv.extra && iv.extra.ungrouped) return [iv];
+    var name = normalizeForMatch(iv.file_name);
+    var out = (state.invoices||[]).filter(function(x){ return normalizeForMatch(x.file_name||"")===name && !(x.extra && x.extra.ungrouped); });
+    return out.length ? out.sort(function(a,b){ return (a.uploaded_at||"").localeCompare(b.uploaded_at||""); }) : [iv];
+  }
+  // См. комментарий выше — ручной "разрыв" ложного объединения по имени файла.
+  function ungroupInvoice(invoiceId){
+    if(!canEditRegistry()) return;
+    var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
+    if(!iv) return;
+    if(!confirm("Пометить «"+iv.file_name+"» по этой заявке как отдельный, не связанный с остальными счёт (совпадение имени файла случайное)?")) return;
+    var extra = Object.assign({}, iv.extra||{}, {ungrouped:true});
+    delete extra.alloc_percent; // доля больше не имеет смысла вне группы
+    iv.extra = extra;
+    render();
+    sb.from("invoices").update({extra:extra}).eq("id", invoiceId).then(function(){});
+  }
+  // "Основная" копия счёта в группе (самая ранняя загрузка) — только на ней
+  // указываются реальные Сумма/Валюта/НДС/Налог; у остальных копий эти поля
+  // больше не редактируются в интерфейсе, чтобы не разъезжались независимо
+  // друг от друга для одного и того же документа.
+  function invoiceGroupPrimary(iv){ return invoiceGroupMembers(iv)[0]; }
+  function invoiceAllocPercent(iv){
+    var p = iv && iv.extra && iv.extra.alloc_percent;
+    return (typeof p==="number" && isFinite(p)) ? p : null;
+  }
+  // Сумма KZT без НДС конкретной ЗАЯВКИ по этому счёту — с учётом доли, если
+  // счёт общий на несколько заявок (используется в карточке заявки, см.
+  // renderInvoiceList). Для счёта на одну заявку — то же, что и
+  // invoiceAccountedKZT(iv). Для суммы ВСЕГО счёта целиком (нужна в «Реестре
+  // платежей») используйте invoiceAccountedKZT(invoiceGroupPrimary(iv)).
+  function invoiceAccountedKZTForTicket(iv){
+    var members = invoiceGroupMembers(iv);
+    var acc = invoiceAccountedKZT(members[0]);
+    if(members.length<=1) return acc;
+    var pct = invoiceAllocPercent(iv);
+    if(pct==null || acc.value==null) return Object.assign({}, acc, {shared:true, percent:null});
+    return Object.assign({}, acc, {value: acc.value*(pct/100), full:acc.value, percent:pct, shared:true});
+  }
+  // HTML-фрагмент суммы "Учтено в затратах" (KZT без НДС) — общий для
+  // «Реестра платежей» и карточки заявки, чтобы состояния ok/pending/error/
+  // missing выглядели везде одинаково.
+  function accountedKZTLabel(acc){
+    if(acc.state==="ok") return fmtKZT(acc.value) + (acc.currency ? h`<div class="muted" style="font-size:10px;">${fmtKZT(acc.original)} ${acc.currency}</div>` : "");
+    if(acc.state==="pending") return h`<span class="muted">курс…</span>`;
+    if(acc.state==="error") return h`<span class="muted" title="Не удалось получить курс Нацбанка РК">${fmtKZT(acc.original)} ${acc.currency} (?)</span>`;
+    return '—';
+  }
 
   function hotelById(id){ var list=state.hotels||[]; for (var i=0;i<list.length;i++){ if (list[i].id===Number(id)) return list[i]; } return null; }
   function fmtDate(iso){ if(!iso) return "—"; var d=new Date(iso); return d.toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit",year:"numeric"})+" "+d.toLocaleTimeString("ru-RU",{hour:"2-digit",minute:"2-digit"}); }
@@ -1043,6 +1113,10 @@
     // ключ "<id счёта>:currency|vat|tax" редактируемого сейчас поля (см.
     // registrySelectCell).
     registryEditingFieldKey: null,
+    // 0.2.20: какие сгруппированные строки «Реестра платежей» сейчас
+    // раскрыты (счёт сразу на несколько заявок — см. registryGroupRow) —
+    // ключ группы (нормализованное имя файла) -> true.
+    registryExpandedGroups: {},
     // 0.2.17: то же самое для «Отелей» — «Зона», «Координаты» и «Лицо от
     // Заказчика» показываются обычным текстом без рамок ввода, если уже
     // заполнены, и превращаются в поля ввода по клику. Ключ вида
@@ -1305,36 +1379,86 @@
       if(iv) addNote(iv.ticket_id, "Указана сумма счёта «"+iv.file_name+"»: "+(amount!=null?amount:"—")+".");
     });
   }
-  function setInvoicePaid(invoiceId, val){
+  // invoiceIdOrIds — обычно один id; для сгруппированной строки «Реестра»
+  // (0.2.20, один и тот же счёт сразу на несколько заявок — см.
+  // registryGroupRow) сюда приходит список id через запятую, чтобы отметка
+  // «оплачено»/«подано в оплату» ставилась сразу на все копии этого счёта, а
+  // не расходилась по ним независимо.
+  function setInvoicePaid(invoiceIdOrIds, val){
     if(!canEditRegistry()){ alert("Отмечать оплату счетов может только Администратор, Руководитель или Финансист."); return; }
-    var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
-    // 0.2.16: paid_at — момент отметки "оплачено", нужен для курса Нацбанка
-    // РК "на день оплаты" (см. invoiceAccountedKZT). Снятие галочки оставляет
-    // paid_at как есть (не обнуляем) — так при повторной отметке "оплачено"
-    // без изменений это будет более-менее та же дата, а если дата всё же
-    // изменится — обновится ниже.
-    var paidAt = val ? new Date().toISOString() : (iv ? iv.paid_at : null);
-    if(iv){ iv.paid = val; iv.paid_at = paidAt; }
-    render();
-    sb.from("invoices").update({paid:val, paid_at:paidAt}).eq("id", invoiceId).then(function(){
-      if(iv){
-        addNote(iv.ticket_id, val ? "Счёт «"+iv.file_name+"» отмечен оплаченным." : "Отметка «оплачено» снята со счёта «"+iv.file_name+"».");
-        if(val) maybeAutoComplete(iv.ticket_id);
-      }
+    String(invoiceIdOrIds).split(",").forEach(function(invoiceId){
+      var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
+      // 0.2.16: paid_at — момент отметки "оплачено", нужен для курса Нацбанка
+      // РК "на день оплаты" (см. invoiceAccountedKZT). Снятие галочки оставляет
+      // paid_at как есть (не обнуляем) — так при повторной отметке "оплачено"
+      // без изменений это будет более-менее та же дата, а если дата всё же
+      // изменится — обновится ниже.
+      var paidAt = val ? new Date().toISOString() : (iv ? iv.paid_at : null);
+      if(iv){ iv.paid = val; iv.paid_at = paidAt; }
+      sb.from("invoices").update({paid:val, paid_at:paidAt}).eq("id", invoiceId).then(function(){
+        if(iv){
+          addNote(iv.ticket_id, val ? "Счёт «"+iv.file_name+"» отмечен оплаченным." : "Отметка «оплачено» снята со счёта «"+iv.file_name+"».");
+          if(val) maybeAutoComplete(iv.ticket_id);
+        }
+      });
     });
+    render();
   }
   // 0.2.15: промежуточная отметка между "прикреплён" и "оплачено" — счёт
   // уже передан в бухгалтерию/банк на оплату, но деньги ещё не ушли.
   // Никак не влияет на расчёты (Учтено в затратах/Оплачено/К оплате) —
   // это только видимый статус для отслеживания движения счетов.
-  function setInvoiceSubmitted(invoiceId, val){
+  function setInvoiceSubmitted(invoiceIdOrIds, val){
     if(!canEditRegistry()){ alert("Отмечать «подано в оплату» может только Администратор, Руководитель или Финансист."); return; }
-    var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
-    if(iv) iv.submitted_for_payment = val;
-    render();
-    sb.from("invoices").update({submitted_for_payment:val}).eq("id", invoiceId).then(function(){
-      if(iv) addNote(iv.ticket_id, val ? "Счёт «"+iv.file_name+"» подан в оплату." : "Отметка «подано в оплату» снята со счёта «"+iv.file_name+"».");
+    String(invoiceIdOrIds).split(",").forEach(function(invoiceId){
+      var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
+      if(iv) iv.submitted_for_payment = val;
+      sb.from("invoices").update({submitted_for_payment:val}).eq("id", invoiceId).then(function(){
+        if(iv) addNote(iv.ticket_id, val ? "Счёт «"+iv.file_name+"» подан в оплату." : "Отметка «подано в оплату» снята со счёта «"+iv.file_name+"».");
+      });
     });
+    render();
+  }
+  // 0.2.20: доля конкретной заявки в счёте, общем на несколько заявок (см.
+  // registryGroupRow/registryGroupExpandRows) — процент хранится в
+  // invoices.extra (jsonb), сумма при этом только считается на лету от
+  // текущей "Учтено в затратах" ОСНОВНОГО счёта (см. invoiceAccountedKZTForTicket),
+  // а не хранится отдельно — так она сама пересчитается, если курс НБ РК или
+  // сумма счёта потом изменятся.
+  function setInvoiceAllocPercent(invoiceId, val){
+    if(!canEditRegistry()) return;
+    var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
+    if(!iv) return;
+    var raw = String(val||"").replace(",", ".").trim();
+    var pct = raw==="" ? null : Number(raw);
+    if(pct!=null && isNaN(pct)){ render(); return; }
+    var extra = Object.assign({}, iv.extra||{});
+    if(pct==null) delete extra.alloc_percent; else extra.alloc_percent = pct;
+    iv.extra = extra;
+    render();
+    sb.from("invoices").update({extra:extra}).eq("id", invoiceId).then(function(){});
+  }
+  // Тот же процент, но введённый через сумму в KZT (по текущей "Учтено в
+  // затратах" основного счёта) — процент пересчитывается один раз при вводе
+  // и дальше хранится как канонический (см. комментарий выше); при пустом
+  // счёте (сумма ещё не посчитана) ввод суммы недоступен — сначала нужно
+  // указать сумму/валюту/НДС основного счёта.
+  function setInvoiceAllocAmount(invoiceId, val){
+    if(!canEditRegistry()) return;
+    var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
+    if(!iv) return;
+    var raw = String(val||"").replace(",", ".").trim();
+    var amount = raw==="" ? null : Number(raw);
+    if(amount!=null && isNaN(amount)){ render(); return; }
+    var primary = invoiceGroupPrimary(iv);
+    var acc = invoiceAccountedKZT(primary);
+    if(amount!=null && !acc.value){ render(); return; }
+    var pct = amount==null ? null : (amount / acc.value * 100);
+    var extra = Object.assign({}, iv.extra||{});
+    if(pct==null) delete extra.alloc_percent; else extra.alloc_percent = pct;
+    iv.extra = extra;
+    render();
+    sb.from("invoices").update({extra:extra}).eq("id", invoiceId).then(function(){});
   }
   // Валюта / НДС / способ оплаты счёта (0.2.13.1) — те же три поля, что нужны
   // invoiceCostAccounted() для расчёта "Учтено в затратах" в «Реестре
@@ -1737,13 +1861,14 @@
       var ms2 = new Date(t.resolution_deadline).getTime()-now;
       return {label:"Срок (c-lector): "+fmtDate(t.resolution_deadline), dateLabel:fmtDateShort(t.resolution_deadline), overdue: ms2<0, soon: ms2>0 && ms2<24*3600*1000, ms:ms2, kind:"resolution"};
     }
-    if(t.status==="new" || t.status==="dispatched"){
-      var ms = new Date(t.arrival_deadline).getTime()-now;
-      return {label:"Прибытие к "+fmtDateShort(t.arrival_deadline), dateLabel:fmtDateShort(t.arrival_deadline), overdue: ms<0, soon: ms>0 && ms<4*3600*1000, ms:ms, kind:"arrival"};
-    }
-    if(t.status==="onsite"){
-      // Срок не указан/не сопоставлен при импорте — честно показываем, что
-      // данных нет, а не подставляем свою дату.
+    // 0.2.20 (по просьбе Антона): раньше для new/dispatched без resolution_deadline
+    // сюда подставлялся внутренний "срок прибытия" (по зоне отеля) — в колонке
+    // "Срок" это выглядело так, будто у заявки уже ЕСТЬ срок из c-lector, хотя
+    // на самом деле c-lector его просто ещё не прислал. "Срок реагирования" по
+    // зоне — теперь отдельная информация (см. «Отели» и наряд-задание), в
+    // колонке "Срок" её больше не показываем ни для одного статуса — честно
+    // показываем, что данных нет, а не подставляем свою дату.
+    if(t.status==="new" || t.status==="dispatched" || t.status==="onsite"){
       return {label:"Срок не указан (нет данных c-lector)", dateLabel:"Срок не указан", overdue:false, kind:"resolution"};
     }
     return {label:"—", dateLabel:"—", overdue:false};
@@ -2569,8 +2694,14 @@
   function renderInvoiceList(list){
     if(!list.length) return h`<div class="muted" style="font-size:12.5px;">Файлов пока нет.</div>`;
     return h`<div class="row-gap" style="gap:6px;display:flex;flex-direction:column;">${list.map(function(iv){
+      // 0.2.20 (по просьбе Антона): в карточке заявки теперь видна сумма в KZT
+      // без НДС по ЭТОЙ заявке — если счёт общий на несколько заявок (см.
+      // invoiceGroupMembers), показывается доля этой заявки (по проценту из
+      // «Реестра платежей»), а не сумма всего счёта целиком.
+      var acc = invoiceAccountedKZTForTicket(iv);
       return h`<div class="invoice-row" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 10px;border:1px solid var(--line);border-radius:8px;">
         <button type="button" class="btn btn-sm" data-action="invoice-open" data-path="${escapeHtml(iv.file_path)}">${escapeHtml(iv.file_name)}</button>
+        <span class="mono muted" style="font-size:12px;" title="${acc.shared?('Сумма без НДС по этой заявке'+(acc.percent!=null?' ('+acc.percent+'% от счёта)':' — доля не указана в «Реестре платежей», показана сумма всего счёта')):'Сумма без НДС'}">${accountedKZTLabel(acc)}${acc.state==="ok" && !acc.currency ? ' ₸' : ''}</span>
         <div style="margin-left:auto;display:flex;align-items:center;gap:8px;">
           ${invoicePaidPill(iv)}
           <button type="button" class="btn btn-sm btn-ghost btn-danger" data-action="invoice-delete" data-id="${iv.id}" data-path="${escapeHtml(iv.file_path)}" title="Удалить файл">✕</button>
@@ -2775,7 +2906,7 @@
           <button class="btn btn-sm" data-action="clear-demo">Удалить примеры</button></div>` : ""}
         <div class="grid-kpi">
           <div class="card kpi"><div class="kpi-label">Активных заявок</div><div class="kpi-value accent">${active.length}</div><div class="kpi-sub">внутри платформы</div></div>
-          <div class="card kpi"><div class="kpi-label">Просрочено</div><div class="kpi-value ${overdue.length?'crit':''}">${overdue.length}</div><div class="kpi-sub">нарушен срок прибытия/устранения</div></div>
+          <div class="card kpi"><div class="kpi-label">Просрочено</div><div class="kpi-value ${overdue.length?'crit':''}">${overdue.length}</div><div class="kpi-sub">нарушен срок устранения (c-lector)</div></div>
           <div class="card kpi"><div class="kpi-label">Выполнено с загрузки ~7 дн. назад</div><div class="kpi-value ok">${closedWeek? ((closedWeek.delta>=0?'+':'')+closedWeek.delta) : '—'}</div><div class="kpi-sub">${closedWeek? ('с '+fmtDateShort(closedWeek.fromDate)+' по '+fmtDateShort(closedWeek.toDate)) : 'нужно ≥2 загрузок из c-lector'}</div></div>
           <div class="card kpi"><div class="kpi-label">Группа 1 в работе</div><div class="kpi-value">${group1Active.length}</div><div class="kpi-sub">критические, на контроле</div></div>
         </div>
@@ -3215,59 +3346,128 @@
     }
     return registrySelectRaw(iv, kind, !editableRegistry || forceDisabled, roleTitle);
   }
-  // Одна строка счёта в «Реестре платежей» — вынесена в отдельную функцию в
-  // 0.2.19, чтобы использовать и для неоплаченных счетов (без группировки),
-  // и внутри каждой группы "оплачено в месяце X" (см. viewRegistry).
-  function registryInvoiceRow(iv, rowNum, editableRegistry, fmtSum){
-    var tk = state.tickets.find(function(x){return x.id===iv.ticket_id;});
-    var hotel = tk ? hotelById(tk.hotel_id) : null;
-    var accKZT = invoiceAccountedKZT(iv);
-    return h`<tr>
+  // 0.2.20: группировка счетов в «Реестре платежей» — один и тот же файл
+  // счёта иногда прикреплён по отдельности сразу к нескольким заявкам (см.
+  // invoiceGroupMembers); раньше это давало N визуально одинаковых пустых
+  // строк реестра (см. историю в invoiceRelatedTickets выше). Строим группу
+  // из ВСЕХ копий этого файла в базе, но для отображения (список заявок,
+  // раскрытие) оставляем только те копии, что прошли текущий фильтр — сама
+  // группа при этом не теряется, если фильтру соответствует хотя бы одна
+  // копия. `primary` — всегда САМАЯ РАННЯЯ загруженная копия вообще (без
+  // учёта фильтра) — только на ней редактируются Сумма/Валюта/НДС/Налог, это
+  // и есть данные всего счёта как документа.
+  function buildInvoiceGroups(filteredInvoices){
+    var seen = {}, groups = [];
+    filteredInvoices.forEach(function(iv){
+      var key = normalizeForMatch(iv.file_name||"") || ("__id_"+iv.id);
+      if(seen[key]) return;
+      seen[key] = true;
+      var trueMembers = invoiceGroupMembers(iv);
+      var shownMembers = trueMembers.filter(function(x){ return filteredInvoices.indexOf(x)!==-1; });
+      if(!shownMembers.length) shownMembers = [iv];
+      groups.push({ key:key, primary:trueMembers[0], members:shownMembers, hiddenCount: trueMembers.length-shownMembers.length });
+    });
+    return groups;
+  }
+  // Одна строка «Реестра платежей» — счёт на одну заявку выглядит как обычная
+  // строка; счёт сразу на несколько заявок сворачивается в одну строку (номера
+  // всех заявок — в ячейке "№ заявки"), со стрелкой, разворачивающей построчную
+  // разбивку доли каждой заявки (см. registryGroupExpandRows).
+  function registryGroupRow(group, rowNum, editableRegistry, expanded){
+    var primary = group.primary;
+    var members = group.members;
+    var isGroup = members.length>1;
+    var rows = members.map(function(iv){ return { iv:iv, tk: state.tickets.find(function(x){return x.id===iv.ticket_id;}) }; });
+    var hotelsById = {};
+    rows.forEach(function(r){ var h2 = r.tk?hotelById(r.tk.hotel_id):null; if(h2) hotelsById[h2.id]=h2; });
+    var hotelIds = Object.keys(hotelsById);
+    var hotelCell, hotelTitle;
+    if(hotelIds.length===1){ var onlyHotel = hotelsById[hotelIds[0]]; hotelCell = "№"+onlyHotel.id+" "+escapeHtml(onlyHotel.name); hotelTitle = onlyHotel.name; }
+    else if(hotelIds.length>1){ hotelCell = h`<span class="muted">Разные (${hotelIds.length})</span>`; hotelTitle = hotelIds.map(function(k){return hotelsById[k].name;}).join(", "); }
+    else { hotelCell = "—"; hotelTitle = ""; }
+    var refCell = rows.map(function(r){
+      return r.tk ? h`<a href="#" data-open-ticket="${r.tk.id}" title="Открыть заявку">${r.tk.external_ref?escapeHtml(r.tk.external_ref):'открыть'}</a>` : '—';
+    }).join(", ");
+    var accKZT = invoiceAccountedKZT(primary);
+    var groupIds = members.map(function(r){return r.id;}).join(",");
+    var allSubmitted = members.every(function(r){return r.submitted_for_payment;});
+    var allPaid = members.every(function(r){return r.paid;});
+    return h`<tr class="${isGroup?'registry-group-row':''}">
       <td class="mono muted">${rowNum}</td>
-      <td class="mono">${tk ? h`<a href="#" data-open-ticket="${tk.id}" title="Открыть заявку">${tk.external_ref?escapeHtml(tk.external_ref):'открыть'}</a>` : '—'}</td>
-      <td style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${hotel?escapeHtml(hotel.name):''}">${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
+      <td class="mono">${isGroup ? h`<button type="button" class="btn btn-ghost btn-sm registry-expand-btn" data-action="registry-group-toggle" data-key="${escapeHtml(group.key)}" title="${expanded?'Свернуть':'Показать долю каждой заявки'}">${expanded?'▾':'▸'}</button>` : ""}${refCell}</td>
+      <td style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center;" title="${escapeHtml(hotelTitle)}">${hotelCell}</td>
       <td>
-        <button class="btn btn-sm registry-file-btn" data-action="invoice-open" data-path="${escapeHtml(iv.file_path)}" title="${escapeHtml(iv.file_name)}">счёт</button>
-        ${(function(){
-          // 0.2.17: "также в заявках" теперь определяется автоматически (тот
-          // же файл, прикреплённый отдельно к другим заявкам — см.
-          // invoiceRelatedTickets), без ручного ввода.
-          var rel = invoiceRelatedTickets(iv);
-          if(!rel.length) return "";
-          return h`<div class="muted registry-related-line" title="Тот же файл также прикреплён к этим заявкам — не считайте его сумму отдельно по каждой">Также: ${rel.map(function(t){ return h`<a href="#" data-open-ticket="${t.id}">№${escapeHtml(t.external_ref||t.id)}</a>`; }).join(", ")}</div>`;
-        })()}
+        <button class="btn btn-sm registry-file-btn" data-action="invoice-open" data-path="${escapeHtml(primary.file_path)}" title="${escapeHtml(primary.file_name)}">счёт</button>
+        ${isGroup ? h`<div class="muted registry-related-line">Общий на ${members.length} ${pluralRu(members.length,'заявку','заявки','заявок')}${group.hiddenCount?' (+'+group.hiddenCount+' скрыто фильтром)':''}</div>` : (group.hiddenCount ? h`<div class="muted registry-related-line">Также на ${group.hiddenCount} ${pluralRu(group.hiddenCount,'заявке','заявках','заявках')} — скрыто фильтром</div>` : "")}
       </td>
-      <td>${(editableRegistry && state.registryEditingAmountId===iv.id)
-        ? h`<input type="text" inputmode="decimal" class="registry-amount-input" data-invoice-amount data-id="${iv.id}" value="${iv.amount!=null?formatAmountInputValue(String(iv.amount)):''}" placeholder="—">`
-        : h`<button type="button" class="registry-amount-display" data-action="${editableRegistry?'registry-amount-edit':''}" data-id="${iv.id}" ${editableRegistry?'':'disabled'} title="${editableRegistry?'Нажмите, чтобы изменить сумму':'Редактировать может только Администратор, Руководитель или Финансист'}">${iv.amount!=null?fmtSum(iv.amount):'—'}</button>`}</td>
-      <td>${registrySelectCell(iv, "currency", editableRegistry)}</td>
-      <td>${registrySelectCell(iv, "vat", editableRegistry)}</td>
-      <td>${registrySelectCell(iv, "tax", editableRegistry)}</td>
-      <td class="mono" style="text-align:right;" title="${accKZT.currency ? 'Сумма без НДС и с доп. налогом, переведена в KZT по курсу Нацбанка РК'+(iv.paid?' на день оплаты':' на сегодня — пересчитается на день оплаты') : 'Сумма без НДС, скорректированная на доп. налог по способу оплаты'}">
-        ${accKZT.state==="ok" ? (fmtSum(accKZT.value) + (accKZT.currency ? h`<div class="muted" style="font-size:10px;">${fmtSum(accKZT.original)} ${accKZT.currency}</div>` : "")) :
-          accKZT.state==="pending" ? h`<span class="muted">курс…</span>` :
-          accKZT.state==="error" ? h`<span class="muted" title="Не удалось получить курс Нацбанка РК">${fmtSum(accKZT.original)} ${accKZT.currency} (?)</span>` : '—'}
+      <td>${(editableRegistry && state.registryEditingAmountId===primary.id)
+        ? h`<input type="text" inputmode="decimal" class="registry-amount-input" data-invoice-amount data-id="${primary.id}" value="${primary.amount!=null?formatAmountInputValue(String(primary.amount)):''}" placeholder="—">`
+        : h`<button type="button" class="registry-amount-display" data-action="${editableRegistry?'registry-amount-edit':''}" data-id="${primary.id}" ${editableRegistry?'':'disabled'} title="${editableRegistry?'Нажмите, чтобы изменить сумму':'Редактировать может только Администратор, Руководитель или Финансист'}">${primary.amount!=null?fmtKZT(primary.amount):'—'}</button>`}</td>
+      <td>${registrySelectCell(primary, "currency", editableRegistry)}</td>
+      <td>${registrySelectCell(primary, "vat", editableRegistry)}</td>
+      <td>${registrySelectCell(primary, "tax", editableRegistry)}</td>
+      <td class="mono" style="text-align:right;" title="${accKZT.currency ? 'Сумма без НДС и с доп. налогом, переведена в KZT по курсу Нацбанка РК'+(primary.paid?' на день оплаты':' на сегодня — пересчитается на день оплаты') : 'Сумма без НДС, скорректированная на доп. налог по способу оплаты'}">${accountedKZTLabel(accKZT)}</td>
+      <td style="text-align:center;"><input type="checkbox" data-action="invoice-submitted-toggle" data-id="${groupIds}" data-val="${allSubmitted?'0':'1'}" ${allSubmitted?'checked':''} ${editableRegistry?'':'disabled'} title="${editableRegistry?(isGroup?'Отметить, что счёт передан в бухгалтерию/банк на оплату (для всех заявок сразу)':'Отметить, что счёт передан в бухгалтерию/банк на оплату'):'Редактировать может только Администратор, Руководитель или Финансист'}"></td>
+      <td style="text-align:center;"><input type="checkbox" data-action="invoice-paid-toggle" data-id="${groupIds}" data-val="${allPaid?'0':'1'}" ${allPaid?'checked':''} ${editableRegistry?'':'disabled'} title="${editableRegistry?(isGroup?'Отметить оплату счёта (для всех заявок сразу)':'Отметить оплату счёта'):'Редактировать может только Администратор, Руководитель или Финансист'}"></td>
+    </tr>${isGroup && expanded ? registryGroupExpandRows(group, accKZT, editableRegistry) : ""}`;
+  }
+  // Развёрнутый вид группы — по строке на каждую заявку, с долей счёта на
+  // неё: процент и сумма (KZT без НДС) редактируются оба, второе поле каждый
+  // раз пересчитывается автоматически от другого (см. setInvoiceAllocPercent/
+  // setInvoiceAllocAmount). Пока не указана сумма основного счёта, доли
+  // указывать нечего — поля заблокированы.
+  function registryGroupExpandRows(group, groupAcc, editableRegistry){
+    var total = groupAcc.value;
+    var rowsHtml = group.members.map(function(iv){
+      var tk = state.tickets.find(function(x){return x.id===iv.ticket_id;});
+      var hotel = tk ? hotelById(tk.hotel_id) : null;
+      var pct = invoiceAllocPercent(iv);
+      var amount = (pct!=null && total!=null) ? (total*pct/100) : null;
+      var canAlloc = total!=null && editableRegistry;
+      return h`<tr class="registry-alloc-row">
+        <td></td>
+        <td class="mono">${tk ? h`<a href="#" data-open-ticket="${tk.id}">${tk.external_ref?escapeHtml(tk.external_ref):'открыть'}</a>` : '—'}</td>
+        <td style="text-align:center;">${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
+        <td colspan="8">
+          <span class="muted" style="font-size:12px;display:inline-flex;align-items:center;gap:6px;">
+            Доля:
+            <input type="text" inputmode="decimal" data-alloc-percent data-id="${iv.id}" value="${pct!=null?formatAmountInputValue(String(pct)):''}" placeholder="—" style="width:52px;" ${canAlloc?'':'disabled'} title="${total!=null?'Процент от суммы счёта на эту заявку':'Сначала укажите сумму счёта'}">%
+            =
+            <input type="text" inputmode="decimal" data-alloc-amount data-id="${iv.id}" value="${amount!=null?formatAmountInputValue(String(Math.round(amount*100)/100)):''}" placeholder="—" style="width:96px;" ${canAlloc?'':'disabled'} title="${total!=null?'Сумма KZT без НДС на эту заявку':'Сначала укажите сумму счёта'}"> ₸
+            ${editableRegistry ? h`<a href="#" data-action="invoice-ungroup" data-id="${iv.id}" style="margin-left:6px;font-size:11px;" title="Совпадение имени файла случайное — это на самом деле другой, не связанный счёт">это другой счёт</a>` : ""}
+          </span>
+        </td>
+      </tr>`;
+    }).join("");
+    return rowsHtml + registryAllocSummaryRow(group, total);
+  }
+  function registryAllocSummaryRow(group, total){
+    var sumPct = 0, anySet = false;
+    group.members.forEach(function(iv){ var p=invoiceAllocPercent(iv); if(p!=null){ anySet=true; sumPct+=p; } });
+    if(!anySet) return "";
+    var warn = Math.abs(sumPct-100) > 0.5;
+    return h`<tr class="registry-alloc-row">
+      <td colspan="11" class="muted" style="font-size:11px;padding-left:52px;${warn?'color:var(--warn);':''}">
+        Распределено: ${fmtKZT(sumPct)}%${total!=null?(' ('+fmtKZT(total*sumPct/100)+' ₸ из '+fmtKZT(total)+' ₸)'):''}${warn?' — не сходится со 100%':''}
       </td>
-      <td style="text-align:center;"><input type="checkbox" data-action="invoice-submitted-toggle" data-id="${iv.id}" data-val="${iv.submitted_for_payment?'0':'1'}" ${iv.submitted_for_payment?'checked':''} ${editableRegistry?'':'disabled'} title="${editableRegistry?'Отметить, что счёт передан в бухгалтерию/банк на оплату':'Редактировать может только Администратор, Руководитель или Финансист'}"></td>
-      <td style="text-align:center;"><input type="checkbox" data-action="invoice-paid-toggle" data-id="${iv.id}" data-val="${iv.paid?'0':'1'}" ${iv.paid?'checked':''} ${editableRegistry?'':'disabled'} title="${editableRegistry?'Отметить оплату счёта':'Редактировать может только Администратор, Руководитель или Финансист'}"></td>
     </tr>`;
   }
   // Строка-разделитель месяца оплаты (0.2.19) — вместе с подписью месяца
   // показывает, сколько счетов и на какую сумму (KZT без НДС, как и итоги
-  // внизу) оплачено именно в этом месяце.
+  // внизу) оплачено именно в этом месяце. items — группы (см. buildInvoiceGroups),
+  // каждый общий счёт считается здесь один раз, а не по разу на заявку.
   function paidMonthDividerRow(key, items){
     var label = key==="unknown" ? "Дата оплаты не указана" : monthLabelRu(key);
     var sum = 0, pendingCount = 0, missingCount = 0;
-    items.forEach(function(iv){
-      var acc = invoiceAccountedKZT(iv);
+    items.forEach(function(group){
+      var acc = invoiceAccountedKZT(group.primary);
       if(acc.state==="pending"){ pendingCount++; return; }
       if(acc.value==null){ missingCount++; return; }
       sum += acc.value;
     });
-    var fmtSum = function(n){ return n.toLocaleString("ru-RU", {minimumFractionDigits:0, maximumFractionDigits:2}); };
     return h`<tr class="registry-month-divider">
       <td colspan="8">${escapeHtml(label)} — ${items.length} ${pluralRu(items.length,'счёт','счёта','счетов')}${pendingCount?' (ожидание курса: '+pendingCount+')':''}${missingCount?' (без данных: '+missingCount+')':''}</td>
-      <td class="mono" style="text-align:right;">${fmtSum(sum)}</td>
+      <td class="mono" style="text-align:right;">${fmtKZT(sum)}</td>
       <td colspan="2"></td>
     </tr>`;
   }
@@ -3305,19 +3505,17 @@
     // влияет — она всегда идёт по всему реестру целиком (см. комментарий выше).
     var rsort = rf.sort || {};
     var rSortField = rsort.field, rSortDir = rsort.dir || "asc";
-    function registrySortVal(iv, field){
+    // 0.2.20: сортировка по клику на заголовок теперь работает по ГРУППАМ (см.
+    // buildInvoiceGroups ниже) — значение берётся с первой видимой (прошедшей
+    // фильтр) заявки в группе — именно она первой показана в ячейке
+    // "№ заявки"/"Отель" у свёрнутой строки.
+    function registryGroupSortVal(group, field){
+      var iv = group.members[0];
       var tk = state.tickets.find(function(x){return x.id===iv.ticket_id;});
       var hotel = tk ? hotelById(tk.hotel_id) : null;
       if(field==="ref") return (tk && tk.external_ref) || "";
       if(field==="hotel") return hotel ? hotel.name : "";
       return "";
-    }
-    if(rSortField){
-      list = list.slice().sort(function(a,b){
-        var va = registrySortVal(a, rSortField), vb = registrySortVal(b, rSortField);
-        var cmp = (typeof va==="number" || typeof vb==="number") ? ((va||0)-(vb||0)) : String(va).localeCompare(String(vb), "ru");
-        return rSortDir==="desc" ? -cmp : cmp;
-      });
     }
     function registryTh(label, field){
       if(!field) return h`<th>${label}</th>`;
@@ -3328,15 +3526,30 @@
     // смысла (порядковый номер, сам файл, суммы/селекты, галочки "подано"/"оплачено")
     var REGISTRY_SORT_FIELDS = [null,"ref","hotel",null,null,null,null,null,null,null,null];
     var editableRegistry = canEditRegistry();
+    // 0.2.20 (по просьбе Антона): один и тот же счёт, прикреплённый отдельно
+    // сразу к нескольким заявкам, теперь даёт ОДНУ строку реестра (см.
+    // buildInvoiceGroups/registryGroupRow), а не N визуально одинаковых
+    // пустых строк — раньше это ещё и приводило к тому, что итоги
+    // "Оплачено"/"К оплате" ниже складывали сумму такого счёта N раз вместо
+    // одного. "N из M" и итоги теперь считаются по группам (реальным счетам).
+    var allGroups = buildInvoiceGroups(all);
+    var groups = buildInvoiceGroups(list);
+    if(rSortField){
+      groups = groups.slice().sort(function(a,b){
+        var va = registryGroupSortVal(a, rSortField), vb = registryGroupSortVal(b, rSortField);
+        var cmp = (typeof va==="number" || typeof vb==="number") ? ((va||0)-(vb||0)) : String(va).localeCompare(String(vb), "ru");
+        return rSortDir==="desc" ? -cmp : cmp;
+      });
+    }
+    var expandedGroups = state.registryExpandedGroups || {};
     // Итоги "оплачено"/"к оплате" (0.2.3, п.2; с 0.2.13.1 — по просьбе Антона
     // считаются по "Учтено в затратах", а не по сырой "Сумма", т.к. это и есть
     // сумма без НДС с поправкой на доп. налог — реальная величина для бюджета)
-    // — считаются по тому же списку list, что сейчас показан на экране (с
-    // учётом фильтров), а не по всему реестру — та же логика, что и у
-    // счётчика "N из M" выше. Счета, для которых ещё не заполнены все поля,
-    // нужные для расчёта (сумма/валюта/НДС/налог), просто не участвуют в
-    // сумме, но их количество показываем отдельно, чтобы итог не выглядел
-    // как "полный".
+    // — считаются по тем же группам, что сейчас показаны на экране (с учётом
+    // фильтров), а не по всему реестру — та же логика, что и у счётчика
+    // "N из M" выше. Счета, для которых ещё не заполнены все поля, нужные для
+    // расчёта (сумма/валюта/НДС/налог), просто не участвуют в сумме, но их
+    // количество показываем отдельно, чтобы итог не выглядел как "полный".
     // 0.2.16: суммы теперь в KZT (invoiceAccountedKZT переводит RUB/BYN по
     // курсу Нацбанка РК) — иначе "Оплачено"/"К оплате" складывали бы разные
     // валюты как одну. pendingRateCount — курс ещё грузится (Edge Function
@@ -3344,13 +3557,12 @@
     // для расчёта), т.к. это временное состояние, которое само разрешится
     // (см. ensureNbkRate/render()).
     var sumPaid = 0, sumDue = 0, missingAmountCount = 0, pendingRateCount = 0;
-    list.forEach(function(iv){
-      var acc = invoiceAccountedKZT(iv);
+    groups.forEach(function(group){
+      var acc = invoiceAccountedKZT(group.primary);
       if(acc.state==="pending"){ pendingRateCount++; return; }
       if(acc.value==null){ missingAmountCount++; return; }
-      if(iv.paid) sumPaid += acc.value; else sumDue += acc.value;
+      if(group.primary.paid) sumPaid += acc.value; else sumDue += acc.value;
     });
-    function fmtSum(n){ return n.toLocaleString("ru-RU", {minimumFractionDigits:0, maximumFractionDigits:2}); }
     return h`
       ${financeTabs('registry')}
       <div class="row-gap">
@@ -3363,7 +3575,7 @@
           <div class="chip-toggle"><label><input type="checkbox" data-registry-filter-checkbox="showPaid" ${rf.showPaid?'checked':''}> Показывать оплаченные</label></div>
           ${filtersActive ? h`<a href="#" data-action="clear-registry-filter" style="font-size:12px;">сбросить</a>` : ""}
           <button class="btn btn-sm" data-action="registry-export" ${all.length===0?'disabled':''}>Экспорт в Excel${filtersActive?' (весь реестр)':''}</button>
-          <span class="muted" style="margin-left:auto;">${list.length} из ${all.length}${(!rf.showPaid && hiddenPaidCount>0) ? h` <span title="Снята галочка «Показывать оплаченные»">(скрыто оплаченных: ${hiddenPaidCount})</span>` : ""}</span>
+          <span class="muted" style="margin-left:auto;">${groups.length} из ${allGroups.length} счетов${(!rf.showPaid && hiddenPaidCount>0) ? h` <span title="Снята галочка «Показывать оплаченные»">(скрыто оплаченных вложений: ${hiddenPaidCount})</span>` : ""}</span>
         </div>
         <div class="card">
           <div class="table-wrap"><table class="registry-table">
@@ -3373,23 +3585,25 @@
               <col style="width:96px"><col style="width:60px"><col style="width:56px">
             </colgroup>
             <thead><tr>${REGISTRY_COLUMN_LABELS.map(function(lbl, i){ return registryTh(lbl, REGISTRY_SORT_FIELDS[i]); }).join("")}</tr></thead>
-            <tbody>${list.length===0 ? h`<tr><td colspan="${REGISTRY_COLUMN_LABELS.length}"><div class="empty-state"><b>${filtersActive?'Ничего не найдено':(rf.showPaid?'Реестр пуст':'Все счета в реестре оплачены')}</b>${filtersActive?'Попробуйте изменить или сбросить фильтр.':(rf.showPaid?'Прикрепите счёт к заявке — он появится здесь автоматически.':'Включите «Показывать оплаченные», чтобы увидеть их.')}</div></td></tr>` :
+            <tbody>${groups.length===0 ? h`<tr><td colspan="${REGISTRY_COLUMN_LABELS.length}"><div class="empty-state"><b>${filtersActive?'Ничего не найдено':(rf.showPaid?'Реестр пуст':'Все счета в реестре оплачены')}</b>${filtersActive?'Попробуйте изменить или сбросить фильтр.':(rf.showPaid?'Прикрепите счёт к заявке — он появится здесь автоматически.':'Включите «Показывать оплаченные», чтобы увидеть их.')}</div></td></tr>` :
               (function(){
                 // 0.2.19 (по просьбе Антона): оплаченные счета группируются по
                 // месяцу ОПЛАТЫ (invoices.paid_at), а не идут общим плоским
                 // списком — иначе за месяц вручную не свести. Неоплаченные (без
                 // даты оплаты — группировать их по этому признаку не по чему)
-                // остаются обычным плоским списком сверху, как и раньше.
+                // остаются обычным плоским списком сверху, как и раньше. С
+                // 0.2.20 группируем/сортируем СЧЕТА (group), а не отдельные
+                // вложения — общий на несколько заявок счёт даёт одну строку.
                 var rowNum = 0;
                 var out = [];
-                list.filter(function(iv){ return !iv.paid; }).forEach(function(iv){
+                groups.filter(function(g){ return !g.primary.paid; }).forEach(function(g){
                   rowNum++;
-                  out.push(registryInvoiceRow(iv, rowNum, editableRegistry, fmtSum));
+                  out.push(registryGroupRow(g, rowNum, editableRegistry, !!expandedGroups[g.key]));
                 });
                 var paidGroupsMap = {};
-                list.filter(function(iv){ return iv.paid; }).forEach(function(iv){
-                  var key = paidMonthKey(iv) || "unknown";
-                  (paidGroupsMap[key] = paidGroupsMap[key]||[]).push(iv);
+                groups.filter(function(g){ return g.primary.paid; }).forEach(function(g){
+                  var key = paidMonthKey(g.primary) || "unknown";
+                  (paidGroupsMap[key] = paidGroupsMap[key]||[]).push(g);
                 });
                 var paidGroupKeys = Object.keys(paidGroupsMap).sort(function(a,b){
                   if(a==="unknown") return 1;
@@ -3402,23 +3616,23 @@
                   // показываем сначала недавно оплаченное; клик по заголовку
                   // ("№ заявки"/"Отель") переопределяет это, как и для
                   // неоплаченных выше.
-                  if(!rSortField) items = items.slice().sort(function(a,b){ return (b.paid_at||"").localeCompare(a.paid_at||""); });
+                  if(!rSortField) items = items.slice().sort(function(a,b){ return (b.primary.paid_at||"").localeCompare(a.primary.paid_at||""); });
                   out.push(paidMonthDividerRow(key, items));
-                  items.forEach(function(iv){
+                  items.forEach(function(g){
                     rowNum++;
-                    out.push(registryInvoiceRow(iv, rowNum, editableRegistry, fmtSum));
+                    out.push(registryGroupRow(g, rowNum, editableRegistry, !!expandedGroups[g.key]));
                   });
                 });
                 return out.join("");
               })()}
             </tbody>
-            ${list.length>0 ? h`<tfoot><tr class="registry-totals-row">
-              <td colspan="8" class="muted" style="text-align:right;">Итого по показанным ${list.length} счетам${missingAmountCount?' (без данных для расчёта: '+missingAmountCount+')':''}${pendingRateCount?' (ожидание курса НБ РК: '+pendingRateCount+')':''}:</td>
-              <td class="mono" style="text-align:right;font-size:11px;" title="«Оплачено»/«К оплате» — это «Учтено в затратах», т.е. KZT без НДС"><b>Оплачено: ${fmtSum(sumPaid)}</b><br><span class="muted">К оплате: ${fmtSum(sumDue)}</span></td>
+            ${groups.length>0 ? h`<tfoot><tr class="registry-totals-row">
+              <td colspan="8" class="muted" style="text-align:right;">Итого по показанным ${groups.length} счетам${missingAmountCount?' (без данных для расчёта: '+missingAmountCount+')':''}${pendingRateCount?' (ожидание курса НБ РК: '+pendingRateCount+')':''}:</td>
+              <td class="mono" style="text-align:right;font-size:11px;" title="«Оплачено»/«К оплате» — это «Учтено в затратах», т.е. KZT без НДС"><b>Оплачено: ${fmtKZT(sumPaid)}</b><br><span class="muted">К оплате: ${fmtKZT(sumDue)}</span></td>
               <td colspan="2"></td>
             </tr></tfoot>` : ""}
             </table></div>
-          <div class="helptext" style="padding:10px 16px;">Счёт попадает сюда автоматически при прикреплении к заявке в её карточке. Сумму счёта указывает Администратор, Руководитель или Финансист — по ней считаются итоги «оплачено»/«к оплате» выше.</div>
+          <div class="helptext" style="padding:10px 16px;">Счёт попадает сюда автоматически при прикреплении к заявке в её карточке. Сумму счёта указывает Администратор, Руководитель или Финансист — по ней считаются итоги «оплачено»/«к оплате» выше. Один и тот же счёт, приложенный сразу к нескольким заявкам, показан одной строкой — раскройте её (▸), чтобы указать долю каждой заявки в процентах или в сумме.</div>
         </div>
       </div>`;
   }
@@ -3971,13 +4185,14 @@
       <div class="row-gap">
         <div class="card">
           <div class="table-wrap"><table>
-            <thead><tr><th>№</th><th>Название</th><th>Зона</th><th>Координаты (для карты)</th><th>Лицо от Заказчика</th><th>В эксплуатации</th><th></th></tr></thead>
-            <tbody>${list.length===0 ? h`<tr><td colspan="7"><div class="empty-state"><b>Отелей нет</b>Добавьте первый отель ниже.</div></td></tr>` :
+            <thead><tr><th>№</th><th>Название</th><th>Зона</th><th>Срок реагирования</th><th>Координаты (для карты)</th><th>Лицо от Заказчика</th><th>В эксплуатации</th><th></th></tr></thead>
+            <tbody>${list.length===0 ? h`<tr><td colspan="8"><div class="empty-state"><b>Отелей нет</b>Добавьте первый отель ниже.</div></td></tr>` :
               list.map(function(x){
                 return h`<tr>
                   <td class="mono muted">№${x.id}</td>
                   <td><input type="text" data-hotel-field="name" data-id="${x.id}" value="${escapeHtml(x.name)}" style="min-width:150px;"></td>
                   <td>${hotelZoneCell(x)}</td>
+                  <td class="mono muted">${x.zone && ZONE_HOURS[x.zone] ? (ZONE_HOURS[x.zone]+" ч") : "—"}</td>
                   <td>${hotelCoordsCell(x)}</td>
                   <td style="min-width:180px;">${hotelContactCell(x)}</td>
                   <td><button class="btn btn-sm ${x.in_service===false?'':'btn-ghost'}" data-action="hotel-toggle-active" data-id="${x.id}" data-val="${x.in_service===false?1:0}">${x.in_service===false?'Включить':'В эксплуатации'}</button></td>
@@ -3985,7 +4200,7 @@
                 </tr>`;
               }).join("")}
             </tbody></table></div>
-          <div class="helptext" style="padding:10px 16px;">Зона определяет срок прибытия по регламенту: Зона 1 — 24ч, Зона 2 — 48ч, Зона 3 — 72ч. Координаты нужны только для метки на «Карте» — необязательны. «Лицо от Заказчика» — контакт со стороны отеля-клиента (необязательно). Отель, по которому уже есть заявки, нельзя удалить (снимите «В эксплуатации» вместо этого).</div>
+          <div class="helptext" style="padding:10px 16px;">Зона определяет срок реагирования по регламенту: Зона 1 — 24ч, Зона 2 — 48ч, Зона 3 — 72ч (это внутренний ориентир диспетчерской, не «Срок» из c-lector — см. наряд-задание). Координаты нужны только для метки на «Карте» — необязательны. «Лицо от Заказчика» — контакт со стороны отеля-клиента (необязательно). Отель, по которому уже есть заявки, нельзя удалить (снимите «В эксплуатации» вместо этого).</div>
         </div>
         <div class="card card-pad">
           <div class="section-title">Добавить отель</div>
@@ -4126,7 +4341,7 @@
           ${t.location ? h`<div class="wo-field"><div class="k">Локация</div><div class="v">${escapeHtml(t.location)}</div></div>` : ""}
           <div class="wo-field"><div class="k">Категория</div><div class="v">${GROUP_LABEL[t.ticket_group]}</div></div>
           <div class="wo-field"><div class="k">Исполнитель</div><div class="v">${t.assigned_to? escapeHtml(t.assigned_to): "не назначен"}</div></div>
-          <div class="wo-field"><div class="k">Срок прибытия</div><div class="v">${t.arrival_deadline? fmtDateShort(t.arrival_deadline): "—"}</div></div>
+          <div class="wo-field"><div class="k">Срок реагирования</div><div class="v">${t.arrival_deadline? fmtDateShort(t.arrival_deadline): "—"}</div></div>
           <div class="wo-field"><div class="k">Дата регистрации</div><div class="v">${fmtDate(t.created_at)}</div></div>
           <div class="wo-field"><div class="k">Срок устранения</div><div class="v">${t.resolution_deadline? fmtDate(t.resolution_deadline): "не указан (нет данных c-lector)"}</div></div>
         </div>
@@ -4655,8 +4870,7 @@
         <div class="brand"><div class="brand-name">Диспетчерская</div><div class="brand-sub">Keruen Inn · Служба сервиса</div></div>
         <nav class="nav">${navItems.map(function(x){ return navItem(x[0], x[1], x[2]); }).join("")}</nav>
         <div class="nav-footer">
-          <div class="zone-legend"><span>Срок прибытия: <b>Зона 1</b> — 24ч</span><span><b>Зона 2</b> — 48ч</span><span><b>Зона 3</b> — 72ч</span></div>
-          <p>Заявки поступают через c-lector.ru — здесь только внутренняя диспетчеризация и наряд-задания.</p>
+          <p>Заявки поступают через c-lector.ru — здесь только внутренняя диспетчеризация и наряд-задания. Срок реагирования по зонам — в разделе «Отели».</p>
         </div>
       </div>
       <div class="main">
@@ -4812,6 +5026,14 @@
       if(action==="invoice-delete") return deleteInvoice(id, actionEl.getAttribute("data-path"));
       if(action==="invoice-paid-toggle") return setInvoicePaid(id, actionEl.getAttribute("data-val")==="1");
       if(action==="invoice-submitted-toggle") return setInvoiceSubmitted(id, actionEl.getAttribute("data-val")==="1");
+      if(action==="invoice-ungroup"){ e.preventDefault(); return ungroupInvoice(id); }
+      if(action==="registry-group-toggle"){
+        var gkey = actionEl.getAttribute("data-key");
+        state.registryExpandedGroups = state.registryExpandedGroups || {};
+        state.registryExpandedGroups[gkey] = !state.registryExpandedGroups[gkey];
+        render();
+        return;
+      }
       if(action==="registry-amount-edit"){
         if(!canEditRegistry()) return;
         state.registryEditingAmountId = id;
@@ -4954,6 +5176,8 @@
     if(e.target.matches("[data-invoice-currency]")){ setInvoiceCurrency(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.matches("[data-invoice-vat]")){ setInvoiceVatIncluded(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.matches("[data-invoice-tax-basis]")){ setInvoiceTaxBasis(e.target.getAttribute("data-id"), e.target.value); return; }
+    if(e.target.matches("[data-alloc-percent]")){ setInvoiceAllocPercent(e.target.getAttribute("data-id"), e.target.value); return; }
+    if(e.target.matches("[data-alloc-amount]")){ setInvoiceAllocAmount(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.id==="import-file"){ var f=e.target.files&&e.target.files[0]; if(f) loadImportFile(f); return; }
     if(e.target.matches("[data-import-map]")){ state.importMapping[e.target.getAttribute("data-import-map")]=e.target.value; render(); return; }
     if(e.target.matches("[data-cash-import-map]")){ state.cashImportMapping[e.target.getAttribute("data-cash-import-map")]=e.target.value; render(); return; }
