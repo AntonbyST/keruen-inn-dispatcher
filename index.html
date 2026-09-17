@@ -217,6 +217,17 @@
   .registry-expand-btn{ padding:1px 5px; margin-right:4px; font-size:11px; line-height:1; vertical-align:middle; }
   .registry-alloc-row td{ background:var(--surface-2); border-top:none; padding-top:3px; padding-bottom:3px; }
   .registry-alloc-row input{ box-sizing:border-box; padding:2px 4px; font-size:12px; text-align:right; font-variant-numeric:tabular-nums; }
+  /* 0.2.21 (по просьбе Антона): доля/сумма в разбивке — тот же приём, что и
+     «Сумма»/«Отели» выше — обычный текст без рамки (даже когда это прочерк,
+     то есть доля ещё не указана), клик раскрывает настоящее поле ввода. */
+  .registry-alloc-display{ display:inline-block; min-width:44px; background:none; border:1px dashed transparent; padding:2px 4px; font:inherit; font-size:12px; font-variant-numeric:tabular-nums; text-align:right; cursor:pointer; color:inherit; border-radius:4px; }
+  .registry-alloc-display:hover:not(:disabled){ border-color:var(--line); }
+  .registry-alloc-display:disabled{ cursor:default; opacity:.6; }
+  .registry-alloc-input{ box-sizing:border-box; padding:2px 4px; font-size:12px; text-align:right; font-variant-numeric:tabular-nums; }
+  /* 0.2.21: заявка, отмеченная как «дубль» другой — весь текст строки
+     зачёркнут и приглушён, как неактивная (см. duplicateBadge). */
+  tr.dup-row{ opacity:.55; }
+  tr.dup-row .ttl, tr.dup-row .line-clamp-2{ text-decoration:line-through; }
   table{ width:100%; border-collapse:collapse; font-size:13px; }
   th{ text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-faint); font-weight:600; padding:9px 12px; border-bottom:1px solid var(--line); white-space:nowrap; }
   td{ padding:11px 12px; border-bottom:1px solid var(--line); vertical-align:middle; }
@@ -3155,7 +3166,8 @@
         <thead><tr>${refTh()}${sortableTh("Отель","hotel")}${sortableTh("Описание","desc")}${sortableTh("Статус","status")}${sortableTh("Срок","deadline")}</tr></thead>
         <tbody>${list.length===0 ? h`<tr><td colspan="5"><div class="empty-state"><b>Заявок нет</b>Добавьте заявку по данным из c-lector.ru.</div></td></tr>` :
           list.map(function(t){ var hotel=hotelById(t.hotel_id); var di=deadlineInfo(t);
-            return h`<tr data-open-ticket="${t.id}" ${t.attention_flag?'class="attn-row"':''}>
+            var rowClasses = [t.attention_flag?'attn-row':'', t.duplicate_of_ticket_id?'dup-row':''].filter(Boolean).join(" ");
+            return h`<tr data-open-ticket="${t.id}" ${rowClasses?('class="'+rowClasses+'"'):''}>
               <td class="mono">${attentionBadge(t)}${t.external_ref? escapeHtml(t.external_ref) : '<span class="muted">—</span>'}
                 <div style="margin-top:4px;">${statusIconsRow(t)}</div>
                 ${duplicateBadge(t)}
@@ -3385,20 +3397,41 @@
     if(hotelIds.length===1){ var onlyHotel = hotelsById[hotelIds[0]]; hotelCell = "№"+onlyHotel.id+" "+escapeHtml(onlyHotel.name); hotelTitle = onlyHotel.name; }
     else if(hotelIds.length>1){ hotelCell = h`<span class="muted">Разные (${hotelIds.length})</span>`; hotelTitle = hotelIds.map(function(k){return hotelsById[k].name;}).join(", "); }
     else { hotelCell = "—"; hotelTitle = ""; }
-    var refCell = rows.map(function(r){
+    // 0.2.21 (по просьбе Антона): один и тот же счёт иногда прикреплён к ОДНОЙ
+    // и той же заявке дважды (например, отдельно в "Бригада" и в "Материал")
+    // — это разные строки invoices, но для читателя это одна заявка, а не
+    // "заявка встретилась дважды". Ячейка "№ заявки" показывает каждую
+    // заявку один раз, отсортированной по номеру, а не в порядке загрузки.
+    var seenTicketIds = {}, uniqueTicketRows = [];
+    rows.forEach(function(r){
+      var tid = r.tk ? r.tk.id : null;
+      if(tid!=null && seenTicketIds[tid]) return;
+      if(tid!=null) seenTicketIds[tid] = true;
+      uniqueTicketRows.push(r);
+    });
+    uniqueTicketRows.sort(function(a,b){
+      var ra = a.tk && a.tk.external_ref, rb = b.tk && b.tk.external_ref;
+      if(ra==null && rb==null) return 0; if(ra==null) return 1; if(rb==null) return -1;
+      var na = Number(ra), nb = Number(rb);
+      if(!isNaN(na) && !isNaN(nb)) return na-nb;
+      return String(ra).localeCompare(String(rb));
+    });
+    var refCell = uniqueTicketRows.map(function(r){
       return r.tk ? h`<a href="#" data-open-ticket="${r.tk.id}" title="Открыть заявку">${r.tk.external_ref?escapeHtml(r.tk.external_ref):'открыть'}</a>` : '—';
     }).join(", ");
+    var ticketCount = uniqueTicketRows.length;
     var accKZT = invoiceAccountedKZT(primary);
     var groupIds = members.map(function(r){return r.id;}).join(",");
     var allSubmitted = members.every(function(r){return r.submitted_for_payment;});
     var allPaid = members.every(function(r){return r.paid;});
+    var extraCopiesNote = members.length>ticketCount ? (' ('+members.length+' '+pluralRu(members.length,'копия счёта','копии счёта','копий счёта')+')') : '';
     return h`<tr class="${isGroup?'registry-group-row':''}">
       <td class="mono muted">${rowNum}</td>
-      <td class="mono">${isGroup ? h`<button type="button" class="btn btn-ghost btn-sm registry-expand-btn" data-action="registry-group-toggle" data-key="${escapeHtml(group.key)}" title="${expanded?'Свернуть':'Показать долю каждой заявки'}">${expanded?'▾':'▸'}</button>` : ""}${refCell}</td>
+      <td class="mono" style="white-space:normal;">${isGroup ? h`<button type="button" class="btn btn-ghost btn-sm registry-expand-btn" data-action="registry-group-toggle" data-key="${escapeHtml(group.key)}" title="${expanded?'Свернуть':'Показать долю каждой заявки'}">${expanded?'▾':'▸'}</button>` : ""}${refCell}</td>
       <td style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center;" title="${escapeHtml(hotelTitle)}">${hotelCell}</td>
       <td>
         <button class="btn btn-sm registry-file-btn" data-action="invoice-open" data-path="${escapeHtml(primary.file_path)}" title="${escapeHtml(primary.file_name)}">счёт</button>
-        ${isGroup ? h`<div class="muted registry-related-line">Общий на ${members.length} ${pluralRu(members.length,'заявку','заявки','заявок')}${group.hiddenCount?' (+'+group.hiddenCount+' скрыто фильтром)':''}</div>` : (group.hiddenCount ? h`<div class="muted registry-related-line">Также на ${group.hiddenCount} ${pluralRu(group.hiddenCount,'заявке','заявках','заявках')} — скрыто фильтром</div>` : "")}
+        ${isGroup ? h`<div class="muted registry-related-line">Общий на ${ticketCount} ${pluralRu(ticketCount,'заявку','заявки','заявок')}${extraCopiesNote}${group.hiddenCount?' (+'+group.hiddenCount+' скрыто фильтром)':''}</div>` : (group.hiddenCount ? h`<div class="muted registry-related-line">Также на ${group.hiddenCount} ${pluralRu(group.hiddenCount,'заявке','заявках','заявках')} — скрыто фильтром</div>` : "")}
       </td>
       <td>${(editableRegistry && state.registryEditingAmountId===primary.id)
         ? h`<input type="text" inputmode="decimal" class="registry-amount-input" data-invoice-amount data-id="${primary.id}" value="${primary.amount!=null?formatAmountInputValue(String(primary.amount)):''}" placeholder="—">`
@@ -3411,11 +3444,27 @@
       <td style="text-align:center;"><input type="checkbox" data-action="invoice-paid-toggle" data-id="${groupIds}" data-val="${allPaid?'0':'1'}" ${allPaid?'checked':''} ${editableRegistry?'':'disabled'} title="${editableRegistry?(isGroup?'Отметить оплату счёта (для всех заявок сразу)':'Отметить оплату счёта'):'Редактировать может только Администратор, Руководитель или Финансист'}"></td>
     </tr>${isGroup && expanded ? registryGroupExpandRows(group, accKZT, editableRegistry) : ""}`;
   }
+  // 0.2.21 (по просьбе Антона): доля/сумма конкретной заявки — тем же
+  // приёмом click-to-edit, что и «Сумма» счёта/поля «Отелей» выше: обычный
+  // текст без рамки, ДАЖЕ когда это прочерк (доля ещё не указана) — рамка
+  // появляется только при наведении, клик раскрывает настоящее поле ввода.
+  // Процент можно вводить всегда — это просто число само по себе; сумма в
+  // KZT требует уже известную "Учтено в затратах" основного счёта (чтобы
+  // посчитать по ней процент обратно), поэтому до этого её поле неактивно.
+  function registryAllocFieldCell(iv, kind, value, canEdit, title){
+    var key = iv.id+":alloc"+kind;
+    var attr = kind==="pct" ? "data-alloc-percent" : "data-alloc-amount";
+    var raw = value==null ? null : (kind==="amt" ? Math.round(value*100)/100 : value);
+    var label = raw!=null ? formatAmountInputValue(String(raw)) : "";
+    if(canEdit && state.registryEditingFieldKey===key){
+      return h`<input type="text" inputmode="decimal" ${attr} data-id="${iv.id}" data-registry-edit-focus="${key}" class="registry-alloc-input" value="${label}" placeholder="—" style="width:${kind==='pct'?'50px':'86px'};" title="${title}">`;
+    }
+    return h`<button type="button" class="registry-alloc-display" data-action="${canEdit?'registry-field-edit':''}" data-key="${key}" ${canEdit?'':'disabled'} title="${title}">${label||'—'}</button>`;
+  }
   // Развёрнутый вид группы — по строке на каждую заявку, с долей счёта на
   // неё: процент и сумма (KZT без НДС) редактируются оба, второе поле каждый
   // раз пересчитывается автоматически от другого (см. setInvoiceAllocPercent/
-  // setInvoiceAllocAmount). Пока не указана сумма основного счёта, доли
-  // указывать нечего — поля заблокированы.
+  // setInvoiceAllocAmount).
   function registryGroupExpandRows(group, groupAcc, editableRegistry){
     var total = groupAcc.value;
     var rowsHtml = group.members.map(function(iv){
@@ -3423,17 +3472,15 @@
       var hotel = tk ? hotelById(tk.hotel_id) : null;
       var pct = invoiceAllocPercent(iv);
       var amount = (pct!=null && total!=null) ? (total*pct/100) : null;
-      var canAlloc = total!=null && editableRegistry;
+      var amtTitle = total!=null ? "Сумма KZT без НДС на эту заявку" : "Сначала укажите сумму счёта (в свёрнутой строке) — без неё нельзя посчитать сумму по проценту";
       return h`<tr class="registry-alloc-row">
         <td></td>
         <td class="mono">${tk ? h`<a href="#" data-open-ticket="${tk.id}">${tk.external_ref?escapeHtml(tk.external_ref):'открыть'}</a>` : '—'}</td>
         <td style="text-align:center;">${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
         <td colspan="8">
           <span class="muted" style="font-size:12px;display:inline-flex;align-items:center;gap:6px;">
-            Доля:
-            <input type="text" inputmode="decimal" data-alloc-percent data-id="${iv.id}" value="${pct!=null?formatAmountInputValue(String(pct)):''}" placeholder="—" style="width:52px;" ${canAlloc?'':'disabled'} title="${total!=null?'Процент от суммы счёта на эту заявку':'Сначала укажите сумму счёта'}">%
-            =
-            <input type="text" inputmode="decimal" data-alloc-amount data-id="${iv.id}" value="${amount!=null?formatAmountInputValue(String(Math.round(amount*100)/100)):''}" placeholder="—" style="width:96px;" ${canAlloc?'':'disabled'} title="${total!=null?'Сумма KZT без НДС на эту заявку':'Сначала укажите сумму счёта'}"> ₸
+            Доля: ${registryAllocFieldCell(iv,"pct",pct,editableRegistry,"Процент от суммы счёта на эту заявку")}%
+            = ${registryAllocFieldCell(iv,"amt",amount,editableRegistry && total!=null,amtTitle)} ₸
             ${editableRegistry ? h`<a href="#" data-action="invoice-ungroup" data-id="${iv.id}" style="margin-left:6px;font-size:11px;" title="Совпадение имени файла случайное — это на самом деле другой, не связанный счёт">это другой счёт</a>` : ""}
           </span>
         </td>
@@ -5338,7 +5385,7 @@
   // ставим курсор после того же по счёту символа в переформатированной
   // строке.
   document.addEventListener("input", function(e){
-    if(!e.target.matches(".registry-amount-input")) return;
+    if(!e.target.matches(".registry-amount-input, .registry-alloc-input")) return;
     var el = e.target;
     var caret = el.selectionStart==null ? el.value.length : el.selectionStart;
     var before = el.value.slice(0, caret);
