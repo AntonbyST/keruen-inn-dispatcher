@@ -7,6 +7,12 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<!-- morphdom 2.7.4 (github.com/patrick-steele-idem/morphdom) — вшито прямо в файл,
+     а не подключено через CDN: это заменяет полную пересборку #app/#overlay-root
+     через innerHTML на каждом render() точечным патчем живого DOM (см. использование
+     ниже, в основном скрипте приложения) — без стороннего рантайм-хоста для
+     настолько фундаментальной для приложения вещи. -->
+<script>(function(global,factory){typeof exports==="object"&&typeof module!=="undefined"?module.exports=factory():typeof define==="function"&&define.amd?define(factory):(global=global||self,global.morphdom=factory())})(this,function(){"use strict";var DOCUMENT_FRAGMENT_NODE=11;function morphAttrs(fromNode,toNode){var toNodeAttrs=toNode.attributes;var attr;var attrName;var attrNamespaceURI;var attrValue;var fromValue;if(toNode.nodeType===DOCUMENT_FRAGMENT_NODE||fromNode.nodeType===DOCUMENT_FRAGMENT_NODE){return}for(var i=toNodeAttrs.length-1;i>=0;i--){attr=toNodeAttrs[i];attrName=attr.name;attrNamespaceURI=attr.namespaceURI;attrValue=attr.value;if(attrNamespaceURI){attrName=attr.localName||attrName;fromValue=fromNode.getAttributeNS(attrNamespaceURI,attrName);if(fromValue!==attrValue){if(attr.prefix==="xmlns"){attrName=attr.name}fromNode.setAttributeNS(attrNamespaceURI,attrName,attrValue)}}else{fromValue=fromNode.getAttribute(attrName);if(fromValue!==attrValue){fromNode.setAttribute(attrName,attrValue)}}}var fromNodeAttrs=fromNode.attributes;for(var d=fromNodeAttrs.length-1;d>=0;d--){attr=fromNodeAttrs[d];attrName=attr.name;attrNamespaceURI=attr.namespaceURI;if(attrNamespaceURI){attrName=attr.localName||attrName;if(!toNode.hasAttributeNS(attrNamespaceURI,attrName)){fromNode.removeAttributeNS(attrNamespaceURI,attrName)}}else{if(!toNode.hasAttribute(attrName)){fromNode.removeAttribute(attrName)}}}}var range;var NS_XHTML="http://www.w3.org/1999/xhtml";var doc=typeof document==="undefined"?undefined:document;var HAS_TEMPLATE_SUPPORT=!!doc&&"content"in doc.createElement("template");var HAS_RANGE_SUPPORT=!!doc&&doc.createRange&&"createContextualFragment"in doc.createRange();function createFragmentFromTemplate(str){var template=doc.createElement("template");template.innerHTML=str;return template.content.childNodes[0]}function createFragmentFromRange(str){if(!range){range=doc.createRange();range.selectNode(doc.body)}var fragment=range.createContextualFragment(str);return fragment.childNodes[0]}function createFragmentFromWrap(str){var fragment=doc.createElement("body");fragment.innerHTML=str;return fragment.childNodes[0]}function toElement(str){str=str.trim();if(HAS_TEMPLATE_SUPPORT){return createFragmentFromTemplate(str)}else if(HAS_RANGE_SUPPORT){return createFragmentFromRange(str)}return createFragmentFromWrap(str)}function compareNodeNames(fromEl,toEl){var fromNodeName=fromEl.nodeName;var toNodeName=toEl.nodeName;var fromCodeStart,toCodeStart;if(fromNodeName===toNodeName){return true}fromCodeStart=fromNodeName.charCodeAt(0);toCodeStart=toNodeName.charCodeAt(0);if(fromCodeStart<=90&&toCodeStart>=97){return fromNodeName===toNodeName.toUpperCase()}else if(toCodeStart<=90&&fromCodeStart>=97){return toNodeName===fromNodeName.toUpperCase()}else{return false}}function createElementNS(name,namespaceURI){return!namespaceURI||namespaceURI===NS_XHTML?doc.createElement(name):doc.createElementNS(namespaceURI,name)}function moveChildren(fromEl,toEl){var curChild=fromEl.firstChild;while(curChild){var nextChild=curChild.nextSibling;toEl.appendChild(curChild);curChild=nextChild}return toEl}function syncBooleanAttrProp(fromEl,toEl,name){if(fromEl[name]!==toEl[name]){fromEl[name]=toEl[name];if(fromEl[name]){fromEl.setAttribute(name,"")}else{fromEl.removeAttribute(name)}}}var specialElHandlers={OPTION:function(fromEl,toEl){var parentNode=fromEl.parentNode;if(parentNode){var parentName=parentNode.nodeName.toUpperCase();if(parentName==="OPTGROUP"){parentNode=parentNode.parentNode;parentName=parentNode&&parentNode.nodeName.toUpperCase()}if(parentName==="SELECT"&&!parentNode.hasAttribute("multiple")){if(fromEl.hasAttribute("selected")&&!toEl.selected){fromEl.setAttribute("selected","selected");fromEl.removeAttribute("selected")}parentNode.selectedIndex=-1}}syncBooleanAttrProp(fromEl,toEl,"selected")},INPUT:function(fromEl,toEl){syncBooleanAttrProp(fromEl,toEl,"checked");syncBooleanAttrProp(fromEl,toEl,"disabled");if(fromEl.value!==toEl.value){fromEl.value=toEl.value}if(!toEl.hasAttribute("value")){fromEl.removeAttribute("value")}},TEXTAREA:function(fromEl,toEl){var newValue=toEl.value;if(fromEl.value!==newValue){fromEl.value=newValue}var firstChild=fromEl.firstChild;if(firstChild){var oldValue=firstChild.nodeValue;if(oldValue==newValue||!newValue&&oldValue==fromEl.placeholder){return}firstChild.nodeValue=newValue}},SELECT:function(fromEl,toEl){if(!toEl.hasAttribute("multiple")){var selectedIndex=-1;var i=0;var curChild=fromEl.firstChild;var optgroup;var nodeName;while(curChild){nodeName=curChild.nodeName&&curChild.nodeName.toUpperCase();if(nodeName==="OPTGROUP"){optgroup=curChild;curChild=optgroup.firstChild;if(!curChild){curChild=optgroup.nextSibling;optgroup=null}}else{if(nodeName==="OPTION"){if(curChild.hasAttribute("selected")){selectedIndex=i;break}i++}curChild=curChild.nextSibling;if(!curChild&&optgroup){curChild=optgroup.nextSibling;optgroup=null}}}fromEl.selectedIndex=selectedIndex}}};var ELEMENT_NODE=1;var DOCUMENT_FRAGMENT_NODE$1=11;var TEXT_NODE=3;var COMMENT_NODE=8;function noop(){}function defaultGetNodeKey(node){if(node){return node.getAttribute&&node.getAttribute("id")||node.id}}function morphdomFactory(morphAttrs){return function morphdom(fromNode,toNode,options){if(!options){options={}}if(typeof toNode==="string"){if(fromNode.nodeName==="#document"||fromNode.nodeName==="HTML"){var toNodeHtml=toNode;toNode=doc.createElement("html");toNode.innerHTML=toNodeHtml}else if(fromNode.nodeName==="BODY"){var toNodeBody=toNode;toNode=doc.createElement("html");toNode.innerHTML=toNodeBody;var bodyElement=toNode.querySelector("body");if(bodyElement){toNode=bodyElement}}else{toNode=toElement(toNode)}}else if(toNode.nodeType===DOCUMENT_FRAGMENT_NODE$1){toNode=toNode.firstElementChild}var getNodeKey=options.getNodeKey||defaultGetNodeKey;var onBeforeNodeAdded=options.onBeforeNodeAdded||noop;var onNodeAdded=options.onNodeAdded||noop;var onBeforeElUpdated=options.onBeforeElUpdated||noop;var onElUpdated=options.onElUpdated||noop;var onBeforeNodeDiscarded=options.onBeforeNodeDiscarded||noop;var onNodeDiscarded=options.onNodeDiscarded||noop;var onBeforeElChildrenUpdated=options.onBeforeElChildrenUpdated||noop;var skipFromChildren=options.skipFromChildren||noop;var addChild=options.addChild||function(parent,child){return parent.appendChild(child)};var childrenOnly=options.childrenOnly===true;var fromNodesLookup=Object.create(null);var keyedRemovalList=[];function addKeyedRemoval(key){keyedRemovalList.push(key)}function walkDiscardedChildNodes(node,skipKeyedNodes){if(node.nodeType===ELEMENT_NODE){var curChild=node.firstChild;while(curChild){var key=undefined;if(skipKeyedNodes&&(key=getNodeKey(curChild))){addKeyedRemoval(key)}else{onNodeDiscarded(curChild);if(curChild.firstChild){walkDiscardedChildNodes(curChild,skipKeyedNodes)}}curChild=curChild.nextSibling}}}function removeNode(node,parentNode,skipKeyedNodes){if(onBeforeNodeDiscarded(node)===false){return}if(parentNode){parentNode.removeChild(node)}onNodeDiscarded(node);walkDiscardedChildNodes(node,skipKeyedNodes)}function indexTree(node){if(node.nodeType===ELEMENT_NODE||node.nodeType===DOCUMENT_FRAGMENT_NODE$1){var curChild=node.firstChild;while(curChild){var key=getNodeKey(curChild);if(key){fromNodesLookup[key]=curChild}indexTree(curChild);curChild=curChild.nextSibling}}}indexTree(fromNode);function handleNodeAdded(el){onNodeAdded(el);var curChild=el.firstChild;while(curChild){var nextSibling=curChild.nextSibling;var key=getNodeKey(curChild);if(key){var unmatchedFromEl=fromNodesLookup[key];if(unmatchedFromEl&&compareNodeNames(curChild,unmatchedFromEl)){curChild.parentNode.replaceChild(unmatchedFromEl,curChild);morphEl(unmatchedFromEl,curChild)}else{handleNodeAdded(curChild)}}else{handleNodeAdded(curChild)}curChild=nextSibling}}function cleanupFromEl(fromEl,curFromNodeChild,curFromNodeKey){while(curFromNodeChild){var fromNextSibling=curFromNodeChild.nextSibling;if(curFromNodeKey=getNodeKey(curFromNodeChild)){addKeyedRemoval(curFromNodeKey)}else{removeNode(curFromNodeChild,fromEl,true)}curFromNodeChild=fromNextSibling}}function morphEl(fromEl,toEl,childrenOnly){var toElKey=getNodeKey(toEl);if(toElKey){delete fromNodesLookup[toElKey]}if(!childrenOnly){var beforeUpdateResult=onBeforeElUpdated(fromEl,toEl);if(beforeUpdateResult===false){return}else if(beforeUpdateResult instanceof HTMLElement){fromEl=beforeUpdateResult;indexTree(fromEl)}morphAttrs(fromEl,toEl);onElUpdated(fromEl);if(onBeforeElChildrenUpdated(fromEl,toEl)===false){return}}if(fromEl.nodeName!=="TEXTAREA"){morphChildren(fromEl,toEl)}else{specialElHandlers.TEXTAREA(fromEl,toEl)}}function morphChildren(fromEl,toEl){var skipFrom=skipFromChildren(fromEl,toEl);var curToNodeChild=toEl.firstChild;var curFromNodeChild=fromEl.firstChild;var curToNodeKey;var curFromNodeKey;var fromNextSibling;var toNextSibling;var matchingFromEl;outer:while(curToNodeChild){toNextSibling=curToNodeChild.nextSibling;curToNodeKey=getNodeKey(curToNodeChild);while(!skipFrom&&curFromNodeChild){fromNextSibling=curFromNodeChild.nextSibling;if(curToNodeChild.isSameNode&&curToNodeChild.isSameNode(curFromNodeChild)){curToNodeChild=toNextSibling;curFromNodeChild=fromNextSibling;continue outer}curFromNodeKey=getNodeKey(curFromNodeChild);var curFromNodeType=curFromNodeChild.nodeType;var isCompatible=undefined;if(curFromNodeType===curToNodeChild.nodeType){if(curFromNodeType===ELEMENT_NODE){if(curToNodeKey){if(curToNodeKey!==curFromNodeKey){if(matchingFromEl=fromNodesLookup[curToNodeKey]){if(fromNextSibling===matchingFromEl){isCompatible=false}else{fromEl.insertBefore(matchingFromEl,curFromNodeChild);if(curFromNodeKey){addKeyedRemoval(curFromNodeKey)}else{removeNode(curFromNodeChild,fromEl,true)}curFromNodeChild=matchingFromEl;curFromNodeKey=getNodeKey(curFromNodeChild)}}else{isCompatible=false}}}else if(curFromNodeKey){isCompatible=false}isCompatible=isCompatible!==false&&compareNodeNames(curFromNodeChild,curToNodeChild);if(isCompatible){morphEl(curFromNodeChild,curToNodeChild)}}else if(curFromNodeType===TEXT_NODE||curFromNodeType==COMMENT_NODE){isCompatible=true;if(curFromNodeChild.nodeValue!==curToNodeChild.nodeValue){curFromNodeChild.nodeValue=curToNodeChild.nodeValue}}}if(isCompatible){curToNodeChild=toNextSibling;curFromNodeChild=fromNextSibling;continue outer}if(curFromNodeKey){addKeyedRemoval(curFromNodeKey)}else{removeNode(curFromNodeChild,fromEl,true)}curFromNodeChild=fromNextSibling}if(curToNodeKey&&(matchingFromEl=fromNodesLookup[curToNodeKey])&&compareNodeNames(matchingFromEl,curToNodeChild)){if(!skipFrom){addChild(fromEl,matchingFromEl)}morphEl(matchingFromEl,curToNodeChild)}else{var onBeforeNodeAddedResult=onBeforeNodeAdded(curToNodeChild);if(onBeforeNodeAddedResult!==false){if(onBeforeNodeAddedResult){curToNodeChild=onBeforeNodeAddedResult}if(curToNodeChild.actualize){curToNodeChild=curToNodeChild.actualize(fromEl.ownerDocument||doc)}addChild(fromEl,curToNodeChild);handleNodeAdded(curToNodeChild)}}curToNodeChild=toNextSibling;curFromNodeChild=fromNextSibling}cleanupFromEl(fromEl,curFromNodeChild,curFromNodeKey);var specialElHandler=specialElHandlers[fromEl.nodeName];if(specialElHandler){specialElHandler(fromEl,toEl)}}var morphedNode=fromNode;var morphedNodeType=morphedNode.nodeType;var toNodeType=toNode.nodeType;if(!childrenOnly){if(morphedNodeType===ELEMENT_NODE){if(toNodeType===ELEMENT_NODE){if(!compareNodeNames(fromNode,toNode)){onNodeDiscarded(fromNode);morphedNode=moveChildren(fromNode,createElementNS(toNode.nodeName,toNode.namespaceURI))}}else{morphedNode=toNode}}else if(morphedNodeType===TEXT_NODE||morphedNodeType===COMMENT_NODE){if(toNodeType===morphedNodeType){if(morphedNode.nodeValue!==toNode.nodeValue){morphedNode.nodeValue=toNode.nodeValue}return morphedNode}else{morphedNode=toNode}}}if(morphedNode===toNode){onNodeDiscarded(fromNode)}else{if(toNode.isSameNode&&toNode.isSameNode(morphedNode)){return}morphEl(morphedNode,toNode,childrenOnly);if(keyedRemovalList){for(var i=0,len=keyedRemovalList.length;i<len;i++){var elToRemove=fromNodesLookup[keyedRemovalList[i]];if(elToRemove){removeNode(elToRemove,elToRemove.parentNode,false)}}}}if(!childrenOnly&&morphedNode!==fromNode&&fromNode.parentNode){if(morphedNode.actualize){morphedNode=morphedNode.actualize(fromNode.ownerDocument||doc)}fromNode.parentNode.replaceChild(morphedNode,fromNode)}return morphedNode}}var morphdom=morphdomFactory(morphAttrs);return morphdom});</script>
 <style>
   :root{
     --bg:#EEF2F4; --surface:#FFFFFF; --surface-2:#E4EAEE; --surface-3:#DAE2E7;
@@ -3056,16 +3062,21 @@
   function renderAuthScreen(){
     var app = document.getElementById("app");
     if(state.authView==="sent"){
-      app.innerHTML = h`<div class="auth-wrap"><div class="card auth-card">
+      morphInto(app, h`<div class="auth-wrap"><div class="card auth-card">
         <div class="auth-logo">Диспетчерская Keruen Inn</div>
         <div class="auth-sub">Служба сервиса</div>
         <div class="auth-ok"><b>Проверьте почту</b><br>Мы отправили ссылку для входа на ${escapeHtml(state.authEmail)}. Откройте её на этом устройстве.</div>
         <button class="btn btn-block" style="margin-top:14px;" id="auth-resend">Отправить ещё раз</button>
-      </div></div>`;
+      </div></div>`);
+      // .onclick/.onsubmit (а не addEventListener) — с morphdom узел формы
+      // может быть тем же самым живым узлом, что и на прошлом render() (а не
+      // пересозданным заново, как раньше при innerHTML), поэтому
+      // addEventListener на каждый render() копил бы обработчики один поверх
+      // другого; присваивание же просто заменяет предыдущий.
       document.getElementById("auth-resend").onclick = function(){ sendMagicLink(state.authEmail); };
       return;
     }
-    app.innerHTML = h`<div class="auth-wrap"><div class="card auth-card">
+    morphInto(app, h`<div class="auth-wrap"><div class="card auth-card">
       <div class="auth-logo">Диспетчерская Keruen Inn</div>
       <div class="auth-sub">Вход по рабочей почте — без пароля</div>
       ${state.authError ? h`<div class="auth-err">${escapeHtml(state.authError)}</div>` : ""}
@@ -3073,13 +3084,13 @@
         <div class="field"><label>Рабочая почта</label><input type="email" name="email" required placeholder="you@company.kz" value="${escapeHtml(state.authEmail)}"></div>
         <button class="btn btn-primary btn-block" type="submit">Отправить ссылку для входа</button>
       </form>
-    </div></div>`;
-    document.getElementById("auth-form").addEventListener("submit", function(e){
+    </div></div>`);
+    document.getElementById("auth-form").onsubmit = function(e){
       e.preventDefault();
       var email = new FormData(e.target).get("email").trim();
       if(!email) return;
       sendMagicLink(email);
-    });
+    };
   }
 
   /* ============================== VIEWS ============================== */
@@ -4678,7 +4689,8 @@
 
   /* ============================== TICKET PANEL ============================== */
   function renderTicketPanel(){
-    withFocusPreserved(renderTicketPanelInner);
+    renderInProgress = true;
+    try{ renderTicketPanelInner(); } finally { renderInProgress = false; }
   }
   function renderTicketPanelInner(){
     var root = document.getElementById("overlay-root");
@@ -4688,7 +4700,7 @@
     var hotel = hotelById(t.hotel_id); var di = deadlineInfo(t);
     var specialists = state.profiles.filter(function(m){ return m.role==="specialist" && m.active!==false; });
 
-    root.innerHTML = h`
+    morphInto(root, h`
       <div class="scrim" data-close-panel></div>
       <div class="panel">
         <div class="panel-head">
@@ -4988,7 +5000,7 @@
             </form>
           </div>
         </div>
-      </div>`;
+      </div>`);
   }
 
   /* ============================== MODALS ============================== */
@@ -5092,105 +5104,73 @@
   // автоматически при каждом импорте из c-lector, см. updatePortfolioFromImport().
 
   /* ============================== ROOT RENDER ============================== */
-  // 0.2.17: render() полностью пересобирает #app через innerHTML — если в
-  // этот момент фокус стоит в раскрытом по клику поле (группа «Отелей»
-  // Зона/Координаты/Лицо от Заказчика, поля «Реестра платежей»), удаление
-  // старого узла из DOM само по себе порождает "чужой" focusout (без
-  // реального ухода пользователя из поля/группы), который без этого флага
-  // ошибочно схлопывал бы поле обратно в разгар заполнения (например, между
-  // «change» по одному полю группы и ещё не введёнными остальными — реальный
-  // сценарий из-за асинхронной перезагрузки после сохранения через
-  // realtime). Пока render() выполняется, такие focusout игнорируются в
-  // обработчиках ниже.
+  // 0.3.3 (по просьбе Антона — «оптимизация и совершенствование», после того
+  // как фикс 0.3.2 для "стирается поле при вводе" вылечил именно этот
+  // конкретный симптом, но не саму причину): вместо полной пересборки
+  // #app/#overlay-root через innerHTML на каждый render() — а render()
+  // вызывается не только по прямому действию человека, но и любым из
+  // realtime-каналов (см. "-rt" ниже) и минутным таймером — теперь
+  // используется morphdom (вшита выше, в <head>). Она патчит только реально
+  // изменившиеся узлы живого DOM, а не пересоздаёт всё целиком: узел, который
+  // и так совпадает с новым состоянием (в том числе поле, в которое человек
+  // печатает прямо сейчас), просто не трогается — фокус, курсор и
+  // недописанный текст сохраняются сами по себе, без отдельной ловли и
+  // ручного переноса значения после пересборки, как приходилось делать
+  // раньше.
   var renderInProgress = false;
-  // 0.3.2 (по просьбе Антона, п.4 — "иногда при нажатии на пробел или
-  // удаляешь букву - удаляется всё введённое в поле"): render() вызывается не
-  // только по прямому действию человека — так делает и ЛЮБОЙ realtime-канал
-  // (см. "-rt" ниже) при изменении ЛЮБЫМ пользователем чего угодно, и раз в
-  // минуту то же самое делает таймер "N минут назад" (см. setInterval внизу
-  // файла). render() безусловно пересобирает #app через innerHTML — если в
-  // этот момент человек печатает в обычное поле (например "Наименование" в
-  // «Расходах», "Кому" в «Выдачах», ФИО/телефон в «Отелях»), старый
-  // DOM-узел с набранным текстом уничтожается и создаётся заново из state, в
-  // котором ещё не сохранённого текста, конечно, нет — набранное пропадает.
-  // Раньше пробовали ОТКЛАДЫВАТЬ такой render() до потери фокуса — не
-  // получилось: часть полей (Telegram chat_id, поля «Отелей», Валюта/НДС/
-  // Налог счёта) вообще не патчуют state сами, а полагаются именно на
-  // ближайший render() (после своего же "change"), чтобы показать
-  // результат СВОЕГО ЖЕ действия — отложенный render() ломал их немедленную
-  // реакцию (например, разблокировку соседней галочки), а сам момент
-  // "отложенного" показа превращался в непредсказуемый источник гонок с
-  // кликами. Поэтому render() остаётся полностью синхронным и мгновенным,
-  // как и был, а вместо отсрочки — переносим (транспланируем) через
-  // пересборку живое, ещё не сохранённое значение поля, где прямо сейчас
-  // курсор: до пересборки запоминаем его (и позицию курсора), после — если
-  // на том же месте (по статичным атрибутам — id/name/data-*, без учёта
-  // value/title/class, которые как раз и меняются при пересборке) стоит
-  // другое значение, возвращаем своё и фокус обратно. Если это было эхо
-  // СВОЕГО ЖЕ изменения — новое значение из state и так совпадёт с тем, что
-  // уже стоит в поле, и транспланировать нечего.
   function isActiveTypingField(el){
     return !!(el && (el.tagName==="TEXTAREA" || (el.tagName==="INPUT" && /^(text|number|tel|email|search|)$/i.test(el.type||"text"))));
   }
-  function buildStableFieldSelector(el){
-    var skip = {value:1, class:1, style:1, title:1, checked:1, disabled:1, placeholder:1};
-    var parts = [el.tagName.toLowerCase()];
-    var attrs = el.attributes;
-    for(var i=0;i<attrs.length;i++){
-      var a = attrs[i];
-      if(skip[a.name]) continue;
-      parts.push('['+a.name+'="'+String(a.value).replace(/["\\]/g,"\\$&")+'"]');
+  // morphdom по умолчанию всегда синхронизирует .value инпута/textarea с
+  // новым состоянием (см. specialElHandlers внутри вшитой библиотеки) — это
+  // ровно то, что стирало бы набранный текст. Для поля, в которое прямо
+  // сейчас печатает человек, подменяем "новое" значение на уже стоящее в
+  // поле — синхронизировать тогда нечего, и .value/курсор не трогаются
+  // вовсе (сам узел morphdom и так не пересоздаёт, раз атрибуты совпадают).
+  function morphdomPreserveTyping(fromEl, toEl){
+    if(fromEl === document.activeElement && isActiveTypingField(fromEl)){
+      toEl.value = fromEl.value;
     }
-    return parts.length>1 ? parts.join("") : null;
+    return true;
   }
-  // Общая обёртка для render() и renderTicketPanel() (карточка заявки в
-  // #overlay-root пересобирается через innerHTML точно так же и точно так
-  // же в состоянии стереть недописанное значение поля — например
-  // "…или впишите имя/название вручную" при назначении бригады, если в этот
-  // момент прилетает эхо realtime по этой же заявке от другого действия
-  // — поэтому сохраняем/переносим значение вокруг ЛЮБОЙ такой пересборки,
-  // а не только вокруг основной #app).
-  function withFocusPreserved(fn){
-    var ae = document.activeElement;
-    var preserve = null;
-    if(isActiveTypingField(ae)){
-      var sel = buildStableFieldSelector(ae);
-      if(sel) preserve = { selector: sel, value: ae.value, selStart: ae.selectionStart, selEnd: ae.selectionEnd };
-    }
-    renderInProgress = true;
-    try{ fn(); } finally { renderInProgress = false; }
-    if(preserve){
-      var again = null;
-      try { again = document.querySelector(preserve.selector); } catch(err){}
-      if(again && again.value !== preserve.value){
-        again.value = preserve.value;
-        try { again.setSelectionRange(preserve.selStart, preserve.selEnd); } catch(err){}
-        again.focus({preventScroll:true});
-      }
-    }
+  // #map-canvas (см. ensureMap() ниже) — Google Maps сама вставляет туда
+  // тайлы/controls напрямую через DOM API, в обход наших html-шаблонов, где
+  // этот div всегда пустой. Без этой отметки morphdom при каждом render()
+  // удалял бы из него всё, что туда вставила карта, потому что в "новом"
+  // HTML у этого div нет детей.
+  function morphdomSkipChildrenFor(fromEl){
+    return fromEl.id !== "map-canvas";
+  }
+  function morphInto(container, html){
+    window.morphdom(container, "<div>" + html + "</div>", {
+      childrenOnly: true,
+      onBeforeElUpdated: morphdomPreserveTyping,
+      onBeforeElChildrenUpdated: morphdomSkipChildrenFor
+    });
   }
   function render(){
     invalidateInvoiceGroupIndex();
-    withFocusPreserved(renderInner);
+    renderInProgress = true;
+    try{ renderInner(); } finally { renderInProgress = false; }
   }
   function renderInner(){
     if(!CONFIGURED){
-      document.getElementById("app").innerHTML = h`<div class="card configwarn">
+      morphInto(document.getElementById("app"), h`<div class="card configwarn">
         <h2 style="margin-top:0;">Настройка не завершена</h2>
         <p>Впишите <code>SUPABASE_URL</code> и <code>SUPABASE_ANON_KEY</code> в начале файла (значения — в вашем проекте Supabase: Project Settings → API) и разверните страницу снова.</p>
-      </div>`;
+      </div>`);
       return;
     }
     if(!LIB_LOADED){
-      document.getElementById("app").innerHTML = h`<div class="card configwarn">
+      morphInto(document.getElementById("app"), h`<div class="card configwarn">
         <h2 style="margin-top:0;">Не удалось загрузить Supabase</h2>
         <p>Библиотека <code>supabase-js</code> не загрузилась с CDN (cdn.jsdelivr.net) — проверьте подключение к интернету, отключите VPN/блокировщик, если он ограничивает доступ к CDN, и обновите страницу (F5).</p>
         <button class="btn btn-primary" onclick="location.reload()">Обновить страницу</button>
-      </div>`;
+      </div>`);
       return;
     }
     if(!state.session){ renderAuthScreen(); return; }
-    if(!state.me || !state.hotelsLoaded){ document.getElementById("app").innerHTML = h`<div class="auth-wrap"><div class="muted">Загрузка…</div></div>`; return; }
+    if(!state.me || !state.hotelsLoaded){ morphInto(document.getElementById("app"), h`<div class="auth-wrap"><div class="muted">Загрузка…</div></div>`); return; }
     // Новый человек (0.2.9) — авторизован (сессия и профиль есть), но пока
     // Администратор (владелец, см. isOwner()) не назначил ему настоящую роль
     // в «Команде», профиль остаётся с ролью по умолчанию "pending" (см.
@@ -5199,12 +5179,12 @@
     // владелец почему-то окажется с ролью "pending" (например, ручная правка
     // в базе) — ему это ограничение применяться не должно (см. navAllowed()).
     if(!isOwner() && state.me.role==="pending"){
-      document.getElementById("app").innerHTML = h`<div class="auth-wrap"><div class="card auth-card">
+      morphInto(document.getElementById("app"), h`<div class="auth-wrap"><div class="card auth-card">
         <div class="auth-logo">Диспетчерская Keruen Inn</div>
         <div class="auth-sub">Служба сервиса</div>
         <div class="auth-maintenance"><b>Ожидает назначения роли</b><br>Администратор ещё не открыл вам доступ — обратитесь к нему, либо загляните чуть позже.</div>
         <button class="btn btn-block" style="margin-top:14px;" data-action="sign-out">Выйти</button>
-      </div></div>`;
+      </div></div>`);
       return;
     }
     // «Заказчик» (0.2.8) без включённого доступа — авторизован (сессия и
@@ -5212,12 +5192,12 @@
     // нейтральный экран вместо приложения; выйти можно, войти обратно — как
     // только Администратор поставит галочку "Активен" в «Команде».
     if(state.me.role==="customer" && state.me.active===false){
-      document.getElementById("app").innerHTML = h`<div class="auth-wrap"><div class="card auth-card">
+      morphInto(document.getElementById("app"), h`<div class="auth-wrap"><div class="card auth-card">
         <div class="auth-logo">Диспетчерская Keruen Inn</div>
         <div class="auth-sub">Служба сервиса</div>
         <div class="auth-maintenance"><b>Ведутся работы на сайте</b><br>Доступ временно закрыт — загляните чуть позже.</div>
         <button class="btn btn-block" style="margin-top:14px;" data-action="sign-out">Выйти</button>
-      </div></div>`;
+      </div></div>`);
       return;
     }
 
@@ -5239,7 +5219,7 @@
     var app = document.getElementById("app");
     if(state.route.view==="workorder"){
       state.selectedTicketId = null; document.getElementById("overlay-root").innerHTML = "";
-      app.innerHTML = h`<div class="content" style="max-width:900px;">${viewWorkOrder(state.route.id)}</div>`;
+      morphInto(app, h`<div class="content" style="max-width:900px;">${viewWorkOrder(state.route.id)}</div>`);
       return;
     }
     if(!navAllowed(state.route.view)){ state.route = {view: firstAllowedView(), id:null}; }
@@ -5255,7 +5235,7 @@
       ["systemdefects","Системный брак"],
       ["team","Команда"], ["crews","Бригады"], ["parts","Склад ЗИП"], ["registry","Финансы",["cashexpenses"]], ["hotels","Отели"]
     ].filter(function(x){ return navAllowed(x[0]); });
-    app.innerHTML = h`
+    morphInto(app, h`
       <div class="sidebar">
         <div class="brand"><div class="brand-name">Диспетчерская</div><div class="brand-sub">Keruen Inn · Служба сервиса</div></div>
         <nav class="nav">${navItems.map(function(x){ return navItem(x[0], x[1], x[2]); }).join("")}</nav>
@@ -5272,7 +5252,7 @@
           </div></div>
         </div>
         <div class="content">${body}</div>
-      </div>`;
+      </div>`);
     renderTicketPanel();
     if(state.selectedTicketId) loadNotesFor(state.selectedTicketId);
     if(state.route.view==="map") ensureMap();
@@ -5566,6 +5546,16 @@
   });
 
   document.addEventListener("change", function(e){
+    // См. комментарий у focusout-обработчиков ниже (registryEditingFieldKey/
+    // hotelEditingKey): при удалении morphdom'ом узла, из которого не снят
+    // фокус (например поле поиска/фильтра при переходе между разделами),
+    // браузер сам синтезирует "change" ПРЯМО ВНУТРИ вызова removeChild —
+    // если обработать его как обычно, он вызовет render() повторно, пока
+    // внешний render() ещё выполняется, и сломает обход дерева у morphdom
+    // (NotFoundError: removeChild). Настоящее пользовательское изменение
+    // никогда не может произойти, пока renderInProgress истинен — JS
+    // однопоточный, так что это условие отсекает только такие побочные события.
+    if(renderInProgress) return;
     if(e.target.matches("[data-filter]")){ state.filters=state.filters||{}; state.filters[e.target.getAttribute("data-filter")]=e.target.value; render(); }
     if(e.target.matches("[data-filter-checkbox]")){ state.filters=state.filters||{}; state.filters[e.target.getAttribute("data-filter-checkbox")]=e.target.checked; render(); return; }
     if(e.target.matches("[data-tag-filter]")){ state.filters=state.filters||{}; state.filters.tagFilters=state.filters.tagFilters||{}; state.filters.tagFilters[e.target.getAttribute("data-tag-filter")]=e.target.checked; render(); return; }
@@ -5679,6 +5669,12 @@
   // важно, изменилось ли значение (тогда это уже сделал "change" выше) или
   // нет (тогда это единственное место, где режим редактирования снимается).
   document.addEventListener("focusout", function(e){
+    // См. комментарий у соседних focusout-обработчиков ниже (registryEditingFieldKey/
+    // hotelEditingKey) — без этой проверки побочный focusout от собственной
+    // пересборки DOM (morphdom удаляет/переносит узлы во время своего обхода)
+    // может вызвать render() ПОВТОРНО, пока внешний render() ещё выполняется —
+    // с morphdom это ломает его внутренний обход дерева (NotFoundError: removeChild).
+    if(renderInProgress) return;
     if(e.target.matches(".registry-amount-input") && state.registryEditingAmountId){
       state.registryEditingAmountId = null;
       render();
