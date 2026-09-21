@@ -212,6 +212,9 @@
   .hotel-field-display:hover{ border-color:var(--line); }
   .registry-related-line{ font-size:10.5px; line-height:1.4; margin-top:2px; white-space:normal; }
   .registry-related-line a{ white-space:nowrap; }
+  /* 0.3.0: предупреждение о возможно случайном совпадении имени файла между
+     разными заявками (см. isGenericInvoiceFileName/registryGroupRow). */
+  .registry-suspicious-match{ font-size:10.5px; line-height:1.4; margin-top:2px; white-space:normal; color:var(--warn, #a06a00); cursor:help; }
   /* 0.2.20: счёт, общий сразу на несколько заявок (см. registryGroupRow) —
      разворачивается в построчную разбивку доли каждой заявки. */
   .registry-expand-btn{ padding:1px 5px; margin-right:4px; font-size:11px; line-height:1; vertical-align:middle; }
@@ -311,6 +314,10 @@
   .deadline-box.overdue{ border-color:var(--crit); background:var(--crit-soft); }
   .deadline-box.soon{ border-color:var(--warn); background:var(--warn-soft); }
   .note{ padding:9px 10px; background:var(--surface-2); border-radius:8px; font-size:12.5px; margin-bottom:7px; }
+  /* 0.3.0 (по просьбе Антона): «Журнал» в карточке заявки — видно примерно
+     4 последних записи, остальные (старые) — прокруткой внутри блока, а не
+     растягивая всю карточку заявки в высоту. */
+  .journal-list{ max-height:320px; overflow-y:auto; padding-right:4px; }
   .note .meta{ color:var(--ink-faint); font-size:11px; margin-bottom:3px; }
   .actions-row{ display:flex; gap:8px; flex-wrap:wrap; }
   /* "Ход работ" — компактный аккордеон: по умолчанию видна только строка
@@ -677,6 +684,29 @@
   // Сумма/Валюта/НДС — теперь их группируем в одну строку (см.
   // registryGroupRow), а сумму делят между заявками по проценту
   // (invoices.extra.alloc_percent, задаётся в развёрнутом виде группы).
+  // 0.3.0: раньше invoiceGroupMembers() делал .filter() по ВСЕМ state.invoices
+  // на каждый вызов — а вызывается он для КАЖДОЙ строки счёта при отрисовке
+  // «Реестра платежей» (buildInvoiceGroups) и карточки заявки, так что при
+  // большом количестве счетов рендер одного экрана превращался в O(n²).
+  // Индекс "нормализованное имя файла → счета" строится один раз лениво (при
+  // первом обращении после очередного render()) и переиспользуется всеми
+  // вызовами invoiceGroupMembers в пределах этого рендера — см.
+  // invalidateInvoiceGroupIndex() в render().
+  var invoiceGroupIndexCache = null;
+  function invalidateInvoiceGroupIndex(){ invoiceGroupIndexCache = null; }
+  function getInvoiceGroupIndex(){
+    if(invoiceGroupIndexCache) return invoiceGroupIndexCache;
+    var idx = Object.create(null);
+    (state.invoices||[]).forEach(function(x){
+      if(!x.file_name) return;
+      if(x.extra && x.extra.ungrouped) return; // см. ungroupInvoice — такие копии никогда не группируются
+      var key = normalizeForMatch(x.file_name);
+      (idx[key] || (idx[key]=[])).push(x);
+    });
+    Object.keys(idx).forEach(function(key){ idx[key].sort(function(a,b){ return (a.uploaded_at||"").localeCompare(b.uploaded_at||""); }); });
+    invoiceGroupIndexCache = idx;
+    return idx;
+  }
   function invoiceGroupMembers(iv){
     if(!iv || !iv.file_name) return [iv];
     // По имени файла совпадение иногда бывает случайным (два разных счёта,
@@ -687,8 +717,8 @@
     // больше никогда не считается той же группой, что и остальные.
     if(iv.extra && iv.extra.ungrouped) return [iv];
     var name = normalizeForMatch(iv.file_name);
-    var out = (state.invoices||[]).filter(function(x){ return normalizeForMatch(x.file_name||"")===name && !(x.extra && x.extra.ungrouped); });
-    return out.length ? out.sort(function(a,b){ return (a.uploaded_at||"").localeCompare(b.uploaded_at||""); }) : [iv];
+    var out = getInvoiceGroupIndex()[name];
+    return (out && out.length) ? out : [iv];
   }
   // См. комментарий выше — ручной "разрыв" ложного объединения по имени файла.
   function ungroupInvoice(invoiceId){
@@ -701,6 +731,21 @@
     iv.extra = extra;
     render();
     sb.from("invoices").update({extra:extra}).eq("id", invoiceId).then(function(){});
+  }
+  // 0.3.0: группировка по имени файла (см. выше) иногда объединяет ДВА
+  // РАЗНЫХ счёта на разные заявки просто потому, что оба сохранены под
+  // типичным именем "по умолчанию" от сканера/телефона (img_0001.jpg,
+  // скан.pdf, 20260914.pdf) — совпадение случайное, а не признак одного и
+  // того же документа. Явный признак такого имени — повод показать
+  // предупреждение в реестре (см. registryGroupRow), не полагаясь только на
+  // то, что кто-то сам заметит задвоенную сумму. Ручной разрыв уже есть —
+  // "это другой счёт" (ungroupInvoice) в развёрнутом виде группы.
+  function isGenericInvoiceFileName(fileName){
+    if(!fileName) return false;
+    var base = String(fileName).replace(/\.[a-zA-Zа-яА-Я0-9]{1,6}$/,"").trim();
+    if(!base) return true;
+    if(/^[\d\s_.\-]+$/.test(base)) return true; // голая дата/номер/только цифры
+    return /^(img|image|dsc|dscn|scan|photo|screenshot|снимок|скан|сканирование|фото|документ|document|copy|копия|изображение)[\s_\-]*\d*$/i.test(base);
   }
   // "Основная" копия счёта в группе (самая ранняя загрузка) — только на ней
   // указываются реальные Сумма/Валюта/НДС/Налог; у остальных копий эти поля
@@ -721,7 +766,14 @@
     var acc = invoiceAccountedKZT(members[0]);
     if(members.length<=1) return acc;
     var pct = invoiceAllocPercent(iv);
-    if(pct==null || acc.value==null) return Object.assign({}, acc, {shared:true, percent:null});
+    // 0.3.0 (по просьбе Антона): раньше, пока доля ЭТОЙ заявки ещё не указана
+    // в «Реестре платежей», здесь молча показывалась сумма ВСЕГО счёта
+    // целиком — выглядело так, будто у заявки уже есть какая-то сумма, а на
+    // самом деле распределение ещё не сделано (и если так открыть карточки
+    // нескольких заявок на один счёт, сумма визуально задваивалась/
+    // растраивалась бы). Честный прочерк, пока для этой заявки доля не указана.
+    if(pct==null) return { value:null, state:"missing", shared:true, percent:null };
+    if(acc.value==null) return Object.assign({}, acc, {shared:true, percent:pct});
     return Object.assign({}, acc, {value: acc.value*(pct/100), full:acc.value, percent:pct, shared:true});
   }
   // HTML-фрагмент суммы "Учтено в затратах" (KZT без НДС) — общий для
@@ -1229,20 +1281,92 @@
   function signOut(){ sb.auth.signOut(); }
 
   /* ============================== DATA LOAD + REALTIME ============================== */
+  // 0.3.0: раньше ЛЮБОЕ изменение хотя бы одной строки в общей таблице
+  // (заявка, счёт, ...) вызывало reloadX() — полный select("*") всей
+  // таблицы, причём у КАЖДОГО подключённого клиента сразу. При нескольких
+  // одновременно работающих диспетчерах это быстро превращается в шторм
+  // полных перезагрузок больших таблиц по сети на каждый чих. Supabase
+  // realtime и так присылает готовую строку (payload.new при INSERT/UPDATE;
+  // при DELETE — без REPLICA IDENTITY FULL в payload.old есть только
+  // первичный ключ, но этого достаточно, чтобы найти и убрать строку из
+  // локального массива) — патчим локальное состояние вместо похода в сеть.
+  function rtPatchArray(arr, payload, sortFn){
+    if(payload.eventType === "DELETE"){
+      var delId = payload.old && payload.old.id;
+      if(delId==null) return;
+      var idx = arr.findIndex(function(r){ return r.id===delId; });
+      if(idx!==-1) arr.splice(idx,1);
+      return;
+    }
+    var row = payload.new;
+    if(!row || row.id==null) return;
+    var idx2 = arr.findIndex(function(r){ return r.id===row.id; });
+    if(idx2!==-1) arr[idx2] = row; else arr.push(row);
+    if(sortFn) arr.sort(sortFn);
+  }
+  function rtSortBy(field, ascending){
+    return function(a,b){
+      var av=a[field], bv=b[field];
+      if(av===bv) return 0;
+      if(av==null) return ascending?-1:1;
+      if(bv==null) return ascending?1:-1;
+      if(av<bv) return ascending?-1:1;
+      return ascending?1:-1;
+    };
+  }
   function subscribeAll(){
     reloadTickets(); reloadProfiles(); reloadParts(); reloadPortfolio(); reloadInvoices(); reloadPhotos(); reloadSnapshots(); reloadCrews(); reloadHotels(); reloadCashAdvances(); reloadCashExpenses(); reloadStatsSnapshots();
-    sb.channel("tickets-rt").on("postgres_changes", {event:"*", schema:"public", table:"tickets"}, reloadTickets).subscribe();
-    sb.channel("profiles-rt").on("postgres_changes", {event:"*", schema:"public", table:"profiles"}, reloadProfiles).subscribe();
-    sb.channel("parts-rt").on("postgres_changes", {event:"*", schema:"public", table:"parts"}, reloadParts).subscribe();
-    sb.channel("portfolio-rt").on("postgres_changes", {event:"*", schema:"public", table:"portfolio_snapshot"}, reloadPortfolio).subscribe();
-    sb.channel("invoices-rt").on("postgres_changes", {event:"*", schema:"public", table:"invoices"}, reloadInvoices).subscribe();
-    sb.channel("photos-rt").on("postgres_changes", {event:"*", schema:"public", table:"ticket_photos"}, reloadPhotos).subscribe();
-    sb.channel("snapshots-rt").on("postgres_changes", {event:"*", schema:"public", table:"import_snapshots"}, reloadSnapshots).subscribe();
-    sb.channel("crews-rt").on("postgres_changes", {event:"*", schema:"public", table:"crews"}, reloadCrews).subscribe();
-    sb.channel("hotels-rt").on("postgres_changes", {event:"*", schema:"public", table:"hotels"}, reloadHotels).subscribe();
-    sb.channel("cash-advances-rt").on("postgres_changes", {event:"*", schema:"public", table:"cash_advances"}, reloadCashAdvances).subscribe();
-    sb.channel("cash-expenses-rt").on("postgres_changes", {event:"*", schema:"public", table:"cash_expenses"}, reloadCashExpenses).subscribe();
-    sb.channel("stats-snapshots-rt").on("postgres_changes", {event:"*", schema:"public", table:"ticket_stats_snapshots"}, reloadStatsSnapshots).subscribe();
+    sb.channel("tickets-rt").on("postgres_changes", {event:"*", schema:"public", table:"tickets"}, function(payload){
+      rtPatchArray(state.tickets, payload, rtSortBy("created_at", false));
+      maybeSeed(); maybeRecordTodaysStatsSnapshot(); render();
+    }).subscribe();
+    sb.channel("profiles-rt").on("postgres_changes", {event:"*", schema:"public", table:"profiles"}, function(payload){
+      rtPatchArray(state.profiles, payload, rtSortBy("created_at", true));
+      var mine = state.profiles.find(function(p){ return state.session && p.id===state.session.user.id; });
+      if(mine) state.me = mine;
+      render();
+    }).subscribe();
+    sb.channel("parts-rt").on("postgres_changes", {event:"*", schema:"public", table:"parts"}, function(payload){
+      rtPatchArray(state.parts, payload, rtSortBy("name", true));
+      render();
+    }).subscribe();
+    sb.channel("portfolio-rt").on("postgres_changes", {event:"*", schema:"public", table:"portfolio_snapshot"}, function(payload){
+      if(payload.eventType === "DELETE") state.portfolio = null;
+      else if(payload.new) state.portfolio = payload.new;
+      maybeSeedPortfolio(); render();
+    }).subscribe();
+    sb.channel("invoices-rt").on("postgres_changes", {event:"*", schema:"public", table:"invoices"}, function(payload){
+      rtPatchArray(state.invoices, payload, rtSortBy("uploaded_at", false));
+      render();
+    }).subscribe();
+    sb.channel("photos-rt").on("postgres_changes", {event:"*", schema:"public", table:"ticket_photos"}, function(payload){
+      rtPatchArray(state.photos, payload, rtSortBy("uploaded_at", false));
+      render();
+    }).subscribe();
+    sb.channel("snapshots-rt").on("postgres_changes", {event:"*", schema:"public", table:"import_snapshots"}, function(payload){
+      rtPatchArray(state.snapshots, payload, rtSortBy("imported_at", true));
+      render();
+    }).subscribe();
+    sb.channel("crews-rt").on("postgres_changes", {event:"*", schema:"public", table:"crews"}, function(payload){
+      rtPatchArray(state.crews, payload, rtSortBy("name", true));
+      render();
+    }).subscribe();
+    sb.channel("hotels-rt").on("postgres_changes", {event:"*", schema:"public", table:"hotels"}, function(payload){
+      rtPatchArray(state.hotels, payload, rtSortBy("id", true));
+      maybeSeed(); maybeRecordTodaysStatsSnapshot(); render();
+    }).subscribe();
+    sb.channel("cash-advances-rt").on("postgres_changes", {event:"*", schema:"public", table:"cash_advances"}, function(payload){
+      rtPatchArray(state.cashAdvances, payload, rtSortBy("date", false));
+      render();
+    }).subscribe();
+    sb.channel("cash-expenses-rt").on("postgres_changes", {event:"*", schema:"public", table:"cash_expenses"}, function(payload){
+      rtPatchArray(state.cashExpenses, payload, rtSortBy("date", false));
+      render();
+    }).subscribe();
+    sb.channel("stats-snapshots-rt").on("postgres_changes", {event:"*", schema:"public", table:"ticket_stats_snapshots"}, function(payload){
+      rtPatchArray(state.statsSnapshots, payload, rtSortBy("snapshot_date", true));
+      maybeRecordTodaysStatsSnapshot(); render();
+    }).subscribe();
   }
   // Список отелей — раньше был константой в коде, теперь строка в таблице hotels;
   // maybeSeed() (демо-заявки) ждёт, пока отели тоже загрузятся, иначе примерные
@@ -1614,31 +1738,67 @@
     return f(monday)+"–"+f(sunday)+"."+sunday.getFullYear();
   }
   // Выгрузка реестра платежей в Excel — те же колонки, что и на экране
-  // (REGISTRY_COLUMN_LABELS), плюс отдельная колонка "Также в заявках"
-  // (0.2.13.1, доп.) — на экране это подпись под именем файла, а не отдельная
-  // колонка (не хватало бы места), но в выгрузке колонка не мешает.
-  var REGISTRY_EXPORT_COLUMN_LABELS = REGISTRY_COLUMN_LABELS.concat(["Также в заявках"]);
+  // (REGISTRY_COLUMN_LABELS), плюс колонка "Разбивка по заявкам" вместо
+  // прежней "Также в заявках".
+  //
+  // 0.3.0 (по просьбе Антона): раньше выгрузка шла построчно прямо по
+  // invoices — счёт, общий на несколько заявок (см. buildInvoiceGroups/
+  // invoiceGroupMembers выше), давал по отдельной строке на каждую копию,
+  // с пустыми Сумма/Валюта/НДС на всех копиях кроме "основной". Теперь
+  // выгрузка группирует так же, как сам «Реестр платежей» на экране — один
+  // общий счёт = одна строка, № заявки перечисляет все заявки через запятую,
+  // а доля каждой заявки (если она уже указана) — в отдельной колонке.
+  var REGISTRY_EXPORT_COLUMN_LABELS = REGISTRY_COLUMN_LABELS.concat(["Разбивка по заявкам (если счёт общий)"]);
   function exportRegistryExcel(){
     if(typeof XLSX==="undefined" || !XLSX.utils){ alert("Модуль Excel не загрузился (возможно, заблокирован интернет/VPN) — обновите страницу и попробуйте снова."); return; }
     var list = (state.invoices||[]).filter(function(iv){ return iv.in_registry; });
-    var rows = list.map(function(iv, i){
-      var tk = state.tickets.find(function(x){return x.id===iv.ticket_id;});
-      var hotel = tk ? hotelById(tk.hotel_id) : null;
-      var accounted = invoiceCostAccounted(iv);
-      var related = invoiceRelatedTickets(iv).map(function(t){ return t.external_ref || t.id; }).join(", ");
+    var groups = buildInvoiceGroups(list);
+    var rows = groups.map(function(group, i){
+      var primary = group.primary, members = group.members;
+      var isGroup = members.length>1;
+      var seenTicketIds = {}, uniqueTickets = [];
+      members.forEach(function(iv){
+        var tk = state.tickets.find(function(x){return x.id===iv.ticket_id;});
+        var tid = tk ? tk.id : null;
+        if(tid!=null && seenTicketIds[tid]) return;
+        if(tid!=null) seenTicketIds[tid] = true;
+        uniqueTickets.push(tk);
+      });
+      var refCell = uniqueTickets.map(function(tk){ return tk ? (tk.external_ref || tk.id) : "—"; }).join(", ");
+      var hotelsById = {};
+      uniqueTickets.forEach(function(tk){ var h2 = tk ? hotelById(tk.hotel_id) : null; if(h2) hotelsById[h2.id]=h2; });
+      var hotelIds = Object.keys(hotelsById);
+      var hotelCell = hotelIds.length===1 ? ("№"+hotelsById[hotelIds[0]].id+" "+hotelsById[hotelIds[0]].name)
+        : hotelIds.length>1 ? ("Разные ("+hotelIds.length+")")
+        : "";
+      var accounted = invoiceCostAccounted(primary);
+      var allSubmitted = members.every(function(x){return x.submitted_for_payment;});
+      var allPaid = members.every(function(x){return x.paid;});
+      var breakdown = "";
+      if(isGroup){
+        var accKZT = invoiceAccountedKZT(primary);
+        breakdown = members.map(function(iv){
+          var tk = state.tickets.find(function(x){return x.id===iv.ticket_id;});
+          var ref = tk ? (tk.external_ref || tk.id) : "—";
+          var pct = invoiceAllocPercent(iv);
+          if(pct==null) return ref+": доля не указана";
+          var amtLabel = accKZT.value!=null ? " ("+fmtKZT(accKZT.value*(pct/100))+" ₸)" : "";
+          return ref+": "+pct+"%"+amtLabel;
+        }).join("; ");
+      }
       return [
         i+1,
-        tk && tk.external_ref ? tk.external_ref : "",
-        hotel ? ("№"+hotel.id+" "+hotel.name) : "",
-        iv.file_name || "",
-        iv.amount!=null ? iv.amount : "",
-        iv.currency || "",
-        iv.vat_included===true ? "С НДС" : (iv.vat_included===false ? "Без НДС" : ""),
-        iv.tax_basis ? (TAX_BASIS_LABEL[iv.tax_basis]||iv.tax_basis) : "",
+        refCell,
+        hotelCell,
+        primary.file_name || "",
+        primary.amount!=null ? primary.amount : "",
+        primary.currency || "",
+        primary.vat_included===true ? "С НДС" : (primary.vat_included===false ? "Без НДС" : ""),
+        primary.tax_basis ? (TAX_BASIS_LABEL[primary.tax_basis]||primary.tax_basis) : "",
         accounted!=null ? accounted : "",
-        iv.submitted_for_payment ? "Да" : "Нет",
-        iv.paid ? "Да" : "Нет",
-        related
+        allSubmitted ? "Да" : "Нет",
+        allPaid ? "Да" : "Нет",
+        breakdown
       ];
     });
     var aoa = [REGISTRY_EXPORT_COLUMN_LABELS].concat(rows);
@@ -1748,8 +1908,12 @@
     var todayIso = new Date().toISOString().slice(0,10);
     var byHotel = computeLiveHotelStats();
     var existing = (state.statsSnapshots||[]).find(function(s){ return s.snapshot_date===todayIso; });
-    if(existing) sb.from("ticket_stats_snapshots").update({by_hotel: byHotel}).eq("id", existing.id).then(function(){});
-    else sb.from("ticket_stats_snapshots").insert({snapshot_date: todayIso, by_hotel: byHotel}).then(function(){});
+    // 0.3.0: раньше ошибка сохранения снимка (например, RLS или временный сбой
+    // сети) проглатывалась молча — без снимка за день период сравнения в
+    // «Отчёт по СЕРВИСу заказчику» тихо перестаёт различаться (см. баннер
+    // несовпадения периода выше). Логируем в консоль, чтобы это было видно.
+    if(existing) sb.from("ticket_stats_snapshots").update({by_hotel: byHotel}).eq("id", existing.id).then(function(res){ if(res && res.error) console.error("Не удалось обновить сегодняшний снимок счётчиков:", res.error); });
+    else sb.from("ticket_stats_snapshots").insert({snapshot_date: todayIso, by_hotel: byHotel}).then(function(res){ if(res && res.error) console.error("Не удалось сохранить сегодняшний снимок счётчиков:", res.error); });
   }
   // Ближайший по дате снимок к "N дней назад" — тот же принцип терпимости к
   // пропущенным дням, что и closedSinceLastWeek() выше (снимки копятся раз в
@@ -2712,7 +2876,7 @@
       var acc = invoiceAccountedKZTForTicket(iv);
       return h`<div class="invoice-row" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 10px;border:1px solid var(--line);border-radius:8px;">
         <button type="button" class="btn btn-sm" data-action="invoice-open" data-path="${escapeHtml(iv.file_path)}">${escapeHtml(iv.file_name)}</button>
-        <span class="mono muted" style="font-size:12px;" title="${acc.shared?('Сумма без НДС по этой заявке'+(acc.percent!=null?' ('+acc.percent+'% от счёта)':' — доля не указана в «Реестре платежей», показана сумма всего счёта')):'Сумма без НДС'}">${accountedKZTLabel(acc)}${acc.state==="ok" && !acc.currency ? ' ₸' : ''}</span>
+        <span class="mono muted" style="font-size:12px;" title="${acc.shared?('Сумма без НДС по этой заявке'+(acc.percent!=null?' ('+acc.percent+'% от счёта)':' — доля этой заявки ещё не указана в «Реестре платежей» (счёт общий на несколько заявок)')):'Сумма без НДС'}">${accountedKZTLabel(acc)}${acc.state==="ok" && !acc.currency ? ' ₸' : ''}</span>
         <div style="margin-left:auto;display:flex;align-items:center;gap:8px;">
           ${invoicePaidPill(iv)}
           <button type="button" class="btn btn-sm btn-ghost btn-danger" data-action="invoice-delete" data-id="${iv.id}" data-path="${escapeHtml(iv.file_path)}" title="Удалить файл">✕</button>
@@ -2944,7 +3108,16 @@
             ${report ? h`<button class="btn btn-primary btn-sm" id="report-copy-btn" style="margin-left:auto;">Скопировать текст отчёта</button>` : ''}
           </div>
           ${!report ? h`<div class="empty-state"><b>Пока не с чем сравнивать</b>Платформа только начинает копить дневные снимки счётчиков — откройте дашборд ещё раз попозже (или завтра), и появится база для сравнения.</div>` : h`
-            ${report.thin ? h`<div class="banner" style="margin-bottom:12px;">Истории снимков меньше суток — период сравнения получился короче запрошенного. Он станет полноценным через несколько дней, по мере накопления снимков.</div>` : ''}
+            ${report.thin ? h`<div class="banner report-period-banner" style="margin-bottom:12px;">Истории снимков меньше суток — период сравнения получился короче запрошенного. Он станет полноценным через несколько дней, по мере накопления снимков.</div>`
+              // 0.3.0 (по просьбе Антона): если снимка ровно на выбранное число дней
+              // назад ещё нет, findSnapshotNearDaysAgo молча подставляет ближайший из
+              // имеющихся — раньше это выглядело так, будто смена периода (7/14/30 дней)
+              // вообще ни на что не влияет, хотя на самом деле не хватает накопленной
+              // истории снимков. Показываем явно, с чем именно сравниваем.
+              // Отдельный класс report-period-banner (а не просто .banner) — на
+              // дашборде уже есть баннер про демо-заявки, и .banner:first вслепую
+              // цеплял бы его вместо этого.
+              : (Math.abs(report.actualDays-reportDays)>=2 ? h`<div class="banner report-period-banner" style="margin-bottom:12px;">Снимка ровно на ${reportDays} ${pluralRu(reportDays,"день","дня","дней")} назад ещё нет — сравниваем с ближайшим доступным (${report.actualDays} ${pluralRu(report.actualDays,"день","дня","дней")} назад, от ${fmtDMY(report.baselineDate)}). Поэтому разные периоды пока могут показывать одно и то же — по мере накопления дневных снимков разница появится.</div>` : '')}
             <div class="report-stats">
               <div class="report-stat"><div class="report-stat-label">✅ Закрыто за период</div><div class="report-stat-value">${report.closedPeriod}</div><div class="report-stat-sub">${pluralRu(report.closedPeriod,"заявка","заявки","заявок")}</div></div>
               <div class="report-stat"><div class="report-stat-label">🆕 Новых заявок</div><div class="report-stat-value">${fmtSigned(report.newCount)}</div><div class="report-stat-sub">${report.newBefore} → ${report.newAfter}</div></div>
@@ -3425,6 +3598,10 @@
     var allSubmitted = members.every(function(r){return r.submitted_for_payment;});
     var allPaid = members.every(function(r){return r.paid;});
     var extraCopiesNote = members.length>ticketCount ? (' ('+members.length+' '+pluralRu(members.length,'копия счёта','копии счёта','копий счёта')+')') : '';
+    // 0.3.0: подозрение на случайное совпадение имени файла — только когда
+    // это реально РАЗНЫЕ заявки (не просто одна и та же заявка с двумя
+    // копиями в "Бригада"/"Материал") и имя типично для сканера/камеры.
+    var suspiciousMatch = isGroup && ticketCount>1 && isGenericInvoiceFileName(primary.file_name);
     return h`<tr class="${isGroup?'registry-group-row':''}">
       <td class="mono muted">${rowNum}</td>
       <td class="mono" style="white-space:normal;">${isGroup ? h`<button type="button" class="btn btn-ghost btn-sm registry-expand-btn" data-action="registry-group-toggle" data-key="${escapeHtml(group.key)}" title="${expanded?'Свернуть':'Показать долю каждой заявки'}">${expanded?'▾':'▸'}</button>` : ""}${refCell}</td>
@@ -3432,6 +3609,7 @@
       <td>
         <button class="btn btn-sm registry-file-btn" data-action="invoice-open" data-path="${escapeHtml(primary.file_path)}" title="${escapeHtml(primary.file_name)}">счёт</button>
         ${isGroup ? h`<div class="muted registry-related-line">Общий на ${ticketCount} ${pluralRu(ticketCount,'заявку','заявки','заявок')}${extraCopiesNote}${group.hiddenCount?' (+'+group.hiddenCount+' скрыто фильтром)':''}</div>` : (group.hiddenCount ? h`<div class="muted registry-related-line">Также на ${group.hiddenCount} ${pluralRu(group.hiddenCount,'заявке','заявках','заявках')} — скрыто фильтром</div>` : "")}
+        ${suspiciousMatch ? h`<div class="registry-suspicious-match" title="Имя файла типично для сканера/камеры («${escapeHtml(primary.file_name)}») — возможно, это на самом деле РАЗНЫЕ счета со случайно одинаковым именем, а не один общий счёт. Проверьте в развёрнутом виде («это другой счёт»).">⚠ похоже на случайное совпадение имени</div>` : ""}
       </td>
       <td>${(editableRegistry && state.registryEditingAmountId===primary.id)
         ? h`<input type="text" inputmode="decimal" class="registry-amount-input" data-invoice-amount data-id="${primary.id}" value="${primary.amount!=null?formatAmountInputValue(String(primary.amount)):''}" placeholder="—">`
@@ -4687,7 +4865,7 @@
           </div>
           <div>
             <div class="section-title">Журнал</div>
-            ${state.ticketNotes.slice().reverse().map(function(n){
+            <div class="journal-list">${state.ticketNotes.slice().reverse().map(function(n){
               if(state.editingNoteId===n.id){
                 return h`<form class="note-edit-form" data-note-id="${n.id}" style="display:flex;gap:6px;margin-bottom:7px;">
                   <input type="text" name="text" value="${escapeHtml(n.note_text)}" style="flex:1;">
@@ -4704,7 +4882,7 @@
                 </div>
                 ${escapeHtml(n.note_text)}
               </div>`;
-            }).join("") || '<div class="muted" style="font-size:12.5px;">Записей пока нет.</div>'}
+            }).join("") || '<div class="muted" style="font-size:12.5px;">Записей пока нет.</div>'}</div>
             <form id="note-form" data-id="${t.id}" style="margin-top:8px;display:flex;gap:8px;">
               <input type="text" name="text" placeholder="Добавить запись…" style="flex:1;">
               <button class="btn btn-sm" type="submit">+</button>
@@ -4828,6 +5006,7 @@
   var renderInProgress = false;
   function render(){
     renderInProgress = true;
+    invalidateInvoiceGroupIndex();
     try{ renderInner(); } finally { renderInProgress = false; }
   }
   function renderInner(){
