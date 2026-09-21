@@ -1967,6 +1967,27 @@
     var now = new Date();
     var closedPeriod = currentTotals.done - baseTotals.done;
     var openBefore = baseTotals.submitted+baseTotals.inWork, openNow = currentTotals.submitted+currentTotals.inWork;
+    // 0.3.0 (по просьбе Антона): раньше "Отклонено дополнительно" считалось
+    // как currentTotals.rejected-baseTotals.rejected — разница между двумя
+    // "снимками" общего числа отклонённых заявок НА ТЕКУЩИЙ МОМЕНТ. У такой
+    // разницы есть особенность: если старая, уже отклонённая заявка удалена
+    // (например, дубль, которую позже удалили — 0.2.18) или её c-lector-статус
+    // при повторной синхронизации перестал совпадать с текстом "отклон"/"отказ",
+    // она тихо выпадает из currentTotals.rejected, как будто её "отменили" —
+    // и разность может уйти в минус, даже если за период появились НОВЫЕ
+    // отклонённые заявки (наблюдение Антона: отчёт показал -1, хотя визуально
+    // в списке заявок за этот период отклонены 2 новые заявки). Считаем
+    // честно и напрямую: сколько ИЗ ЗАЯВОК, СОЗДАННЫХ С МОМЕНТА СНИМКА
+    // СРАВНЕНИЯ, сейчас отклонены — эта величина не может стать
+    // отрицательной и не зависит от того, что происходит со старыми заявками.
+    var baselineDateMs = new Date(baseline.snapshot_date).getTime();
+    var rejectedDelta = (state.tickets||[]).filter(function(t){
+      if(t.demo) return false;
+      if(!currentByHotel[t.hotel_id]) return false; // отель вне СЕРВИСа — не входит в отчёт
+      if(!t.created_at || new Date(t.created_at).getTime() <= baselineDateMs) return false;
+      if(!isTicketDone(t)) return false;
+      return t.external_status ? /отклон|отказ/i.test(t.external_status) : t.status==="rejected";
+    }).length;
     var lines = [];
     lines.push("Здравствуйте!");
     lines.push("Отчет "+fmtDDMM(now));
@@ -1978,7 +1999,7 @@
     lines.push("✅ Закрыто за период: "+closedPeriod+" "+pluralRu(closedPeriod,"заявка","заявки","заявок"));
     lines.push("🆕 Новых заявок: "+(currentTotals.total-baseTotals.total)+" ("+baseTotals.total+" → "+currentTotals.total+")");
     lines.push("🔵 Открытых: "+openBefore+" → "+openNow+" ("+fmtSigned(openNow-openBefore)+")");
-    lines.push("❌ Отклонено дополнительно: "+(currentTotals.rejected-baseTotals.rejected));
+    lines.push("❌ Отклонено дополнительно: "+rejectedDelta);
     lines.push("⏰ Просрочено на "+fmtDDMM(now)+": "+currentTotals.overdue);
     lines.push("📈 % выполнения: "+fmtPct(pctBefore)+"% → "+fmtPct(pctNow)+"%");
     lines.push("");
@@ -1996,7 +2017,7 @@
       periodToDate: now, closedPeriod: closedPeriod,
       newCount: currentTotals.total-baseTotals.total, newBefore: baseTotals.total, newAfter: currentTotals.total,
       openBefore: openBefore, openNow: openNow, openDelta: openNow-openBefore,
-      rejectedDelta: currentTotals.rejected-baseTotals.rejected, overdueNow: currentTotals.overdue,
+      rejectedDelta: rejectedDelta, overdueNow: currentTotals.overdue,
       pctBefore: pctBefore, pctNow: pctNow, fmtPct: fmtPct, rows: rows
     };
   }
