@@ -567,6 +567,12 @@
     if(role==="dispatcher" || role==="head" || role==="finance") return true;
     return !!(state.me && state.me.can_edit_registry);
   }
+  // 0.3.2 (по просьбе Антона, п.3): галочку "Выдано" в «Выдачах» может
+  // ставить ТОЛЬКО Финансист — строже, чем canEditRegistry() выше (которая
+  // даёт доступ ко всему разделу «Финансы» ещё и Администратору с
+  // Руководителем). Это именно ограничение интерфейса, как и остальные
+  // ролевые проверки в файле — не политика Supabase.
+  function isFinance(){ return !!(state.me && state.me.role==="finance"); }
   // 0.2.18: ручное удаление заявки из карточки (по просьбе Антона — например,
   // когда заявку удалили в c-lector и её уже не нужно держать в системе, или
   // завели по ошибке). Удаление необратимо и каскадом стирает всё, что
@@ -1180,6 +1186,12 @@
     // раскрыты (счёт сразу на несколько заявок — см. registryGroupRow) —
     // ключ группы (нормализованное имя файла) -> true.
     registryExpandedGroups: {},
+    // 0.3.2 (по просьбе Антона): «Реестр платежей» — уже оплаченные счета
+    // группируются по месяцу оплаты (0.2.19), но список за все месяцы сразу
+    // был слишком длинным. Сворачиваем группы по месяцам, как и группы
+    // "общий счёт на несколько заявок" выше — ключ месяца ("2026-08") -> true,
+    // если раскрыт. По умолчанию ни один месяц не раскрыт (см. paidMonthDividerRow).
+    registryExpandedMonths: {},
     // 0.2.17: то же самое для «Отелей» — «Зона», «Координаты» и «Лицо от
     // Заказчика» показываются обычным текстом без рамок ввода, если уже
     // заполнены, и превращаются в поля ввода по клику. Ключ вида
@@ -3702,7 +3714,7 @@
   // показывает, сколько счетов и на какую сумму (KZT без НДС, как и итоги
   // внизу) оплачено именно в этом месяце. items — группы (см. buildInvoiceGroups),
   // каждый общий счёт считается здесь один раз, а не по разу на заявку.
-  function paidMonthDividerRow(key, items){
+  function paidMonthDividerRow(key, items, expanded){
     var label = key==="unknown" ? "Дата оплаты не указана" : monthLabelRu(key);
     var sum = 0, pendingCount = 0, missingCount = 0;
     items.forEach(function(group){
@@ -3711,8 +3723,12 @@
       if(acc.value==null){ missingCount++; return; }
       sum += acc.value;
     });
-    return h`<tr class="registry-month-divider">
-      <td colspan="8">${escapeHtml(label)} — ${items.length} ${pluralRu(items.length,'счёт','счёта','счетов')}${pendingCount?' (ожидание курса: '+pendingCount+')':''}${missingCount?' (без данных: '+missingCount+')':''}</td>
+    // 0.3.2 (по просьбе Антона): сам месяц сворачивается/разворачивается по
+    // клику — так же, как строка "общий счёт на несколько заявок" (▸/▾)
+    // выше; по умолчанию свёрнут (см. registryExpandedMonths), видна только
+    // сводка (сколько счетов, на какую сумму).
+    return h`<tr class="registry-month-divider" data-action="registry-month-toggle" data-key="${escapeHtml(key)}" style="cursor:pointer;">
+      <td colspan="8"><button type="button" class="btn btn-ghost btn-sm registry-expand-btn" style="margin-right:6px;" title="${expanded?'Свернуть месяц':'Показать счета за месяц'}">${expanded?'▾':'▸'}</button>${escapeHtml(label)} — ${items.length} ${pluralRu(items.length,'счёт','счёта','счетов')}${pendingCount?' (ожидание курса: '+pendingCount+')':''}${missingCount?' (без данных: '+missingCount+')':''}</td>
       <td class="mono" style="text-align:right;">${fmtKZT(sum)}</td>
       <td colspan="2"></td>
     </tr>`;
@@ -3856,6 +3872,7 @@
                   if(b==="unknown") return -1;
                   return b.localeCompare(a); // сначала последний оплаченный месяц
                 });
+                var expandedMonths = state.registryExpandedMonths || {};
                 paidGroupKeys.forEach(function(key){
                   var items = paidGroupsMap[key];
                   // Пока не выбрана сортировка по колонке — внутри месяца
@@ -3863,8 +3880,12 @@
                   // ("№ заявки"/"Отель") переопределяет это, как и для
                   // неоплаченных выше.
                   if(!rSortField) items = items.slice().sort(function(a,b){ return (b.primary.paid_at||"").localeCompare(a.primary.paid_at||""); });
-                  out.push(paidMonthDividerRow(key, items));
-                  items.forEach(function(g){
+                  var monthExpanded = !!expandedMonths[key];
+                  out.push(paidMonthDividerRow(key, items, monthExpanded));
+                  // 0.3.2: счета внутри месяца рисуем, только если месяц
+                  // раскрыт — иначе нумерация строк ("№" в первой колонке)
+                  // прыгала бы через невидимые строки.
+                  if(monthExpanded) items.forEach(function(g){
                     rowNum++;
                     out.push(registryGroupRow(g, rowNum, editableRegistry, !!expandedGroups[g.key]));
                   });
@@ -3934,6 +3955,58 @@
     if(!canEditRegistry()) return;
     if(!confirm("Удалить эту запись о выдаче?")) return;
     sb.from("cash_advances").delete().eq("id", id).then(function(){});
+  }
+  // 0.3.2 (по просьбе Антона, п.3): галочка "Выдано" — подтверждение самим
+  // Финансистом, что деньги реально ушли (в отличие от факта записи выдачи
+  // в систему, который мог внести и Администратор/Руководитель). Только
+  // Финансист может её ставить/снимать — см. isFinance() выше. Патчим
+  // state.cashAdvances локально ДО запроса, как и setInvoicePaid выше, —
+  // чтобы галочка не "прыгала" в ожидании ответа сети.
+  function setCashAdvanceConfirmed(id, val){
+    if(!isFinance()){ alert("Отмечать выдачу как «Выдано» может только Финансист."); return; }
+    var a = (state.cashAdvances||[]).find(function(x){ return x.id===id; });
+    var confirmedAt = val ? new Date().toISOString() : (a ? a.confirmed_at : null);
+    if(a){ a.confirmed = val; a.confirmed_at = confirmedAt; }
+    sb.from("cash_advances").update({confirmed:val, confirmed_at:confirmedAt}).eq("id", id).then(function(res){
+      if(res && res.error) alert("Не удалось сохранить отметку: " + res.error.message);
+    });
+    render();
+  }
+  // Чек/квитанция к выдаче (например, если деньги переведены на карту, а не
+  // выданы наличными) — тот же приём, что uploadInvoice/uploadPhoto выше:
+  // файл в Storage (свой бакет "cash-receipts", см. supabase_schema.sql),
+  // путь и исходное имя — в самой записи cash_advances.
+  function uploadCashReceipt(id, file){
+    var path = id + "/" + Date.now() + "_" + file.name.replace(/[^\w.\-]+/g,"_");
+    return readFileAsBuffer(file).then(function(buf){
+      return sb.storage.from("cash-receipts").upload(path, buf, {contentType: file.type || "application/octet-stream"});
+    }).then(function(res){
+      if(res.error) throw res.error;
+      return sb.from("cash_advances").update({receipt_path: path, receipt_name: file.name}).eq("id", id);
+    }).then(function(res){
+      if(res && res.error) throw res.error;
+      var a = (state.cashAdvances||[]).find(function(x){ return x.id===id; });
+      if(a){ a.receipt_path = path; a.receipt_name = file.name; }
+      render();
+    }).catch(function(err){
+      alert("Не удалось прикрепить чек: " + (err&&err.message?err.message:err));
+    });
+  }
+  function openCashReceiptFile(path){
+    sb.storage.from("cash-receipts").createSignedUrl(path, 3600).then(function(res){
+      if(res.data && res.data.signedUrl) window.open(res.data.signedUrl, "_blank");
+      else alert("Не удалось открыть файл.");
+    });
+  }
+  function deleteCashReceipt(id, path){
+    if(!confirm("Удалить прикреплённый чек?")) return;
+    sb.storage.from("cash-receipts").remove([path]).then(function(){
+      return sb.from("cash_advances").update({receipt_path: null, receipt_name: null}).eq("id", id);
+    }).then(function(){
+      var a = (state.cashAdvances||[]).find(function(x){ return x.id===id; });
+      if(a){ a.receipt_path = null; a.receipt_name = null; }
+      render();
+    });
   }
   // ticketRef — то, что человек ввёл в поле "Заявка" (текст с автоподсказкой по
   // № c-lector существующих заявок). Разрешена только ОДНА заявка на расход —
@@ -4098,12 +4171,12 @@
           <div class="helptext" style="padding-top:8px;">Остаток = выдано минус подтверждено расходами. Отрицательный — прораб потратил больше, чем получил на руки.</div>
         </div>
 
-        <div class="two-col">
+        <div class="row-gap">
           <div class="card card-pad">
             <div class="section-title">Выдачи</div>
             <div class="table-wrap"><table>
-              <thead><tr><th>Дата</th><th>Кому</th><th class="num">Сумма</th><th>Мотель</th><th>Комментарий</th>${editable?'<th></th>':''}</tr></thead>
-              <tbody>${advances.length===0 ? h`<tr><td colspan="${editable?6:5}"><div class="empty-state"><b>Пока нет выдач</b>Выдали наличные — впишите ниже.</div></td></tr>` :
+              <thead><tr><th>Дата</th><th>Кому</th><th class="num">Сумма</th><th>Мотель</th><th>Комментарий</th><th style="text-align:center;">Выдано</th><th>Чек</th>${editable?'<th></th>':''}</tr></thead>
+              <tbody>${advances.length===0 ? h`<tr><td colspan="${editable?8:7}"><div class="empty-state"><b>Пока нет выдач</b>Выдали наличные — впишите ниже.</div></td></tr>` :
                 advances.map(function(a){
                   var hotel = a.hotel_id ? hotelById(a.hotel_id) : null;
                   return h`<tr>
@@ -4112,6 +4185,8 @@
                     <td class="num mono">${fmtSum(a.amount)}</td>
                     <td class="muted">${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
                     <td class="muted">${escapeHtml(a.note||'')}</td>
+                    <td style="text-align:center;"><input type="checkbox" data-action="cash-advance-confirm-toggle" data-id="${a.id}" data-val="${a.confirmed?'0':'1'}" ${a.confirmed?'checked':''} ${isFinance()?'':'disabled'} title="${isFinance()?'Отметить, что деньги фактически выданы':'Отмечать может только Финансист'}"></td>
+                    <td>${a.receipt_path ? h`<a href="#" data-action="cash-receipt-open" data-path="${escapeHtml(a.receipt_path)}" title="${escapeHtml(a.receipt_name||'')}">📎 чек</a>${editable?h` <a href="#" data-action="cash-receipt-delete" data-id="${a.id}" data-path="${escapeHtml(a.receipt_path)}" style="color:var(--crit);" title="Удалить чек">✕</a>`:''}` : (editable ? h`<label class="btn btn-ghost btn-sm" style="cursor:pointer;">Приложить<input type="file" data-cash-receipt-upload="${a.id}" accept="image/*,.pdf" style="display:none;"></label>` : '—')}</td>
                     ${editable?h`<td><a href="#" data-action="cash-advance-delete" data-id="${a.id}" style="color:var(--crit);">✕</a></td>`:''}
                   </tr>`;
                 }).join("")}
@@ -4136,15 +4211,15 @@
                   var hotel = e.hotel_id ? hotelById(e.hotel_id) : null;
                   var tk = e.ticket_id ? state.tickets.find(function(x){return x.id===e.ticket_id;}) : null;
                   return h`<tr>
-                    <td class="mono muted">${fmtDateShort(e.date)}</td>
-                    <td>${escapeHtml(e.description)}</td>
+                    <td class="mono muted" style="white-space:nowrap;">${fmtDateShort(e.date)}</td>
+                    <td style="max-width:260px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${escapeHtml(e.description)}">${escapeHtml(e.description)}</td>
                     <td class="num mono">${e.qty}</td>
                     <td class="num mono">${fmtSum(e.unit_cost)}</td>
                     <td class="num mono">${fmtSum(e.amount)}</td>
-                    <td class="muted">${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
-                    <td class="mono">${tk ? h`<a href="#" data-open-ticket="${tk.id}">${escapeHtml(tk.external_ref||'')}</a>` : '—'}</td>
-                    <td><span class="pill ${e.category==='materials'?'pill-ok':'pill-neutral'}">${CASH_EXPENSE_CATEGORY_LABEL[e.category]||e.category}</span></td>
-                    <td class="muted">${escapeHtml(e.person)}</td>
+                    <td class="muted" style="white-space:nowrap;">${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
+                    <td class="mono" style="white-space:nowrap;">${tk ? h`<a href="#" data-open-ticket="${tk.id}">${escapeHtml(tk.external_ref||'')}</a>` : '—'}</td>
+                    <td style="white-space:nowrap;"><span class="pill ${e.category==='materials'?'pill-ok':'pill-neutral'}">${CASH_EXPENSE_CATEGORY_LABEL[e.category]||e.category}</span></td>
+                    <td class="muted" style="white-space:nowrap;">${escapeHtml(e.person)}</td>
                     ${editable?h`<td><a href="#" data-action="cash-expense-delete" data-id="${e.id}" style="color:var(--crit);">✕</a></td>`:''}
                   </tr>`;
                 }).join("")}
@@ -4603,6 +4678,9 @@
 
   /* ============================== TICKET PANEL ============================== */
   function renderTicketPanel(){
+    withFocusPreserved(renderTicketPanelInner);
+  }
+  function renderTicketPanelInner(){
     var root = document.getElementById("overlay-root");
     if(!state.selectedTicketId){ root.innerHTML=""; if(notesChannel){ sb.removeChannel(notesChannel); notesChannel=null; notesChannelTicketId=null; } return; }
     var t = state.tickets.find(function(x){return x.id===state.selectedTicketId;});
@@ -5025,10 +5103,75 @@
   // realtime). Пока render() выполняется, такие focusout игнорируются в
   // обработчиках ниже.
   var renderInProgress = false;
-  function render(){
+  // 0.3.2 (по просьбе Антона, п.4 — "иногда при нажатии на пробел или
+  // удаляешь букву - удаляется всё введённое в поле"): render() вызывается не
+  // только по прямому действию человека — так делает и ЛЮБОЙ realtime-канал
+  // (см. "-rt" ниже) при изменении ЛЮБЫМ пользователем чего угодно, и раз в
+  // минуту то же самое делает таймер "N минут назад" (см. setInterval внизу
+  // файла). render() безусловно пересобирает #app через innerHTML — если в
+  // этот момент человек печатает в обычное поле (например "Наименование" в
+  // «Расходах», "Кому" в «Выдачах», ФИО/телефон в «Отелях»), старый
+  // DOM-узел с набранным текстом уничтожается и создаётся заново из state, в
+  // котором ещё не сохранённого текста, конечно, нет — набранное пропадает.
+  // Раньше пробовали ОТКЛАДЫВАТЬ такой render() до потери фокуса — не
+  // получилось: часть полей (Telegram chat_id, поля «Отелей», Валюта/НДС/
+  // Налог счёта) вообще не патчуют state сами, а полагаются именно на
+  // ближайший render() (после своего же "change"), чтобы показать
+  // результат СВОЕГО ЖЕ действия — отложенный render() ломал их немедленную
+  // реакцию (например, разблокировку соседней галочки), а сам момент
+  // "отложенного" показа превращался в непредсказуемый источник гонок с
+  // кликами. Поэтому render() остаётся полностью синхронным и мгновенным,
+  // как и был, а вместо отсрочки — переносим (транспланируем) через
+  // пересборку живое, ещё не сохранённое значение поля, где прямо сейчас
+  // курсор: до пересборки запоминаем его (и позицию курсора), после — если
+  // на том же месте (по статичным атрибутам — id/name/data-*, без учёта
+  // value/title/class, которые как раз и меняются при пересборке) стоит
+  // другое значение, возвращаем своё и фокус обратно. Если это было эхо
+  // СВОЕГО ЖЕ изменения — новое значение из state и так совпадёт с тем, что
+  // уже стоит в поле, и транспланировать нечего.
+  function isActiveTypingField(el){
+    return !!(el && (el.tagName==="TEXTAREA" || (el.tagName==="INPUT" && /^(text|number|tel|email|search|)$/i.test(el.type||"text"))));
+  }
+  function buildStableFieldSelector(el){
+    var skip = {value:1, class:1, style:1, title:1, checked:1, disabled:1, placeholder:1};
+    var parts = [el.tagName.toLowerCase()];
+    var attrs = el.attributes;
+    for(var i=0;i<attrs.length;i++){
+      var a = attrs[i];
+      if(skip[a.name]) continue;
+      parts.push('['+a.name+'="'+String(a.value).replace(/["\\]/g,"\\$&")+'"]');
+    }
+    return parts.length>1 ? parts.join("") : null;
+  }
+  // Общая обёртка для render() и renderTicketPanel() (карточка заявки в
+  // #overlay-root пересобирается через innerHTML точно так же и точно так
+  // же в состоянии стереть недописанное значение поля — например
+  // "…или впишите имя/название вручную" при назначении бригады, если в этот
+  // момент прилетает эхо realtime по этой же заявке от другого действия
+  // — поэтому сохраняем/переносим значение вокруг ЛЮБОЙ такой пересборки,
+  // а не только вокруг основной #app).
+  function withFocusPreserved(fn){
+    var ae = document.activeElement;
+    var preserve = null;
+    if(isActiveTypingField(ae)){
+      var sel = buildStableFieldSelector(ae);
+      if(sel) preserve = { selector: sel, value: ae.value, selStart: ae.selectionStart, selEnd: ae.selectionEnd };
+    }
     renderInProgress = true;
+    try{ fn(); } finally { renderInProgress = false; }
+    if(preserve){
+      var again = null;
+      try { again = document.querySelector(preserve.selector); } catch(err){}
+      if(again && again.value !== preserve.value){
+        again.value = preserve.value;
+        try { again.setSelectionRange(preserve.selStart, preserve.selEnd); } catch(err){}
+        again.focus({preventScroll:true});
+      }
+    }
+  }
+  function render(){
     invalidateInvoiceGroupIndex();
-    try{ renderInner(); } finally { renderInProgress = false; }
+    withFocusPreserved(renderInner);
   }
   function renderInner(){
     if(!CONFIGURED){
@@ -5281,6 +5424,13 @@
         render();
         return;
       }
+      if(action==="registry-month-toggle"){
+        var mkey = actionEl.getAttribute("data-key");
+        state.registryExpandedMonths = state.registryExpandedMonths || {};
+        state.registryExpandedMonths[mkey] = !state.registryExpandedMonths[mkey];
+        render();
+        return;
+      }
       if(action==="registry-amount-edit"){
         if(!canEditRegistry()) return;
         state.registryEditingAmountId = id;
@@ -5408,6 +5558,9 @@
       if(action==="hotel-toggle-active"){ toggleHotelActive(id, actionEl.getAttribute("data-val")==="1"); return; }
       if(action==="cash-advance-delete"){ e.preventDefault(); deleteCashAdvance(id); return; }
       if(action==="cash-expense-delete"){ e.preventDefault(); deleteCashExpense(id); return; }
+      if(action==="cash-advance-confirm-toggle"){ setCashAdvanceConfirmed(id, actionEl.getAttribute("data-val")==="1"); return; }
+      if(action==="cash-receipt-open"){ e.preventDefault(); openCashReceiptFile(actionEl.getAttribute("data-path")); return; }
+      if(action==="cash-receipt-delete"){ e.preventDefault(); deleteCashReceipt(id, actionEl.getAttribute("data-path")); return; }
       if(action==="cash-import-reset"){ resetCashImport(); return; }
     }
   });
@@ -5426,6 +5579,7 @@
     if(e.target.matches("[data-alloc-percent]")){ setInvoiceAllocPercent(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.matches("[data-alloc-amount]")){ setInvoiceAllocAmount(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.id==="import-file"){ var f=e.target.files&&e.target.files[0]; if(f) loadImportFile(f); return; }
+    if(e.target.matches("[data-cash-receipt-upload]")){ var crf=e.target.files&&e.target.files[0]; if(crf) uploadCashReceipt(e.target.getAttribute("data-cash-receipt-upload"), crf); return; }
     if(e.target.matches("[data-import-map]")){ state.importMapping[e.target.getAttribute("data-import-map")]=e.target.value; render(); return; }
     if(e.target.matches("[data-cash-import-map]")){ state.cashImportMapping[e.target.getAttribute("data-cash-import-map")]=e.target.value; render(); return; }
     if(e.target.id==="report-period-days"){
@@ -5599,6 +5753,24 @@
     }
     if(significantBefore===0) pos = 0;
     el.setSelectionRange(pos, pos);
+  });
+
+  // 0.3.2 (по просьбе Антона, п.5 — "при вводе суммы в окошко, нажимаю
+  // enter и ничего не происходит"): поля click-to-edit (Сумма/Валюта/НДС/
+  // Налог в «Реестре платежей», Доля %/= сумма, поля «Отелей») сохраняют
+  // значение по событию "change", которое браузер сам создаёт только при
+  // уходе фокуса (blur) — Enter в обычном текстовом <input> вне <form>
+  // ничего не делает и уж точно не создаёт change. Раньше единственным
+  // способом сохранить значение было кликнуть куда-то ещё. Добавляем Enter
+  // как явный способ подтвердить ввод: просто снимаем фокус (blur) —
+  // дальше срабатывает та же цепочка "change" (сохранение) → "focusout"
+  // (сворачивание поля обратно в обычный текст), что и раньше при клике
+  // мимо.
+  document.addEventListener("keydown", function(e){
+    if(e.key!=="Enter") return;
+    if(!e.target.matches('input[data-registry-edit-focus], input[data-hotel-edit-focus], input.registry-amount-input, input[data-hotel-field]')) return;
+    e.preventDefault();
+    e.target.blur();
   });
 
   document.addEventListener("submit", function(e){
