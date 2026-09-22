@@ -1358,6 +1358,15 @@
     // "общий счёт на несколько заявок" выше — ключ месяца ("2026-08") -> true,
     // если раскрыт. По умолчанию ни один месяц не раскрыт (см. paidMonthDividerRow).
     registryExpandedMonths: {},
+    // 0.3.8 (по просьбе Антона, п.1): «Наличные расходы» (Выдачи/Расходы) —
+    // сгруппированы по прорабу (см. viewCashExpenses/groupCashByPerson),
+    // группу можно свернуть/развернуть — тем же приёмом, что и группы месяцев
+    // в «Реестре платежей» выше, но по умолчанию РАЗВЁРНУТЫ (в отличие от
+    // истории оплаченных счетов, здесь обычно немного человек, и скрывать их
+    // записи по умолчанию не нужно — см. cashPersonExpanded()). Ключ — "adv:<имя>"
+    // или "exp:<имя>" (раздельно для двух таблиц, один и тот же прораб может
+    // быть свёрнут в одной и развёрнут в другой).
+    cashExpandedPersons: {},
     // 0.2.17: то же самое для «Отелей» — «Зона», «Координаты» и «Лицо от
     // Заказчика» показываются обычным текстом без рамок ввода, если уже
     // заполнены, и превращаются в поля ввода по клику. Ключ вида
@@ -4380,6 +4389,27 @@
     (state.cashExpenses||[]).forEach(function(e){ if(e.person) set[e.person]=true; });
     return Object.keys(set).sort();
   }
+  // 0.3.8 (по просьбе Антона, п.1): «Выдачи» и «Расходы» группируются по
+  // прорабу — тем же способом, что и «Баланс по прорабам» выше считает свои
+  // суммы (person, как есть — без разбора на имя/фамилию, раз в базе это одно
+  // текстовое поле). Внутри группы порядок сохраняется как в исходном списке
+  // (уже отсортирован по дате — сначала новые, см. viewCashExpenses).
+  function groupCashByPerson(rows){
+    var map = {}, order = [];
+    (rows||[]).forEach(function(r){
+      var p = r.person || "—";
+      if(!map[p]){ map[p] = []; order.push(p); }
+      map[p].push(r);
+    });
+    return order.sort().map(function(p){ return {person:p, rows:map[p]}; });
+  }
+  // Свёрнута ли группа прораба в «Выдачах»/«Расходах» (см. state.cashExpandedPersons
+  // выше) — по умолчанию РАЗВЁРНУТА (в отличие от истории оплаченных счетов в
+  // «Реестре платежей», где по умолчанию свёрнуто).
+  function cashPersonExpanded(key){
+    var m = state.cashExpandedPersons || {};
+    return m[key] !== false; // неопределённое значение (ключа ещё нет) = развёрнуто
+  }
   // Расходы конкретной заявки (по одной, не по нескольким — см. cash_expenses.ticket_id
   // в схеме) — используется и в materialsState() (пункт "Материал" чек-листа),
   // и в блоке "Затраты по заявке" в карточке.
@@ -4609,6 +4639,8 @@
     advances.forEach(function(a){ if(byPerson[a.person]) byPerson[a.person].given += Number(a.amount)||0; });
     expenses.forEach(function(e){ if(byPerson[e.person]) byPerson[e.person].spent += Number(e.amount)||0; });
     var hotelOptions = state.hotels.filter(function(x){return x.in_service;}).map(function(x){ return h`<option value="${x.id}">№${x.id} ${escapeHtml(x.name)}</option>`; }).join("");
+    var advanceGroups = groupCashByPerson(advances);
+    var expenseGroups = groupCashByPerson(expenses);
 
     return h`
       ${financeTabs('cashexpenses')}
@@ -4639,18 +4671,27 @@
             <div class="table-wrap"><table>
               <thead><tr><th>Дата</th><th>Кому</th><th class="num">Сумма</th><th>Мотель</th><th>Комментарий</th><th style="text-align:center;">Выдано</th><th>Чек</th>${editable?'<th></th>':''}</tr></thead>
               <tbody>${advances.length===0 ? h`<tr><td colspan="${editable?8:7}"><div class="empty-state"><b>Пока нет выдач</b>Выдали наличные — впишите ниже.</div></td></tr>` :
-                advances.map(function(a){
-                  var hotel = a.hotel_id ? hotelById(a.hotel_id) : null;
-                  return h`<tr>
-                    <td class="mono muted">${fmtDateShort(a.date)}</td>
-                    <td>${escapeHtml(a.person)}</td>
-                    <td class="num mono">${fmtSum(a.amount)}</td>
-                    <td class="muted">${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
-                    <td class="muted">${escapeHtml(a.note||'')}</td>
-                    <td style="text-align:center;"><input type="checkbox" data-action="cash-advance-confirm-toggle" data-id="${a.id}" data-val="${a.confirmed?'0':'1'}" ${a.confirmed?'checked':''} ${isFinance()?'':'disabled'} title="${isFinance()?'Отметить, что деньги фактически выданы':'Отмечать может только Финансист'}"></td>
-                    <td>${a.receipt_path ? h`<a href="#" data-action="cash-receipt-open" data-path="${escapeHtml(a.receipt_path)}" title="${escapeHtml(a.receipt_name||'')}">📎 чек</a>${editable?h` <a href="#" data-action="cash-receipt-delete" data-id="${a.id}" data-path="${escapeHtml(a.receipt_path)}" style="color:var(--crit);" title="Удалить чек">✕</a>`:''}` : (editable ? h`<label class="btn btn-ghost btn-sm" style="cursor:pointer;">Приложить<input type="file" data-cash-receipt-upload="${a.id}" accept="image/*,.pdf" style="display:none;"></label>` : '—')}</td>
-                    ${editable?h`<td><a href="#" data-action="cash-advance-delete" data-id="${a.id}" style="color:var(--crit);">✕</a></td>`:''}
+                advanceGroups.map(function(g){
+                  var groupKey = "adv:"+g.person;
+                  var expanded = cashPersonExpanded(groupKey);
+                  var sumGiven = g.rows.reduce(function(s,a){ return s+(Number(a.amount)||0); }, 0);
+                  var header = h`<tr class="cash-person-divider" data-action="cash-person-toggle" data-key="${escapeHtml(groupKey)}" style="cursor:pointer;">
+                    <td colspan="${editable?8:7}"><button type="button" class="btn btn-ghost btn-sm registry-expand-btn" style="margin-right:6px;" title="${expanded?'Свернуть':'Показать выдачи'}">${expanded?'▾':'▸'}</button><b>${escapeHtml(g.person)}</b> <span class="muted">— ${g.rows.length} ${ruPlural(g.rows.length,['выдача','выдачи','выдач'])}, ${fmtSum(sumGiven)} ₸</span></td>
                   </tr>`;
+                  var body = !expanded ? "" : g.rows.map(function(a){
+                    var hotel = a.hotel_id ? hotelById(a.hotel_id) : null;
+                    return h`<tr>
+                      <td class="mono muted">${fmtDateShort(a.date)}</td>
+                      <td>${escapeHtml(a.person)}</td>
+                      <td class="num mono">${fmtSum(a.amount)}</td>
+                      <td class="muted">${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
+                      <td class="muted">${escapeHtml(a.note||'')}</td>
+                      <td style="text-align:center;"><input type="checkbox" data-action="cash-advance-confirm-toggle" data-id="${a.id}" data-val="${a.confirmed?'0':'1'}" ${a.confirmed?'checked':''} ${isFinance()?'':'disabled'} title="${isFinance()?'Отметить, что деньги фактически выданы':'Отмечать может только Финансист'}"></td>
+                      <td>${a.receipt_path ? h`<a href="#" data-action="cash-receipt-open" data-path="${escapeHtml(a.receipt_path)}" title="${escapeHtml(a.receipt_name||'')}">📎 чек</a>${editable?h` <a href="#" data-action="cash-receipt-delete" data-id="${a.id}" data-path="${escapeHtml(a.receipt_path)}" style="color:var(--crit);" title="Удалить чек">✕</a>`:''}` : (editable ? h`<label class="btn btn-ghost btn-sm" style="cursor:pointer;">Приложить<input type="file" data-cash-receipt-upload="${a.id}" accept="image/*,.pdf" style="display:none;"></label>` : '—')}</td>
+                      ${editable?h`<td><a href="#" data-action="cash-advance-delete" data-id="${a.id}" style="color:var(--crit);">✕</a></td>`:''}
+                    </tr>`;
+                  }).join("");
+                  return header + body;
                 }).join("")}
               </tbody>
             </table></div>
@@ -4669,21 +4710,30 @@
             <div class="table-wrap"><table>
               <thead><tr><th>Дата</th><th>Наименование</th><th class="num">Кол-во</th><th class="num">Цена</th><th class="num">Сумма</th><th>Мотель</th><th>Заявка</th><th>Категория</th><th>Прораб</th>${editable?'<th></th>':''}</tr></thead>
               <tbody>${expenses.length===0 ? h`<tr><td colspan="${editable?10:9}"><div class="empty-state"><b>Пока нет расходов</b>Внесите отчёт прораба ниже — вручную или вставкой таблицы.</div></td></tr>` :
-                expenses.map(function(e){
-                  var hotel = e.hotel_id ? hotelById(e.hotel_id) : null;
-                  var tk = e.ticket_id ? state.tickets.find(function(x){return x.id===e.ticket_id;}) : null;
-                  return h`<tr>
-                    <td class="mono muted" style="white-space:nowrap;">${fmtDateShort(e.date)}</td>
-                    <td style="max-width:260px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${escapeHtml(e.description)}">${escapeHtml(e.description)}</td>
-                    <td class="num mono">${e.qty}</td>
-                    <td class="num mono">${fmtSum(e.unit_cost)}</td>
-                    <td class="num mono">${fmtSum(e.amount)}</td>
-                    <td class="muted" style="white-space:nowrap;">${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
-                    <td class="mono" style="white-space:nowrap;">${tk ? h`<a href="#" data-open-ticket="${tk.id}">${escapeHtml(tk.external_ref||'')}</a>` : '—'}</td>
-                    <td style="white-space:nowrap;"><span class="pill ${e.category==='materials'?'pill-ok':'pill-neutral'}">${CASH_EXPENSE_CATEGORY_LABEL[e.category]||e.category}</span></td>
-                    <td class="muted" style="white-space:nowrap;">${escapeHtml(e.person)}</td>
-                    ${editable?h`<td><a href="#" data-action="cash-expense-delete" data-id="${e.id}" style="color:var(--crit);">✕</a></td>`:''}
+                expenseGroups.map(function(g){
+                  var groupKey = "exp:"+g.person;
+                  var expanded = cashPersonExpanded(groupKey);
+                  var sumSpent = g.rows.reduce(function(s,e){ return s+(Number(e.amount)||0); }, 0);
+                  var header = h`<tr class="cash-person-divider" data-action="cash-person-toggle" data-key="${escapeHtml(groupKey)}" style="cursor:pointer;">
+                    <td colspan="${editable?10:9}"><button type="button" class="btn btn-ghost btn-sm registry-expand-btn" style="margin-right:6px;" title="${expanded?'Свернуть':'Показать расходы'}">${expanded?'▾':'▸'}</button><b>${escapeHtml(g.person)}</b> <span class="muted">— ${g.rows.length} ${ruPlural(g.rows.length,['расход','расхода','расходов'])}, ${fmtSum(sumSpent)} ₸</span></td>
                   </tr>`;
+                  var body = !expanded ? "" : g.rows.map(function(e){
+                    var hotel = e.hotel_id ? hotelById(e.hotel_id) : null;
+                    var tk = e.ticket_id ? state.tickets.find(function(x){return x.id===e.ticket_id;}) : null;
+                    return h`<tr>
+                      <td class="mono muted" style="white-space:nowrap;">${fmtDateShort(e.date)}</td>
+                      <td style="max-width:260px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${escapeHtml(e.description)}">${escapeHtml(e.description)}</td>
+                      <td class="num mono">${e.qty}</td>
+                      <td class="num mono">${fmtSum(e.unit_cost)}</td>
+                      <td class="num mono">${fmtSum(e.amount)}</td>
+                      <td class="muted" style="white-space:nowrap;">${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
+                      <td class="mono" style="white-space:nowrap;">${tk ? h`<a href="#" data-open-ticket="${tk.id}">${escapeHtml(tk.external_ref||'')}</a>` : '—'}</td>
+                      <td style="white-space:nowrap;"><span class="pill ${e.category==='materials'?'pill-ok':'pill-neutral'}">${CASH_EXPENSE_CATEGORY_LABEL[e.category]||e.category}</span></td>
+                      <td class="muted" style="white-space:nowrap;">${escapeHtml(e.person)}</td>
+                      ${editable?h`<td><a href="#" data-action="cash-expense-delete" data-id="${e.id}" style="color:var(--crit);">✕</a></td>`:''}
+                    </tr>`;
+                  }).join("");
+                  return header + body;
                 }).join("")}
               </tbody>
             </table></div>
@@ -5968,6 +6018,15 @@
         var mkey = actionEl.getAttribute("data-key");
         state.registryExpandedMonths = state.registryExpandedMonths || {};
         state.registryExpandedMonths[mkey] = !state.registryExpandedMonths[mkey];
+        render();
+        return;
+      }
+      if(action==="cash-person-toggle"){
+        var cpKey = actionEl.getAttribute("data-key");
+        state.cashExpandedPersons = state.cashExpandedPersons || {};
+        // По умолчанию (ключа ещё нет) — развёрнуто, поэтому переключаем
+        // относительно cashPersonExpanded(), а не просто "!текущее значение".
+        state.cashExpandedPersons[cpKey] = !cashPersonExpanded(cpKey);
         render();
         return;
       }
