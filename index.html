@@ -605,6 +605,14 @@
     // самих ограничений ROLE_NAV на тестах, которые временно переключают роль
     // именно на аккаунте владельца (см. test_standalone.js).
     if(view==="team" && isOwner()) return true;
+    // 0.3.7 (по просьбе Антона, п.4): «Активность» — статистика по команде
+    // (кто сколько времени провёл на сайте) видна СТРОГО Администратору
+    // (role==="dispatcher"), а не любой роли с ROLE_NAV===null — иначе
+    // «Руководитель» (head), у которого тоже ROLE_NAV.head===null, получил бы
+    // её автоматически, хотя Антон просил только для Администратора. Поэтому
+    // это отдельная явная проверка, а не часть общего ROLE_NAV/PERMISSION_VIEWS
+    // механизма (extra_views тоже не даёт этот раздел — см. return ниже).
+    if(view==="activity") return !!(state.me && state.me.role==="dispatcher");
     var role = state.me && state.me.role;
     var allowed = ROLE_NAV.hasOwnProperty(role) ? ROLE_NAV[role] : null;
     if(allowed===null) return true;
@@ -709,15 +717,36 @@
     var p = iv && iv.extra && iv.extra.custom_tax_pct;
     return (typeof p==="number" && isFinite(p)) ? p : null;
   }
+  // 0.3.7 (по просьбе Антона: "свой налог - это или % или сумма, я должен
+  // иметь возможность ввести или то или то") — "Свой" доп. налог теперь можно
+  // ввести либо процентом (как в 0.3.6), либо готовой суммой в ₸ сверх суммы
+  // без НДС, когда доп. расход известен как число, а не как доля от счёта.
+  // Взаимоисключающе — тем же приёмом, что alloc_percent/alloc_amount у
+  // "Доли" (setInvoiceAllocPercent/Amount): заполнение одного стирает другое
+  // (см. setInvoiceCustomTaxPct/setInvoiceCustomTaxAmount).
+  function invoiceCustomTaxAmount(iv){
+    var a = iv && iv.extra && iv.extra.custom_tax_amount;
+    return (typeof a==="number" && isFinite(a)) ? a : null;
+  }
   function taxBasisRate(iv){
     if(!iv.tax_basis) return 0;
-    if(iv.tax_basis==="custom"){ var pct = invoiceCustomTaxPct(iv); return pct!=null ? pct/100 : null; }
+    if(iv.tax_basis==="custom"){
+      // Фиксированная сумма — не ставка, считается отдельно прямым сложением
+      // (см. invoiceCostAccounted), сюда её не переводим.
+      if(invoiceCustomTaxAmount(iv)!=null) return null;
+      var pct = invoiceCustomTaxPct(iv); return pct!=null ? pct/100 : null;
+    }
     return TAX_BASIS_RATE.hasOwnProperty(iv.tax_basis) ? TAX_BASIS_RATE[iv.tax_basis] : null;
   }
   function taxBasisLabel(iv){
     var tb = iv.tax_basis==="regular" ? null : iv.tax_basis;
     if(!tb) return "";
-    if(tb==="custom"){ var pct = invoiceCustomTaxPct(iv); return "Свой ("+(pct!=null?("+"+fmtKZT(pct)+"%"):"процент не указан")+")"; }
+    if(tb==="custom"){
+      var amt = invoiceCustomTaxAmount(iv);
+      if(amt!=null) return "Свой (+"+fmtKZT(amt)+" ₸)";
+      var pct = invoiceCustomTaxPct(iv);
+      return "Свой ("+(pct!=null?("+"+fmtKZT(pct)+"%"):"не указано")+")";
+    }
     return TAX_BASIS_LABEL[tb] || tb;
   }
   // "Учтено в затратах" = сумма без НДС (снятого по ставке валюты, если
@@ -730,9 +759,16 @@
     if(iv.amount==null || iv.vat_included==null) return null;
     var vatRate = CURRENCY_VAT_RATE[iv.currency];
     if(vatRate==null) return null; // валюта не выбрана или не из известных (KZT/RUB/BYN)
-    var taxRate = taxBasisRate(iv);
-    if(taxRate==null) return null; // на случай неизвестного значения в базе, либо "свой %" ещё не введён
     var noVat = iv.vat_included ? (iv.amount / (1 + vatRate)) : iv.amount;
+    // 0.3.7: "Свой" доп. налог фиксированной суммой в ₸ — прибавляется как
+    // есть поверх суммы без НДС, а не как ставка (см. invoiceCustomTaxAmount/
+    // taxBasisRate выше — так что этот случай проверяем раньше и отдельно).
+    if(iv.tax_basis==="custom"){
+      var customAmt = invoiceCustomTaxAmount(iv);
+      if(customAmt!=null) return noVat + customAmt;
+    }
+    var taxRate = taxBasisRate(iv);
+    if(taxRate==null) return null; // на случай неизвестного значения в базе, либо "свой" ещё не введён (ни % ни сумма)
     return noVat * (1 + taxRate);
   }
 
@@ -776,6 +812,15 @@
     return { value: accounted * (r.rate/r.quant), state:"ok", original:accounted, currency:cur };
   }
   function fmtKZT(n){ return (Number(n)||0).toLocaleString("ru-RU", {minimumFractionDigits:0, maximumFractionDigits:2}); }
+  // 0.3.7 (по просьбе Антона, п.3): "где 'учтено в затратах' где-то отражается
+  // сумма после запятой, а где-то нет" — это особенность fmtKZT выше
+  // (minimumFractionDigits:0) — она специально оставляет разное число знаков
+  // по замыслу для обычных сумм (короче для круглых чисел). Для "Учтено в
+  // затратах" нужно всегда одинаково 2 знака после запятой — отдельный
+  // форматтер, применяется везде, где показывается именно "Учтено в
+  // затратах" (accountedKZTLabel, итоги "Оплачено"/"К оплате" внизу реестра,
+  // сумма в разделителе месяца, и новая колонка в развёрнутых строках).
+  function fmtKZT2(n){ return (Number(n)||0).toLocaleString("ru-RU", {minimumFractionDigits:2, maximumFractionDigits:2}); }
 
   // 0.2.20: в «Реестре платежей» один и тот же файл счёта иногда прикреплён по
   // отдельности сразу к нескольким заявкам (см. invoiceRelatedTickets ниже) —
@@ -897,7 +942,11 @@
   // «Реестра платежей» и карточки заявки, чтобы состояния ok/pending/error/
   // missing выглядели везде одинаково.
   function accountedKZTLabel(acc){
-    if(acc.state==="ok") return fmtKZT(acc.value) + (acc.currency ? h`<div class="muted" style="font-size:10px;">${fmtKZT(acc.original)} ${acc.currency}</div>` : "");
+    // 0.3.7 (по просьбе Антона, п.3): fmtKZT2 — всегда ровно 2 знака после
+    // запятой для самой суммы "Учтено в затратах" (см. fmtKZT2 выше); строка
+    // мельче под ней — это сумма в исходной валюте счёта, для справки, не
+    // сама "Учтено в затратах" — её формат не трогаем.
+    if(acc.state==="ok") return fmtKZT2(acc.value) + (acc.currency ? h`<div class="muted" style="font-size:10px;">${fmtKZT(acc.original)} ${acc.currency}</div>` : "");
     if(acc.state==="pending") return h`<span class="muted">курс…</span>`;
     if(acc.state==="error") return h`<span class="muted" title="Не удалось получить курс Нацбанка РК">${fmtKZT(acc.original)} ${acc.currency} (?)</span>`;
     return '—';
@@ -1283,6 +1332,12 @@
     // дней назад" для расчёта отчёта. reportPeriodDays — сколько дней назад
     // сравниваем, меняется прямо на экране (по умолчанию неделя).
     statsSnapshots: [], reportPeriodDays: 7, statsSnapshotRecorded: false,
+    // 0.3.7 (по просьбе Антона, п.4): «Активность» — для Администратора,
+    // сколько времени (по дням) каждый человек реально провёл в приложении
+    // (см. pingActivity/viewActivity ниже) — по одной строке на человека на
+    // день в activity_daily, плюс profiles.last_seen_at для "последний раз
+    // был онлайн".
+    activityDaily: [],
     selectedTicketId: null, ticketNotes: [], editingNoteId: null, milestoneOpen: {}, editingDescShort: false,
     // 0.2.16: "Сумма" в «Реестре платежей» показывается как обычный текст
     // (с разрядами через пробел) и превращается в поле ввода только по
@@ -1438,7 +1493,12 @@
     };
   }
   function subscribeAll(){
-    reloadTickets(); reloadProfiles(); reloadParts(); reloadPortfolio(); reloadInvoices(); reloadPhotos(); reloadSnapshots(); reloadCrews(); reloadHotels(); reloadCashAdvances(); reloadCashExpenses(); reloadStatsSnapshots();
+    reloadTickets(); reloadProfiles(); reloadParts(); reloadPortfolio(); reloadInvoices(); reloadPhotos(); reloadSnapshots(); reloadCrews(); reloadHotels(); reloadCashAdvances(); reloadCashExpenses(); reloadStatsSnapshots(); reloadActivityDaily();
+    // 0.3.7 (по просьбе Антона, п.4): «Активность» — пульс раз в минуту,
+    // запускается один раз при первом вызове subscribeAll() (он вызывается из
+    // ОБОИХ путей входа — onAuthStateChange и getSession(), см. ниже — поэтому
+    // без этой защёлки таймер завёлся бы дважды при повторном событии авторизации).
+    startActivityHeartbeat();
     sb.channel("tickets-rt").on("postgres_changes", {event:"*", schema:"public", table:"tickets"}, function(payload){
       rtPatchArray(state.tickets, payload, rtSortBy("created_at", false));
       maybeSeed(); maybeRecordTodaysStatsSnapshot(); render();
@@ -1489,6 +1549,13 @@
     sb.channel("stats-snapshots-rt").on("postgres_changes", {event:"*", schema:"public", table:"ticket_stats_snapshots"}, function(payload){
       rtPatchArray(state.statsSnapshots, payload, rtSortBy("snapshot_date", true));
       maybeRecordTodaysStatsSnapshot(); render();
+    }).subscribe();
+    // 0.3.7 (по просьбе Антона, п.4): «Активность» — свои же обновления
+    // (pingActivity) тоже приходят сюда через realtime, но это не проблема:
+    // rtPatchArray просто заменяет ту же строку тем же значением.
+    sb.channel("activity-daily-rt").on("postgres_changes", {event:"*", schema:"public", table:"activity_daily"}, function(payload){
+      rtPatchArray(state.activityDaily, payload, rtSortBy("day", true));
+      render();
     }).subscribe();
   }
   // Список отелей — раньше был константой в коде, теперь строка в таблице hotels;
@@ -1543,6 +1610,15 @@
       state.statsSnapshots = res.data || [];
       state.statsSnapshotsLoaded = true;
       maybeRecordTodaysStatsSnapshot();
+      render();
+    });
+  }
+  // 0.3.7 (по просьбе Антона, п.4): «Активность» — одна строка на человека на
+  // день (см. state.activityDaily/pingActivity ниже), тот же приём, что и
+  // ticket_stats_snapshots выше.
+  function reloadActivityDaily(){
+    sb.from("activity_daily").select("*").order("day", {ascending:true}).then(function(res){
+      state.activityDaily = res.data || [];
       render();
     });
   }
@@ -1715,7 +1791,14 @@
     if(!canEditRegistry()) return;
     var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
     if(!iv) return;
-    var raw = String(val||"").replace(",", ".").trim();
+    // 0.3.7 (по просьбе Антона, п.2): parseAmountInputValue (не самодельный
+    // replace/trim) — поле живьём форматируется разрядами через пробел по
+    // мере ввода, и обычный Number() не понимает пробелы: раньше при вводе
+    // 4+ значащих цифр значение становилось NaN, сохранение молча не
+    // срабатывало, и после render() поле показывало пусто ("пропадает
+    // сумма" при вводе больше 3 цифр — тот же баг, что чинили у "Своего"
+    // доп. налога выше, см. setInvoiceCustomTaxPct).
+    var raw = parseAmountInputValue(val);
     var pct = raw==="" ? null : Number(raw);
     if(pct!=null && isNaN(pct)){ render(); return; }
     var extra = Object.assign({}, iv.extra||{});
@@ -1733,7 +1816,9 @@
     if(!canEditRegistry()) return;
     var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
     if(!iv) return;
-    var raw = String(val||"").replace(",", ".").trim();
+    // 0.3.7: тот же фикс, что и в setInvoiceAllocPercent выше — parseAmountInputValue
+    // вместо самодельного replace/trim, иначе >3 цифр даёт NaN и "пропадает сумма".
+    var raw = parseAmountInputValue(val);
     var amount = raw==="" ? null : Number(raw);
     if(amount!=null && isNaN(amount)){ render(); return; }
     var primary = invoiceGroupPrimary(iv);
@@ -1789,28 +1874,38 @@
     if(iv && iv.vat_included===true){ alert("При «с НДС» доп. налог ставится автоматически (прочерк) и недоступен для ручного выбора."); return; }
     var taxBasis = val || null;
     if(iv) iv.tax_basis = taxBasis;
-    // 0.3.6 (по просьбе Антона, п.5): выбор "Свой %" — единственный случай,
+    // 0.3.6 (по просьбе Антона, п.5): выбор "Свой…" — единственный случай,
     // когда поле НЕ сворачивается сразу обратно в текст (в отличие от
-    // остальных значений здесь) — тут же нужно показать поле ввода процента
+    // остальных значений здесь) — тут же нужно показать поля ввода % / ₸
     // (см. registrySelectRaw/registrySelectCell), иначе выбор "свой" без
     // возможности сразу его вписать выглядел бы как ничего не произошло.
-    // Закроется он сам, когда процент будет введён — см. setInvoiceCustomTaxPct.
+    // Закроется он сам, когда % или сумма будут введены — см.
+    // setInvoiceCustomTaxPct/setInvoiceCustomTaxAmount.
     // ВАЖНО: пока у счёта вообще нет tax_basis (обычный прочерк), поле и так
     // рисуется "раскрытым" (registrySelectCell не сворачивает пустое
     // значение в кнопку) — то есть registryEditingFieldKey для него ДО этого
     // клика мог быть не установлен вообще (не равен ключу этого поля). Раньше
     // здесь только СБРАСЫВАЛИ ключ для остальных значений, но никогда не
-    // ВЫСТАВЛЯЛИ его для "custom" — из-за этого сразу после выбора "Свой %…"
+    // ВЫСТАВЛЯЛИ его для "custom" — из-за этого сразу после выбора "Свой…"
     // registrySelectCell на следующем рендере видел tax_basis="custom" (уже
     // не пустое) и registryEditingFieldKey, всё ещё не равный ключу поля, и
-    // тут же сворачивал его обратно в кнопку "Свой (процент не указан)" —
-    // поле ввода процента ни разу не появлялось. Явно выставляем ключ здесь.
+    // тут же сворачивал его обратно в кнопку "Свой (не указано)" — поля
+    // ввода ни разу не появлялись. Явно выставляем ключ здесь.
     var taxKey = invoiceId+":tax";
     if(taxBasis==="custom") state.registryEditingFieldKey = taxKey;
     else if(state.registryEditingFieldKey===taxKey) state.registryEditingFieldKey = null;
     render();
     if(taxBasis==="custom"){
-      var pctInput = document.querySelector('.registry-tax-custom-input[data-id="'+invoiceId+'"]');
+      // 0.3.7 (по просьбе Антона: "я не могу даже вести ничего - пропадает
+      // ячейка") — фокус на поле % программно ставится сразу после выбора
+      // "Свой…", но САМ ЭТОТ ПЕРЕВОД ФОКУСА — обычный уход фокуса с <select>
+      // (он терял фокус, поле ввода его получало). Общий обработчик
+      // "focusout" ниже раньше считал это уходом ИЗ ПОЛЯ и тут же сворачивал
+      // его обратно в кнопку — доли секунды хватало, чтобы поле исчезало
+      // прежде, чем человек успевал напечатать хоть одну цифру. Исправлено
+      // ниже (см. data-registry-edit-focus-group и focusout) — фокус,
+      // остающийся среди select/%/₸ этого счёта, больше не считается уходом.
+      var pctInput = document.querySelector('.registry-tax-custom-input[data-invoice-tax-custom-pct][data-id="'+invoiceId+'"]');
       if(pctInput){ pctInput.focus(); pctInput.select(); }
     }
     sb.from("invoices").update({tax_basis:taxBasis}).eq("id", invoiceId).then(function(){
@@ -1821,20 +1916,51 @@
   // в extra.custom_tax_pct, тем же приёмом, что alloc_percent
   // (setInvoiceAllocPercent). Сохраняет и сворачивает поле обратно в текст
   // (тот же приём, что «Сумма»/«Доля» — не дожидаясь потери фокуса).
+  // 0.3.7: parseAmountInputValue (не самодельный replace/trim) — поле живьём
+  // форматируется разрядами через пробел по мере ввода (см. formatAmountInputValue
+  // в обработчике "input"), и обычный Number() не понимает пробелы: раньше
+  // при вводе 4+ значащих цифр (уже с разделителем разрядов) значение
+  // становилось NaN, сохранение молча не срабатывало, и после render() поле
+  // показывало пусто — то самое "пропадает сумма" при вводе больше 3 цифр.
   function setInvoiceCustomTaxPct(invoiceId, val){
     if(!canEditRegistry()) return;
     var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
     if(!iv) return;
-    var raw = String(val||"").replace(",", ".").trim();
+    var raw = parseAmountInputValue(val);
     var pct = raw==="" ? null : Number(raw);
     if(pct!=null && isNaN(pct)){ render(); return; }
     var extra = Object.assign({}, iv.extra||{});
-    if(pct==null) delete extra.custom_tax_pct; else extra.custom_tax_pct = pct;
+    // 0.3.7: % и ₸ — два разных СПОСОБА задать один и тот же "свой" доп.
+    // налог, а не два одновременно действующих — заполнение одного стирает
+    // ранее введённое другое (см. setInvoiceCustomTaxAmount и
+    // invoiceCostAccounted/taxBasisRate выше, которые проверяют сумму раньше
+    // процента).
+    if(pct==null) delete extra.custom_tax_pct; else { extra.custom_tax_pct = pct; delete extra.custom_tax_amount; }
     iv.extra = extra;
     if(state.registryEditingFieldKey===(invoiceId+":tax")) state.registryEditingFieldKey = null;
     render();
     sb.from("invoices").update({extra:extra}).eq("id", invoiceId).then(function(){
       addNote(iv.ticket_id, "Указан свой процент доп. налога по счёту «"+iv.file_name+"»: "+(pct!=null?(pct+"%"):"—")+".");
+    });
+  }
+  // Та же "своя" доп. надбавка, но введённая сразу готовой суммой в ₸ (по
+  // просьбе Антона — не всегда известен именно процент, иногда известна уже
+  // готовая сумма доп. расходов). Как и процент выше, стирает противоположное
+  // поле.
+  function setInvoiceCustomTaxAmount(invoiceId, val){
+    if(!canEditRegistry()) return;
+    var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
+    if(!iv) return;
+    var raw = parseAmountInputValue(val);
+    var amt = raw==="" ? null : Number(raw);
+    if(amt!=null && isNaN(amt)){ render(); return; }
+    var extra = Object.assign({}, iv.extra||{});
+    if(amt==null) delete extra.custom_tax_amount; else { extra.custom_tax_amount = amt; delete extra.custom_tax_pct; }
+    iv.extra = extra;
+    if(state.registryEditingFieldKey===(invoiceId+":tax")) state.registryEditingFieldKey = null;
+    render();
+    sb.from("invoices").update({extra:extra}).eq("id", invoiceId).then(function(){
+      addNote(iv.ticket_id, "Указана своя сумма доп. налога по счёту «"+iv.file_name+"»: "+(amt!=null?(fmtKZT(amt)+" ₸"):"—")+".");
     });
   }
   // 0.2.13.1 (доп.): один и тот же счёт иногда прикладывают отдельно к
@@ -2107,6 +2233,44 @@
     // несовпадения периода выше). Логируем в консоль, чтобы это было видно.
     if(existing) sb.from("ticket_stats_snapshots").update({by_hotel: byHotel}).eq("id", existing.id).then(function(res){ if(res && res.error) console.error("Не удалось обновить сегодняшний снимок счётчиков:", res.error); });
     else sb.from("ticket_stats_snapshots").insert({snapshot_date: todayIso, by_hotel: byHotel}).then(function(res){ if(res && res.error) console.error("Не удалось сохранить сегодняшний снимок счётчиков:", res.error); });
+  }
+  // 0.3.7 (по просьбе Антона, п.4): «Активность» — для Администратора,
+  // сколько времени (по дням) каждый человек реально провёл в приложении.
+  // Раз в минуту, пока вкладка открыта и видна (document.hidden===false —
+  // свёрнутая/фоновая вкладка не считается "проведённым временем"), отмечаем
+  // "последний раз был онлайн" (profiles.last_seen_at) и прибавляем минуту к
+  // сегодняшней строке activity_daily этого человека — тем же приёмом
+  // "найти сегодняшнюю строку, если есть — update, если нет — insert", что и
+  // maybeRecordTodaysStatsSnapshot выше.
+  var ACTIVITY_HEARTBEAT_MS = 60000;
+  var activityHeartbeatStarted = false;
+  function pingActivity(){
+    if(!state.me || !state.me.id) return;
+    if(typeof document!=="undefined" && document.hidden) return;
+    var nowIso = new Date().toISOString();
+    sb.from("profiles").update({last_seen_at: nowIso}).eq("id", state.me.id).then(function(res){ if(res && res.error) console.error("Не удалось обновить last_seen_at:", res.error); });
+    var todayIso = nowIso.slice(0,10);
+    var incrementSec = ACTIVITY_HEARTBEAT_MS/1000;
+    var existing = (state.activityDaily||[]).find(function(a){ return a.profile_id===state.me.id && a.day===todayIso; });
+    if(existing){
+      var newSeconds = (existing.seconds||0) + incrementSec;
+      sb.from("activity_daily").update({seconds: newSeconds, updated_at: nowIso}).eq("id", existing.id).then(function(res){
+        if(res && res.error){ console.error("Не удалось обновить activity_daily:", res.error); return; }
+        existing.seconds = newSeconds; existing.updated_at = nowIso; render();
+      });
+    } else {
+      sb.from("activity_daily").insert({profile_id: state.me.id, day: todayIso, seconds: incrementSec, updated_at: nowIso}).select().then(function(res){
+        if(res && res.error){ console.error("Не удалось сохранить activity_daily:", res.error); return; }
+        var row = res && res.data && res.data[0];
+        if(row){ state.activityDaily = state.activityDaily||[]; state.activityDaily.push(row); render(); }
+      });
+    }
+  }
+  function startActivityHeartbeat(){
+    if(activityHeartbeatStarted) return;
+    activityHeartbeatStarted = true;
+    pingActivity();
+    setInterval(pingActivity, ACTIVITY_HEARTBEAT_MS);
   }
   // Ближайший по дате снимок к "N дней назад" — тот же принцип терпимости к
   // пропущенным дням, что и closedSinceLastWeek() выше (снимки копятся раз в
@@ -3605,6 +3769,55 @@
     }).join("")}</div>`;
   }
 
+  // 0.3.7 (по просьбе Антона, п.4): «Активность» — сколько времени команда
+  // реально провела в приложении (см. pingActivity/activity_daily выше).
+  // Доступно строго Администратору (см. navAllowed). "Заказчик" (внешний
+  // человек, не часть команды) и "pending" (роль ещё не назначена) в список
+  // не попадают — как и в «Команде», это не сотрудники службы.
+  function fmtActivityDuration(totalSeconds){
+    var minutes = Math.round((totalSeconds||0)/60);
+    if(minutes<=0) return "—";
+    var hrs = Math.floor(minutes/60), mins = minutes%60;
+    if(hrs===0) return mins+" мин";
+    return hrs+" ч"+(mins?(" "+mins+" мин"):"");
+  }
+  function viewActivity(){
+    var todayIso = new Date().toISOString().slice(0,10);
+    // Последние 7 календарных дней, включая сегодня — тот же принцип дневных
+    // ключей ("YYYY-MM-DD"), что и у activity_daily/ticket_stats_snapshots.
+    var last7 = [];
+    for(var i=0;i<7;i++){ var d=new Date(); d.setDate(d.getDate()-i); last7.push(d.toISOString().slice(0,10)); }
+    var members = (state.profiles||[]).filter(function(m){ return m.role && m.role!=="pending" && m.role!=="customer"; });
+    var rows = members.map(function(m){
+      var mine = (state.activityDaily||[]).filter(function(a){ return a.profile_id===m.id; });
+      var today = mine.filter(function(a){ return a.day===todayIso; }).reduce(function(s,a){ return s+(a.seconds||0); }, 0);
+      var week = mine.filter(function(a){ return last7.indexOf(a.day)>-1; }).reduce(function(s,a){ return s+(a.seconds||0); }, 0);
+      return {m:m, today:today, week:week};
+    });
+    rows.sort(function(a,b){ return b.week-a.week; });
+    return h`<div class="row-gap">
+      <div class="card card-pad">
+        <div class="section-title">Активность команды</div>
+        <div class="helptext" style="margin-bottom:10px;">Время считается, пока вкладка приложения открыта и видна на экране (свёрнутое или фоновое окно не считается). «Последний раз был» — по любому обращению к приложению.</div>
+        ${rows.length===0 ? h`<div class="empty-state"><b>Пока никто не заходил</b></div>` : h`
+        <div class="table-wrap"><table>
+          <thead><tr><th>Имя</th><th>Почта</th><th>Роль</th><th>Последний раз был</th><th>Сегодня</th><th>За 7 дней</th></tr></thead>
+          <tbody>${rows.map(function(r){
+            var m = r.m;
+            return h`<tr>
+              <td class="ttl">${escapeHtml(m.name||"—")}</td>
+              <td class="muted">${escapeHtml(m.email)}</td>
+              <td>${escapeHtml(ROLE_LABEL[m.role]||m.role)}</td>
+              <td class="muted">${m.last_seen_at ? fmtDate(m.last_seen_at) : "—"}</td>
+              <td class="mono">${fmtActivityDuration(r.today)}</td>
+              <td class="mono">${fmtActivityDuration(r.week)}</td>
+            </tr>`;
+          }).join("")}</tbody>
+        </table></div>`}
+      </div>
+    </div>`;
+  }
+
   // Раньше здесь был отдельный столбец "Зоны" с чекбоксами (1/2/3) на каждого
   // сотрудника — по просьбе Антона убран целиком: непонятный функционал, никак
   // не влиявший на реальную логику зон/сроков (та использует зону отеля/заявки,
@@ -3718,21 +3931,32 @@
       </select>`;
     }
     var vatOn = iv.vat_included===true;
-    // 0.3.6 (по просьбе Антона, п.5): "Свой %…" — доп. налог не только 20%
+    // 0.3.6 (по просьбе Антона, п.5): "Свой…" — доп. налог не только 20%
     // или 30%, а любое число (см. taxBasisRate/setInvoiceCustomTaxPct выше).
-    // Выбор этого пункта не закрывает поле — сразу под селектом появляется
-    // маленькое поле ввода процента (только пока идёт редактирование ЭТОГО
-    // счёта — data-registry-edit-focus у select уже открывает его при клике
+    // Выбор этого пункта не закрывает поле — сразу под селектом появляются
+    // маленькие поля ввода (только пока идёт редактирование ЭТОГО счёта —
+    // data-registry-edit-focus у select уже открывает его при клике
     // «карандашом», а тут та же логика открытости, что и у select).
-    var customPctInput = (iv.tax_basis==="custom") ? h`<input type="text" inputmode="decimal" class="registry-tax-custom-input" data-invoice-tax-custom-pct data-id="${iv.id}" value="${invoiceCustomTaxPct(iv)!=null?formatAmountInputValue(String(invoiceCustomTaxPct(iv))):''}" placeholder="%" ${disabled?'disabled':''} title="Свой процент доп. налога сверх суммы без НДС">` : "";
-    return h`<div style="display:flex;flex-direction:column;gap:3px;">
+    // 0.3.7 (по просьбе Антона: "свой налог - это или % или сумма") — теперь
+    // ДВА поля, процент и готовая сумма в ₸ (взаимоисключающе, см.
+    // setInvoiceCustomTaxPct/setInvoiceCustomTaxAmount). Оба поля и сам
+    // select обёрнуты в один data-registry-edit-focus-group — это чинит баг
+    // "нельзя ввести, ячейка пропадает": setInvoiceTaxBasis программно
+    // переводит фокус со select на поле ввода сразу после выбора "Свой…",
+    // а это ОБЫЧНЫЙ уход фокуса со select вызывает focusout — без проверки
+    // группы старый обработчик считал это уходом с поля целиком и сворачивал
+    // ячейку раньше, чем пользователь успевал что-то напечатать.
+    var customPctInput = (iv.tax_basis==="custom") ? h`<input type="text" inputmode="decimal" class="registry-tax-custom-input" data-invoice-tax-custom-pct data-id="${iv.id}" data-registry-edit-focus="${key}" value="${invoiceCustomTaxPct(iv)!=null?formatAmountInputValue(String(invoiceCustomTaxPct(iv))):''}" placeholder="%" ${disabled?'disabled':''} title="Свой доп. налог — в процентах от суммы без НДС">` : "";
+    var customAmtInput = (iv.tax_basis==="custom") ? h`<input type="text" inputmode="decimal" class="registry-tax-custom-input" data-invoice-tax-custom-amt data-id="${iv.id}" data-registry-edit-focus="${key}" value="${invoiceCustomTaxAmount(iv)!=null?formatAmountInputValue(String(invoiceCustomTaxAmount(iv))):''}" placeholder="₸" ${disabled?'disabled':''} title="Свой доп. налог — готовой суммой в ₸ сверх суммы без НДС">` : "";
+    var customRow = (iv.tax_basis==="custom") ? h`<div style="display:flex;gap:3px;align-items:center;">${customPctInput}<span style="color:var(--muted);font-size:11px;">или</span>${customAmtInput}</div>` : "";
+    return h`<div class="registry-tax-edit-group" data-registry-edit-focus-group="${key}" style="display:flex;flex-direction:column;gap:3px;">
       <select data-invoice-tax-basis data-id="${iv.id}" data-registry-edit-focus="${key}" ${disabled?'disabled':''} title="${title}">
         <option value="">—</option>
         ${vatOn ? "" : h`<option value="simplified" ${iv.tax_basis==='simplified'?'selected':''}>Упрощ. +20%</option>
         <option value="cash" ${iv.tax_basis==='cash'?'selected':''}>Нал. +30%</option>
-        <option value="custom" ${iv.tax_basis==='custom'?'selected':''}>Свой %…</option>`}
+        <option value="custom" ${iv.tax_basis==='custom'?'selected':''}>Свой…</option>`}
       </select>
-      ${customPctInput}
+      ${customRow}
     </div>`;
   }
   function registrySelectCell(iv, kind, editableRegistry){
@@ -3931,7 +4155,8 @@
         <td class="muted" style="text-align:center;font-size:11.5px;" title="Валюта — как в общем счёте выше (одна на все заявки)">${escapeHtml(primary.currency||'—')}</td>
         <td class="muted" style="text-align:center;font-size:11.5px;" title="НДС — как в общем счёте выше (один на все заявки)">${primary.vat_included===true?'С НДС':(primary.vat_included===false?'Без':'—')}</td>
         <td class="muted" style="text-align:center;font-size:11.5px;" title="Способ оплаты (доп. налог) — как в общем счёте выше (один на все заявки)">${primary.tax_basis && primary.tax_basis!=="regular" ? escapeHtml(taxBasisLabel(primary)) : '—'}</td>
-        <td colspan="3"></td>
+        <td class="mono muted" style="text-align:right;font-size:11.5px;" title="Учтено в затратах по этой заявке — доля общей суммы счёта по указанному выше проценту">${amount!=null ? fmtKZT2(amount) : '—'}</td>
+        <td colspan="2"></td>
       </tr>`;
     }).join("");
     return rowsHtml + registryAllocSummaryRow(group, total);
@@ -3966,7 +4191,7 @@
     // сводка (сколько счетов, на какую сумму).
     return h`<tr class="registry-month-divider" data-action="registry-month-toggle" data-key="${escapeHtml(key)}" style="cursor:pointer;">
       <td colspan="8"><button type="button" class="btn btn-ghost btn-sm registry-expand-btn" style="margin-right:6px;" title="${expanded?'Свернуть месяц':'Показать счета за месяц'}">${expanded?'▾':'▸'}</button>${escapeHtml(label)} — ${items.length} ${pluralRu(items.length,'счёт','счёта','счетов')}${pendingCount?' (ожидание курса: '+pendingCount+')':''}${missingCount?' (без данных: '+missingCount+')':''}</td>
-      <td class="mono" style="text-align:right;">${fmtKZT(sum)}</td>
+      <td class="mono" style="text-align:right;">${fmtKZT2(sum)}</td>
       <td colspan="2"></td>
     </tr>`;
   }
@@ -4132,7 +4357,7 @@
             </tbody>
             ${groups.length>0 ? h`<tfoot><tr class="registry-totals-row">
               <td colspan="8" class="muted" style="text-align:right;">Итого по показанным ${groups.length} счетам${missingAmountCount?' (без данных для расчёта: '+missingAmountCount+')':''}${pendingRateCount?' (ожидание курса НБ РК: '+pendingRateCount+')':''}:</td>
-              <td class="mono" style="text-align:right;font-size:11px;" title="«Оплачено»/«К оплате» — это «Учтено в затратах», т.е. KZT без НДС"><b>Оплачено: ${fmtKZT(sumPaid)}</b><br><span class="muted">К оплате: ${fmtKZT(sumDue)}</span></td>
+              <td class="mono" style="text-align:right;font-size:11px;" title="«Оплачено»/«К оплате» — это «Учтено в затратах», т.е. KZT без НДС"><b>Оплачено: ${fmtKZT2(sumPaid)}</b><br><span class="muted">К оплате: ${fmtKZT2(sumDue)}</span></td>
               <td colspan="2"></td>
             </tr></tfoot>` : ""}
             </table></div>
@@ -4600,7 +4825,12 @@
       mapMarkers = [];
     }
     if(!mapInstance){
-      mapInstance = L.map(container).setView([48.0, 68.0], 5);
+      // 0.3.7 (по просьбе Антона, п.1): "когда я делаю скролл, он увеличивает
+      // карту, а не продвигает страницу вниз" — по умолчанию Leaflet сам
+      // перехватывает колесо мыши над картой для зума. Отключаем это —
+      // прокрутка колесом над картой теперь листает страницу как обычно;
+      // зум остаётся доступен через +/- в углу карты и двойной клик.
+      mapInstance = L.map(container, {scrollWheelZoom:false}).setView([48.0, 68.0], 5);
       L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
         maxZoom: 19,
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>'
@@ -5534,8 +5764,8 @@
       return;
     }
     if(!navAllowed(state.route.view)){ state.route = {view: firstAllowedView(), id:null}; }
-    var titleMap = {dashboard:"Дашборд", tickets:"Заявки", team:"Команда", parts:"Склад ЗИП", "import":"Заявки · Импорт из c-lector", registry:"Финансы · Реестр платежей", cashexpenses:"Финансы · Наличные расходы", crews:"Бригады", hotels:"Отели", systemdefects:"Системный брак"};
-    var body = state.route.view==="tickets"?viewTickets(): state.route.view==="team"?viewTeam(): state.route.view==="parts"?viewParts(): state.route.view==="import"?viewImport(): state.route.view==="registry"?viewRegistry(): state.route.view==="cashexpenses"?viewCashExpenses(): state.route.view==="crews"?viewCrews(): state.route.view==="hotels"?viewHotels(): state.route.view==="systemdefects"?viewSystemDefects(): viewDashboard();
+    var titleMap = {dashboard:"Дашборд", tickets:"Заявки", team:"Команда", parts:"Склад ЗИП", "import":"Заявки · Импорт из c-lector", registry:"Финансы · Реестр платежей", cashexpenses:"Финансы · Наличные расходы", crews:"Бригады", hotels:"Отели", systemdefects:"Системный брак", activity:"Активность"};
+    var body = state.route.view==="tickets"?viewTickets(): state.route.view==="team"?viewTeam(): state.route.view==="parts"?viewParts(): state.route.view==="import"?viewImport(): state.route.view==="registry"?viewRegistry(): state.route.view==="cashexpenses"?viewCashExpenses(): state.route.view==="crews"?viewCrews(): state.route.view==="hotels"?viewHotels(): state.route.view==="systemdefects"?viewSystemDefects(): state.route.view==="activity"?viewActivity(): viewDashboard();
 
     // 0.2.17: «Импорт из c-lector» больше не отдельный пункт меню — он почти
     // всё подтягивает автоматически, отдельного раздела для него не нужно.
@@ -5547,7 +5777,10 @@
     var navItems = [
       ["dashboard","Дашборд"], ["tickets","Заявки",["import"]],
       ["systemdefects","Системный брак"],
-      ["team","Команда"], ["crews","Бригады"], ["parts","Склад ЗИП"], ["registry","Финансы",["cashexpenses"]], ["hotels","Отели"]
+      ["team","Команда"], ["crews","Бригады"], ["parts","Склад ЗИП"], ["registry","Финансы",["cashexpenses"]], ["hotels","Отели"],
+      // 0.3.7 (по просьбе Антона, п.4) — только для Администратора (см.
+      // navAllowed выше), поэтому у остальных ролей просто не пройдёт фильтр.
+      ["activity","Активность"]
     ].filter(function(x){ return navAllowed(x[0]); });
     morphInto(app, h`
       <div class="sidebar">
@@ -5894,6 +6127,7 @@
     if(e.target.matches("[data-invoice-vat]")){ setInvoiceVatIncluded(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.matches("[data-invoice-tax-basis]")){ setInvoiceTaxBasis(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.matches("[data-invoice-tax-custom-pct]")){ setInvoiceCustomTaxPct(e.target.getAttribute("data-id"), e.target.value); return; }
+    if(e.target.matches("[data-invoice-tax-custom-amt]")){ setInvoiceCustomTaxAmount(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.matches("[data-alloc-percent]")){ setInvoiceAllocPercent(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.matches("[data-alloc-amount]")){ setInvoiceAllocAmount(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.id==="import-file"){ var f=e.target.files&&e.target.files[0]; if(f) loadImportFile(f); return; }
@@ -6011,10 +6245,21 @@
   // 0.2.17: «Валюта»/«НДС»/«Налог» в «Реестре платежей» — уход фокуса без
   // изменения значения (setInvoiceCurrency/Vat/TaxBasis уже сворачивают поле
   // сами при реальном изменении, см. выше) тоже должен свернуть поле обратно.
+  // 0.3.7 (по просьбе Антона: "я не могу даже вести ничего - пропадает
+  // ячейка") — «Налог»="Свой…" — это НЕСКОЛЬКО элементов в одной сессии
+  // редактирования (select + поле % + поле ₸, см. registrySelectRaw и
+  // data-registry-edit-focus-group на их общей обёртке). setInvoiceTaxBasis
+  // программно переводит фокус со select на поле % сразу после выбора
+  // "Свой…" — это обычный focusout у select, и раньше эта проверка (одно
+  // e.target на весь ключ) сразу сворачивала поле, не дав ничего напечатать.
+  // Как и у data-hotel-edit-group ниже — прежде чем сворачивать, проверяем,
+  // не уходит ли фокус на другой элемент ТОЙ ЖЕ группы.
   document.addEventListener("focusout", function(e){
     if(renderInProgress) return;
     if(!state.registryEditingFieldKey) return;
     if(!e.target.matches('[data-registry-edit-focus="'+state.registryEditingFieldKey+'"]')) return;
+    var group = e.target.closest && e.target.closest('[data-registry-edit-focus-group="'+state.registryEditingFieldKey+'"]');
+    if(group && e.relatedTarget && group.contains(e.relatedTarget)) return;
     state.registryEditingFieldKey = null;
     render();
   });
@@ -6063,7 +6308,10 @@
   // ставим курсор после того же по счёту символа в переформатированной
   // строке.
   document.addEventListener("input", function(e){
-    if(!e.target.matches(".registry-amount-input, .registry-alloc-input")) return;
+    // 0.3.7: ".registry-tax-custom-input" (поля % / ₸ у "Свой…") добавлены в
+    // этот список — та же живая разбивка разрядов пробелом по мере ввода, что
+    // и у "Суммы"/"Доли", особенно полезна для крупных ₸-сумм.
+    if(!e.target.matches(".registry-amount-input, .registry-alloc-input, .registry-tax-custom-input")) return;
     var el = e.target;
     var caret = el.selectionStart==null ? el.value.length : el.selectionStart;
     var before = el.value.slice(0, caret);
