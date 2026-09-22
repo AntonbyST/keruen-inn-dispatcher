@@ -7,6 +7,12 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<!-- 0.3.4 (по просьбе Антона): карта отелей переведена с платного Google Maps
+     JavaScript API на бесплатный Leaflet + тайлы OpenStreetMap — детализация
+     OSM с запасом покрывает то, что нужно для меток отелей, а ключ API
+     больше не нужен вообще (см. viewMap()/ensureMap() в основном скрипте). -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <!-- morphdom 2.7.4 (github.com/patrick-steele-idem/morphdom) — вшито прямо в файл,
      а не подключено через CDN: это заменяет полную пересборку #app/#overlay-root
      через innerHTML на каждом render() точечным патчем живого DOM (см. использование
@@ -200,7 +206,7 @@
   .registry-table{ table-layout:fixed; }
   /* 0.2.17 (по просьбе Антона): заголовки колонок реестра — по центру. */
   .registry-table th{ white-space:normal; line-height:1.25; padding:7px 6px; font-size:10px; text-align:center; }
-  .registry-table td{ padding:6px 6px; font-size:12.5px; }
+  .registry-table td{ padding:6px 6px; font-size:12.5px; vertical-align:top; }
   .registry-table td input[type="number"],
   .registry-table td select{ width:100%; box-sizing:border-box; padding:4px 4px; font-size:12px; }
   .registry-table td input.registry-amount-input{ width:100%; box-sizing:border-box; padding:4px 4px; font-size:12px; text-align:right; font-variant-numeric:tabular-nums; }
@@ -393,7 +399,17 @@
   .helptext{ font-size:12px; color:var(--ink-faint); margin-top:4px; }
   .zone-legend{ display:flex; gap:14px; flex-wrap:wrap; font-size:12px; color:var(--ink-soft); }
   .zone-legend span b{ color:var(--ink); }
-  #map-canvas{ height:540px; width:100%; border-radius:var(--radius); border:1px solid var(--line); }
+  #map-canvas{ height:540px; width:100%; border-radius:var(--radius); border:1px solid var(--line); background:var(--surface-2); }
+  /* 0.3.4: собственная иконка метки для Leaflet (см. mapMarkerIcon) — число
+     активных заявок прямо на метке, в цветах приложения (акцентный цвет —
+     как только в отеле есть открытые заявки, серый — если их нет). */
+  .map-marker-icon{ background:none; border:none; }
+  .map-marker-badge{
+    width:28px; height:28px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+    font-size:12.5px; font-weight:700; font-variant-numeric:tabular-nums; color:var(--ink-faint);
+    background:var(--surface); border:2px solid var(--line); box-shadow:0 1px 4px rgba(0,0,0,.25); cursor:pointer;
+  }
+  .map-marker-badge.has-tickets{ color:var(--accent-ink); background:var(--accent); border-color:var(--accent); }
   ::selection{ background:var(--accent-soft); }
 
   /* ---------- auth screen ---------- */
@@ -430,15 +446,14 @@
      (Project URL и anon public key — не секретный service_role!). */
   var SUPABASE_URL = "https://wpgbkndpojjjimppxogm.supabase.co";
   var SUPABASE_ANON_KEY = "sb_publishable_WOzfGGAkM1SJiFKnhkBc2w_Nia1I0za";
-  /* Карта отелей (пункт "Карта" в меню) — нужен свой ключ Google Maps JavaScript API
-     (console.cloud.google.com -> APIs & Services -> Credentials -> Create API key,
-     затем включить "Maps JavaScript API" для проекта). Без ключа пункт "Карта"
-     покажет подсказку вместо карты — остальное приложение работает как обычно. */
-  var GOOGLE_MAPS_API_KEY = "YOUR-GOOGLE-MAPS-API-KEY";
   /* ============================================================================ */
 
   var CONFIGURED = SUPABASE_URL.indexOf("YOUR-PROJECT") === -1 && SUPABASE_ANON_KEY.indexOf("YOUR-ANON") === -1;
-  var MAPS_CONFIGURED = GOOGLE_MAPS_API_KEY.indexOf("YOUR-") === -1;
+  // 0.3.4: карта отелей (пункт "Карта" в меню) теперь на Leaflet + бесплатных
+  // тайлах OpenStreetMap — ключ API больше не нужен, MAPS_CONFIGURED убран;
+  // единственное, что ещё может не загрузиться — сама библиотека Leaflet с
+  // CDN (см. LIB_LOADED ниже — тот же приём для supabase-js).
+  var MAPS_LIB_LOADED = typeof window.L !== "undefined" && !!window.L.map;
   var LIB_LOADED = typeof window.supabase !== "undefined" && !!window.supabase.createClient;
   var sb = (CONFIGURED && LIB_LOADED) ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
 
@@ -1553,6 +1568,34 @@
           addNote(iv.ticket_id, val ? "Счёт «"+iv.file_name+"» отмечен оплаченным." : "Отметка «оплачено» снята со счёта «"+iv.file_name+"».");
           if(val) maybeAutoComplete(iv.ticket_id);
         }
+      });
+    });
+    render();
+  }
+  // 0.3.4 (по просьбе Антона): счёт иногда оплачивают в одном месяце, а
+  // отмечают в системе «оплачено» уже позже, задним числом — раньше paid_at
+  // всегда проставлялся моментом клика по галочке, поэтому такой счёт
+  // попадал в группировку «Реестра платежей» по месяцу ОПЛАТЫ (0.2.19) не
+  // туда, куда нужно. Позволяем поправить месяц вручную — день и время
+  // внутри месяца берём прежними (если они уже были), меняем только
+  // год-месяц, чтобы счёт переехал в нужный раздел.
+  function setInvoicePaidMonth(invoiceIdOrIds, monthStr){
+    if(!canEditRegistry()){ alert("Изменять месяц оплаты может только Администратор, Руководитель или Финансист."); return; }
+    if(!/^\d{4}-\d{2}$/.test(monthStr||"")) return;
+    var parts = monthStr.split("-"); var year = Number(parts[0]), month = Number(parts[1]);
+    String(invoiceIdOrIds).split(",").forEach(function(invoiceId){
+      var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
+      if(!iv || !iv.paid) return;
+      var oldDate = iv.paid_at ? new Date(iv.paid_at) : null;
+      var validOld = oldDate && !isNaN(oldDate.getTime());
+      var day = validOld ? oldDate.getUTCDate() : 15;
+      var time = validOld ? oldDate.toISOString().slice(11) : "12:00:00.000Z";
+      var daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+      if(day>daysInMonth) day = daysInMonth;
+      var newIso = year+"-"+String(month).padStart(2,"0")+"-"+String(day).padStart(2,"0")+"T"+time;
+      iv.paid_at = newIso;
+      sb.from("invoices").update({paid_at:newIso}).eq("id", invoiceId).then(function(){
+        addNote(iv.ticket_id, "Изменён месяц оплаты счёта «"+iv.file_name+"»: "+monthStr+".");
       });
     });
     render();
@@ -3633,26 +3676,38 @@
       if(!isNaN(na) && !isNaN(nb)) return na-nb;
       return String(ra).localeCompare(String(rb));
     });
-    var refCell = uniqueTicketRows.map(function(r){
-      return r.tk ? h`<a href="#" data-open-ticket="${r.tk.id}" title="Открыть заявку">${r.tk.external_ref?escapeHtml(r.tk.external_ref):'открыть'}</a>` : '—';
-    }).join(", ");
     var ticketCount = uniqueTicketRows.length;
+    var extraCopiesNote = members.length>ticketCount ? (' ('+members.length+' '+pluralRu(members.length,'копия счёта','копии счёта','копий счёта')+')') : '';
+    // 0.3.4 (по просьбе Антона): раньше свёрнутая строка группы всё равно
+    // перечисляла ВСЕ заявки через запятую в ячейке "№ заявки" — при большой
+    // группе (20+ заявок на один общий счёт) это растягивало строку на
+    // добрый десяток строк текста, хотя по определению свёрнутый вид не
+    // должен показывать построчную разбивку вообще (она и так доступна по
+    // стрелке). Для группы здесь теперь только короткая надпись "Общий на N
+    // заявок" (раньше она мешала под кнопкой "счёт" в соседней ячейке и тоже
+    // норовила перенестись на вторую строку) — сама разбивка по заявкам
+    // видна только в развёрнутом виде (registryGroupExpandRows), включая имя
+    // счёта не отсылая к отдельной ячейке.
+    var refCell = isGroup
+      ? h`<span class="muted">Общий на ${ticketCount} ${pluralRu(ticketCount,'заявку','заявки','заявок')}${extraCopiesNote}${group.hiddenCount?' (+'+group.hiddenCount+' скрыто фильтром)':''}</span>`
+      : uniqueTicketRows.map(function(r){
+          return r.tk ? h`<a href="#" data-open-ticket="${r.tk.id}" title="Открыть заявку">${r.tk.external_ref?escapeHtml(r.tk.external_ref):'открыть'}</a>` : '—';
+        }).join(", ");
     var accKZT = invoiceAccountedKZT(primary);
     var groupIds = members.map(function(r){return r.id;}).join(",");
     var allSubmitted = members.every(function(r){return r.submitted_for_payment;});
     var allPaid = members.every(function(r){return r.paid;});
-    var extraCopiesNote = members.length>ticketCount ? (' ('+members.length+' '+pluralRu(members.length,'копия счёта','копии счёта','копий счёта')+')') : '';
     // 0.3.0: подозрение на случайное совпадение имени файла — только когда
     // это реально РАЗНЫЕ заявки (не просто одна и та же заявка с двумя
     // копиями в "Бригада"/"Материал") и имя типично для сканера/камеры.
     var suspiciousMatch = isGroup && ticketCount>1 && isGenericInvoiceFileName(primary.file_name);
     return h`<tr class="${isGroup?'registry-group-row':''}">
       <td class="mono muted">${rowNum}</td>
-      <td class="mono" style="white-space:normal;">${isGroup ? h`<button type="button" class="btn btn-ghost btn-sm registry-expand-btn" data-action="registry-group-toggle" data-key="${escapeHtml(group.key)}" title="${expanded?'Свернуть':'Показать долю каждой заявки'}">${expanded?'▾':'▸'}</button>` : ""}${refCell}</td>
+      <td class="mono" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${isGroup ? h`<button type="button" class="btn btn-ghost btn-sm registry-expand-btn" data-action="registry-group-toggle" data-key="${escapeHtml(group.key)}" title="${expanded?'Свернуть':'Показать долю каждой заявки'}">${expanded?'▾':'▸'}</button>` : ""}${refCell}</td>
       <td style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center;" title="${escapeHtml(hotelTitle)}">${hotelCell}</td>
       <td>
         <button class="btn btn-sm registry-file-btn" data-action="invoice-open" data-path="${escapeHtml(primary.file_path)}" title="${escapeHtml(primary.file_name)}">счёт</button>
-        ${isGroup ? h`<div class="muted registry-related-line">Общий на ${ticketCount} ${pluralRu(ticketCount,'заявку','заявки','заявок')}${extraCopiesNote}${group.hiddenCount?' (+'+group.hiddenCount+' скрыто фильтром)':''}</div>` : (group.hiddenCount ? h`<div class="muted registry-related-line">Также на ${group.hiddenCount} ${pluralRu(group.hiddenCount,'заявке','заявках','заявках')} — скрыто фильтром</div>` : "")}
+        ${(!isGroup && group.hiddenCount) ? h`<div class="muted registry-related-line">Также на ${group.hiddenCount} ${pluralRu(group.hiddenCount,'заявке','заявках','заявках')} — скрыто фильтром</div>` : ""}
         ${suspiciousMatch ? h`<div class="registry-suspicious-match" title="Имя файла типично для сканера/камеры («${escapeHtml(primary.file_name)}») — возможно, это на самом деле РАЗНЫЕ счета со случайно одинаковым именем, а не один общий счёт. Проверьте в развёрнутом виде («это другой счёт»).">⚠ похоже на случайное совпадение имени</div>` : ""}
       </td>
       <td>${(editableRegistry && state.registryEditingAmountId===primary.id)
@@ -3663,7 +3718,7 @@
       <td>${registrySelectCell(primary, "tax", editableRegistry)}</td>
       <td class="mono" style="text-align:right;" title="${accKZT.currency ? 'Сумма без НДС и с доп. налогом, переведена в KZT по курсу Нацбанка РК'+(primary.paid?' на день оплаты':' на сегодня — пересчитается на день оплаты') : 'Сумма без НДС, скорректированная на доп. налог по способу оплаты'}">${accountedKZTLabel(accKZT)}</td>
       <td style="text-align:center;"><input type="checkbox" data-action="invoice-submitted-toggle" data-id="${groupIds}" data-val="${allSubmitted?'0':'1'}" ${allSubmitted?'checked':''} ${editableRegistry?'':'disabled'} title="${editableRegistry?(isGroup?'Отметить, что счёт передан в бухгалтерию/банк на оплату (для всех заявок сразу)':'Отметить, что счёт передан в бухгалтерию/банк на оплату'):'Редактировать может только Администратор, Руководитель или Финансист'}"></td>
-      <td style="text-align:center;"><input type="checkbox" data-action="invoice-paid-toggle" data-id="${groupIds}" data-val="${allPaid?'0':'1'}" ${allPaid?'checked':''} ${editableRegistry?'':'disabled'} title="${editableRegistry?(isGroup?'Отметить оплату счёта (для всех заявок сразу)':'Отметить оплату счёта'):'Редактировать может только Администратор, Руководитель или Финансист'}"></td>
+      <td style="text-align:center;white-space:nowrap;"><input type="checkbox" data-action="invoice-paid-toggle" data-id="${groupIds}" data-val="${allPaid?'0':'1'}" ${allPaid?'checked':''} ${editableRegistry?'':'disabled'} title="${editableRegistry?(isGroup?'Отметить оплату счёта (для всех заявок сразу)':'Отметить оплату счёта'):'Редактировать может только Администратор, Руководитель или Финансист'}">${(allPaid && editableRegistry) ? h` <a href="#" data-action="invoice-paid-month-edit" data-id="${groupIds}" style="font-size:11px;" title="Месяц оплаты: ${paidMonthKey(primary)?monthLabelRu(paidMonthKey(primary)):'не определён'}. Нажмите, чтобы указать другой месяц — например, если счёт оплатили раньше, а отметили в системе только сейчас.">✎</a>` : ""}</td>
     </tr>${isGroup && expanded ? registryGroupExpandRows(group, accKZT, editableRegistry) : ""}`;
   }
   // 0.2.21 (по просьбе Антона): доля/сумма конкретной заявки — тем же
@@ -4318,66 +4373,78 @@
     </div>`;
   }
 
-  /* ============================== КАРТА (Google Maps) ============================== */
+  /* ============================== КАРТА (Leaflet + OpenStreetMap) ============================== */
+  // 0.3.4 (по просьбе Антона): раньше карта требовала платный Google Maps
+  // JavaScript API и отдельный ключ — теперь Leaflet с бесплатными тайлами
+  // OpenStreetMap (см. вставку <link>/<script> в <head> в начале файла);
+  // ключ вообще не нужен, детализация OSM с большим запасом покрывает то,
+  // что здесь требуется (метки отелей поверх обычной карты страны/региона).
   var mapInstance = null, mapMarkers = [];
-  function loadGoogleMaps(cb){
-    if(typeof google !== "undefined" && google.maps){ cb(); return; }
-    if(window.__gmapsLoading){ window.__gmapsCallbacks = window.__gmapsCallbacks||[]; window.__gmapsCallbacks.push(cb); return; }
-    window.__gmapsLoading = true;
-    window.__gmapsCallbacks = [cb];
-    window.__gmapsInit = function(){ (window.__gmapsCallbacks||[]).forEach(function(f){ f(); }); };
-    var s = document.createElement("script");
-    s.src = "https://maps.googleapis.com/maps/api/js?key="+encodeURIComponent(GOOGLE_MAPS_API_KEY)+"&callback=__gmapsInit";
-    s.async = true;
-    s.onerror = function(){
-      window.__gmapsLoading = false;
-      var c = document.getElementById("map-canvas");
-      if(c) c.innerHTML = '<div class="empty-state"><b>Не удалось загрузить Google Maps</b>Проверьте ключ API (GOOGLE_MAPS_API_KEY) и подключение к интернету.</div>';
-    };
-    document.head.appendChild(s);
-  }
   // Метки на карте показывают количество активных (не закрытых/не отклонённых)
   // заявок по каждому отелю; клик по метке — переход в список заявок этого отеля.
+  // Своя иконка (L.divIcon) вместо стандартной — чтобы число заявок было видно
+  // прямо на метке, как раньше на Google-маркере (там это было готовым
+  // свойством "label", у Leaflet своей текстовой метки на маркере нет).
+  function mapMarkerIcon(count){
+    return L.divIcon({
+      className: "map-marker-icon",
+      html: '<div class="map-marker-badge'+(count>0?' has-tickets':'')+'">'+count+'</div>',
+      iconSize: [28,28], iconAnchor: [14,14]
+    });
+  }
   function ensureMap(){
-    if(!MAPS_CONFIGURED) return;
+    if(!MAPS_LIB_LOADED) return;
     var container = document.getElementById("map-canvas");
     if(!container) return;
-    function draw(){
-      var counts = {};
-      state.tickets.filter(isActive).forEach(function(t){ counts[t.hotel_id]=(counts[t.hotel_id]||0)+1; });
-      if(!mapInstance){
-        mapInstance = new google.maps.Map(container, { center:{lat:48.0, lng:68.0}, zoom:5 });
-      }
-      mapMarkers.forEach(function(m){ m.setMap(null); });
+    var counts = {};
+    state.tickets.filter(isActive).forEach(function(t){ counts[t.hotel_id]=(counts[t.hotel_id]||0)+1; });
+    // 0.3.4: #map-canvas — часть шаблона раздела "Карта" и уничтожается
+    // morphdom'ом при уходе с этого раздела (его нет в шаблоне других
+    // разделов); при возврате на "Карту" появляется заново с тем же id, но
+    // это уже ДРУГОЙ узел DOM. Старый экземпляр Leaflet, привязанный к
+    // прежнему узлу, в этом случае сносим и создаём заново на новом —
+    // иначе карта останется пустой (Leaflet рисует только в тот div, на
+    // котором был создан).
+    if(mapInstance && mapInstance.getContainer()!==container){
+      mapInstance.remove();
+      mapInstance = null;
       mapMarkers = [];
-      state.hotels.forEach(function(hotel){
-        if(hotel.lat==null || hotel.lng==null) return;
-        var count = counts[hotel.id]||0;
-        var marker = new google.maps.Marker({
-          position: {lat:hotel.lat, lng:hotel.lng}, map: mapInstance, label: String(count),
-          title: "№"+hotel.id+" "+hotel.name+" — открытых заявок: "+count
-        });
-        marker.addListener("click", function(){
-          state.filters = state.filters||{}; state.filters.hotel = String(hotel.id); state.filters.statusList=[]; state.filters.zone=""; state.filters.q="";
-          location.hash = "#/tickets";
-        });
-        mapMarkers.push(marker);
-      });
     }
-    loadGoogleMaps(draw);
+    if(!mapInstance){
+      mapInstance = L.map(container).setView([48.0, 68.0], 5);
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>'
+      }).addTo(mapInstance);
+    } else {
+      // тот же самый div, но раздел мог быть скрыт/показан заново (или
+      // изменился размер окна) — обновляем размер тайлов на всякий случай.
+      mapInstance.invalidateSize();
+    }
+    mapMarkers.forEach(function(m){ mapInstance.removeLayer(m); });
+    mapMarkers = [];
+    state.hotels.forEach(function(hotel){
+      if(hotel.lat==null || hotel.lng==null) return;
+      var count = counts[hotel.id]||0;
+      var marker = L.marker([hotel.lat, hotel.lng], { icon: mapMarkerIcon(count), title: "№"+hotel.id+" "+hotel.name+" — открытых заявок: "+count }).addTo(mapInstance);
+      marker.on("click", function(){
+        state.filters = state.filters||{}; state.filters.hotel = String(hotel.id); state.filters.statusList=[]; state.filters.zone=""; state.filters.q="";
+        location.hash = "#/tickets";
+      });
+      mapMarkers.push(marker);
+    });
   }
   function viewMap(){
-    if(!MAPS_CONFIGURED){
+    if(!MAPS_LIB_LOADED){
       return h`<div class="card card-pad">
         <div class="section-title">Карта отелей</div>
-        <p style="font-size:13px;">Чтобы увидеть карту с локациями отелей и количеством открытых заявок, впишите свой ключ Google Maps JavaScript API в переменную <code>GOOGLE_MAPS_API_KEY</code> в начале файла.</p>
-        <p style="font-size:13px;">Как получить ключ: console.cloud.google.com → APIs & Services → Credentials → Create credentials → API key, затем включить «Maps JavaScript API» для проекта.</p>
+        <p style="font-size:13px;">Не удалось загрузить карту (библиотека Leaflet с CDN) — проверьте подключение к интернету и обновите страницу. Остальное приложение работает как обычно.</p>
       </div>`;
     }
     return h`<div class="card card-pad">
       <div class="section-title">Карта отелей — открытые заявки</div>
       <div id="map-canvas"></div>
-      <div class="helptext" style="margin-top:10px;">Число на метке — количество активных заявок по объекту. Нажмите на метку, чтобы перейти к списку заявок этого отеля.</div>
+      <div class="helptext" style="margin-top:10px;">Число на метке — количество активных заявок по объекту. Нажмите на метку, чтобы перейти к списку заявок этого отеля. Карта — OpenStreetMap.</div>
     </div>`;
   }
 
@@ -4688,9 +4755,26 @@
   }
 
   /* ============================== TICKET PANEL ============================== */
+  // 0.3.4 (по просьбе Антона): при скролле вниз по карточке заявки её
+  // почему-то само возвращало вверх — карточка перерисовывается очень часто
+  // (любое сохранение поля, любое realtime-обновление заявки/счёта/фото
+  // вызывает полный render(), который каждый раз вызывает и
+  // renderTicketPanel() тоже), и morphdom не всегда сохраняет один и тот же
+  // узел .panel между перерисовками один в один — например когда рядом с
+  // началом карточки появляется/исчезает условный блок (баннер, предупреждение)
+  // и это сдвигает позицию последующих элементов. Раньше это просто теряло
+  // scrollTop. Явно запоминаем прокрутку .panel до перерисовки и
+  // восстанавливаем её после — независимо от того, сохранил morphdom узел
+  // сам по себе или нет.
   function renderTicketPanel(){
+    var panelEl = document.querySelector("#overlay-root .panel");
+    var savedScrollTop = panelEl ? panelEl.scrollTop : 0;
     renderInProgress = true;
     try{ renderTicketPanelInner(); } finally { renderInProgress = false; }
+    if(savedScrollTop){
+      var newPanelEl = document.querySelector("#overlay-root .panel");
+      if(newPanelEl) newPanelEl.scrollTop = savedScrollTop;
+    }
   }
   function renderTicketPanelInner(){
     var root = document.getElementById("overlay-root");
@@ -5099,6 +5183,31 @@
       if(d){ setMaterialsEta(ticketId, d); closeModal(); }
     });
   }
+  // 0.3.4 (по просьбе Антона): "Реестр платежей" группирует оплаченные счета
+  // по месяцу ОПЛАТЫ — если счёт оплатили в одном месяце, а отметили это в
+  // системе только сейчас (задним числом), месяц нужно поправить вручную,
+  // иначе счёт попадёт под сегодняшнюю дату. groupIds — тот же
+  // "id1,id2,..." (может быть несколько копий одного счёта в группе),
+  // currentPaidAt — paid_at основного счёта группы, для значения по
+  // умолчанию в <input type="month">.
+  function openInvoicePaidMonthModal(groupIds, currentPaidAt){
+    var currentMonth = currentPaidAt ? currentPaidAt.slice(0,7) : new Date().toISOString().slice(0,7);
+    openModal(h`
+      <div class="modal" data-stop style="width:340px;">
+        <div class="modal-head"><h2>Месяц оплаты</h2><button class="btn btn-ghost" data-close-modal>✕</button></div>
+        <form id="invoice-paid-month-form">
+          <div class="modal-body">
+            <div class="field"><label>Счёт фактически оплачен в</label><input type="month" name="paidMonth" value="${currentMonth}" required></div>
+            <div class="helptext">Меняет только раздел «Реестра платежей», в котором показан счёт — на сумму пересчёта по курсу Нацбанка РК (см. «Учтено в затратах») это тоже повлияет, раз она считается на день оплаты.</div>
+          </div>
+          <div class="modal-foot"><button type="button" class="btn" data-close-modal>Отмена</button><button type="submit" class="btn btn-primary">Сохранить</button></div>
+        </form>
+      </div>`);
+    document.getElementById("invoice-paid-month-form").addEventListener("submit", function(e){
+      e.preventDefault(); var fd=new FormData(e.target); var m=fd.get("paidMonth");
+      if(m){ setInvoicePaidMonth(groupIds, m); closeModal(); }
+    });
+  }
   // Ручная форма правки снимка портфеля (openPortfolioModal, кнопка
   // "Обновить снимок") убрана в 0.2.9 — снимок теперь считается и сохраняется
   // автоматически при каждом импорте из c-lector, см. updatePortfolioFromImport().
@@ -5397,6 +5506,12 @@
       if(action==="invoice-paid-toggle") return setInvoicePaid(id, actionEl.getAttribute("data-val")==="1");
       if(action==="invoice-submitted-toggle") return setInvoiceSubmitted(id, actionEl.getAttribute("data-val")==="1");
       if(action==="invoice-ungroup"){ e.preventDefault(); return ungroupInvoice(id); }
+      if(action==="invoice-paid-month-edit"){
+        e.preventDefault();
+        var firstPaidId = id.split(",")[0];
+        var ivForMonth = (state.invoices||[]).find(function(x){ return x.id===firstPaidId; });
+        return openInvoicePaidMonthModal(id, ivForMonth ? ivForMonth.paid_at : null);
+      }
       if(action==="registry-group-toggle"){
         var gkey = actionEl.getAttribute("data-key");
         state.registryExpandedGroups = state.registryExpandedGroups || {};
