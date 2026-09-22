@@ -399,7 +399,19 @@
   .helptext{ font-size:12px; color:var(--ink-faint); margin-top:4px; }
   .zone-legend{ display:flex; gap:14px; flex-wrap:wrap; font-size:12px; color:var(--ink-soft); }
   .zone-legend span b{ color:var(--ink); }
-  #map-canvas{ height:540px; width:100%; border-radius:var(--radius); border:1px solid var(--line); background:var(--surface-2); }
+  /* 0.3.5: height/width сами по себе не защищают от переполнения — если
+     leaflet.css с CDN подгрузится позже основной страницы (медленная сеть,
+     блокировка jsdelivr и т.п.), у тайлов ещё не будет "position:absolute" и
+     они на мгновение (а то и насовсем, если стиль так и не подтянется)
+     лягут в обычный поток внутри #map-canvas, раздувая блок вниз/вширь и
+     перекрывая собой сайдбар и остальную страницу — ровно то, что увидел
+     Антон в проде. position:relative + overflow:hidden выставляем СВОИМ
+     правилом (не полагаясь на .leaflet-container из внешнего CSS), чтобы
+     карта была гарантированно обрезана по границам блока в любом случае.
+     contain:layout — дополнительная страховка на случай, если что-то внутри
+     всё же попробует вылезти через position:fixed/absolute с отступами от
+     viewport, а не от контейнера. */
+  #map-canvas{ height:540px; width:100%; border-radius:var(--radius); border:1px solid var(--line); background:var(--surface-2); position:relative; overflow:hidden; contain:layout; }
   /* 0.3.4: собственная иконка метки для Leaflet (см. mapMarkerIcon) — число
      активных заявок прямо на метке, в цветах приложения (акцентный цвет —
      как только в отеле есть открытые заявки, серый — если их нет). */
@@ -410,6 +422,14 @@
     background:var(--surface); border:2px solid var(--line); box-shadow:0 1px 4px rgba(0,0,0,.25); cursor:pointer;
   }
   .map-marker-badge.has-tickets{ color:var(--accent-ink); background:var(--accent); border-color:var(--accent); }
+  /* 0.3.5: всплывающая подсказка при наведении на метку отеля (см. ensureMap) —
+     свои цвета вместо стандартных белых у Leaflet, чтобы не выбивалось из
+     тёмной/светлой темы приложения. */
+  .map-hotel-tip{ background:var(--surface) !important; color:var(--ink) !important; border:1px solid var(--line) !important; border-radius:8px !important; box-shadow:0 4px 16px rgba(0,0,0,.25) !important; padding:8px 10px !important; font-family:inherit; opacity:1 !important; }
+  .map-hotel-tip::before{ display:none; }
+  .map-hotel-tip .mht-title{ font-weight:700; font-size:13px; margin-bottom:4px; }
+  .map-hotel-tip .mht-row{ font-size:12px; color:var(--ink-soft); display:flex; justify-content:space-between; gap:14px; }
+  .map-hotel-tip .mht-row b{ color:var(--ink); font-variant-numeric:tabular-nums; }
   ::selection{ background:var(--accent-soft); }
 
   /* ---------- auth screen ---------- */
@@ -4392,6 +4412,24 @@
       iconSize: [28,28], iconAnchor: [14,14]
     });
   }
+  // 0.3.5 (по просьбе Антона): при наведении на метку — статистика по
+  // замечаниям (заявкам) этого отеля: всего когда-либо заведено, и сколько
+  // из них заведено за последние 7 дней (включая сегодняшний). Это ПОМИМО
+  // числа на самой метке (то — только активные, не закрытые/не отклонённые
+  // на сейчас).
+  function hotelTicketStats(hotelId){
+    var all = state.tickets.filter(function(t){ return t.hotel_id===hotelId; });
+    var weekAgoMs = Date.now() - 7*24*60*60*1000;
+    var last7 = all.filter(function(t){ return t.created_at && new Date(t.created_at).getTime() >= weekAgoMs; }).length;
+    return { total: all.length, last7: last7 };
+  }
+  function mapHotelTooltipHtml(hotel, activeCount){
+    var stats = hotelTicketStats(hotel.id);
+    return '<div class="mht-title">№'+hotel.id+' '+escapeHtml(hotel.name)+'</div>'
+      + '<div class="mht-row"><span>Активных заявок сейчас</span><b>'+activeCount+'</b></div>'
+      + '<div class="mht-row"><span>Всего замечаний</span><b>'+stats.total+'</b></div>'
+      + '<div class="mht-row"><span>За последние 7 дней</span><b>'+stats.last7+'</b></div>';
+  }
   function ensureMap(){
     if(!MAPS_LIB_LOADED) return;
     var container = document.getElementById("map-canvas");
@@ -4426,7 +4464,11 @@
     state.hotels.forEach(function(hotel){
       if(hotel.lat==null || hotel.lng==null) return;
       var count = counts[hotel.id]||0;
-      var marker = L.marker([hotel.lat, hotel.lng], { icon: mapMarkerIcon(count), title: "№"+hotel.id+" "+hotel.name+" — открытых заявок: "+count }).addTo(mapInstance);
+      var marker = L.marker([hotel.lat, hotel.lng], { icon: mapMarkerIcon(count) }).addTo(mapInstance);
+      // 0.3.5: своя всплывающая подсказка (см. mapHotelTooltipHtml) вместо
+      // обычного title="" — так в неё помещается несколько строк статистики
+      // вместо одной строки, и оформление совпадает с темой приложения.
+      marker.bindTooltip(mapHotelTooltipHtml(hotel, count), { direction:"top", offset:[0,-16], opacity:1, className:"map-hotel-tip" });
       marker.on("click", function(){
         state.filters = state.filters||{}; state.filters.hotel = String(hotel.id); state.filters.statusList=[]; state.filters.zone=""; state.filters.q="";
         location.hash = "#/tickets";
@@ -4444,7 +4486,7 @@
     return h`<div class="card card-pad">
       <div class="section-title">Карта отелей — открытые заявки</div>
       <div id="map-canvas"></div>
-      <div class="helptext" style="margin-top:10px;">Число на метке — количество активных заявок по объекту. Нажмите на метку, чтобы перейти к списку заявок этого отеля. Карта — OpenStreetMap.</div>
+      <div class="helptext" style="margin-top:10px;">Число на метке — количество активных заявок по объекту. Наведите курсор на метку, чтобы увидеть статистику по замечаниям (всего и за последние 7 дней). Нажмите на метку, чтобы перейти к списку заявок этого отеля. Карта — OpenStreetMap.</div>
     </div>`;
   }
 
