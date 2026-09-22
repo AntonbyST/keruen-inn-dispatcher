@@ -213,10 +213,37 @@
   .registry-file-btn{ display:inline-block; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; vertical-align:middle; }
   /* 0.2.16: "Сумма" — обычный текст (разряды через пробел), пока по нему не
      кликнут; тогда вместо него на месте появляется поле ввода (см. change/
-     focusout выше). Прочерк — как обычно, "не заполнено". */
-  .registry-amount-display{ display:block; width:100%; background:none; border:1px dashed transparent; padding:4px 4px; font:inherit; font-variant-numeric:tabular-nums; text-align:right; cursor:pointer; color:inherit; border-radius:4px; }
+     focusout выше). Прочерк — как обычно, "не заполнено".
+     0.3.6 (по просьбе Антона, п.4): раньше кликалась только сама кнопка/строка
+     текста — одна строка высотой у верхнего края ячейки (см. vertical-align:top
+     выше). У сгруппированных счетов и счетов с предупреждениями соседние
+     ячейки строки («№ заявки», «Отель») часто в 3-10 строк, вся строка
+     таблицы визуально высокая — а клик где угодно НИЖЕ этой одной строки (но
+     всё ещё в границах видимо высокой строки) попадал мимо кнопки, в фон
+     самой ячейки, и ничего не происходило. Отсюда "работает через раз":
+     срабатывало только если попасть точно по узкой полоске текста вверху.
+     Первая попытка чинить это (height:100% на кнопке/поле ввода) не сработала:
+     вопреки распространённому мифу про "проценты высоты в table layout",
+     высота <td>, определённая ПО ВЫСОТЕ СТРОКИ (растянутая под соседнюю
+     ячейку "№ заявки"/предупреждение, а не под свой собственный контент), не
+     является "определённой" высотой (definite height) для дочерних элементов с
+     точки зрения спеки CSS2.1 — height:100% у кнопки/поля так и остаётся
+     равен её min-height (проверено отдельно, в этом самом браузере/сборке
+     Chromium — процентная высота у потомка НЕ подтягивается к фактической
+     растянутой высоте ячейки, только к её собственной intrinsic-высоте).
+     Настоящий рабочий приём — сделать саму ячейку (.registry-amount-td)
+     position:relative, а кнопку/поле — position:absolute; inset:0: тогда
+     они позиционируются от РЕАЛЬНОГО отрендеренного прямоугольника ячейки
+     (а не от процента её CSS-высоты), какой бы высокой строка ни оказалась
+     из-за соседних ячеек — и клик работает по всей видимой площади ячейки
+     без исключений. Ширину столбца это не задевает: у .registry-table
+     table-layout:fixed, ширины колонок берутся из <colgroup>, а не из
+     контента конкретной ячейки. */
+  .registry-table td.registry-amount-td{ padding:0; position:relative; }
+  .registry-amount-display{ position:absolute; inset:0; display:flex; align-items:center; justify-content:flex-end; box-sizing:border-box; min-height:24px; background:none; border:1px dashed transparent; padding:4px 4px; font:inherit; font-variant-numeric:tabular-nums; text-align:right; cursor:pointer; color:inherit; border-radius:4px; }
   .registry-amount-display:hover:not(:disabled){ border-color:var(--line); }
   .registry-amount-display:disabled{ cursor:default; }
+  .registry-table td.registry-amount-td input.registry-amount-input{ position:absolute; inset:0; min-height:24px; }
   /* 0.2.17: «Отели» — «Зона»/«Координаты»/«Лицо от Заказчика» тем же приёмом:
      обычный текст без рамки, пока заполнено; клик — раскрывает настоящее
      поле(-я) ввода на его месте. */
@@ -469,8 +496,9 @@
   /* ============================================================================ */
 
   var CONFIGURED = SUPABASE_URL.indexOf("YOUR-PROJECT") === -1 && SUPABASE_ANON_KEY.indexOf("YOUR-ANON") === -1;
-  // 0.3.4: карта отелей (пункт "Карта" в меню) теперь на Leaflet + бесплатных
-  // тайлах OpenStreetMap — ключ API больше не нужен, MAPS_CONFIGURED убран;
+  // 0.3.4: карта отелей (0.3.6: теперь часть «Дашборда», а не отдельный
+  // пункт меню — см. viewDashboard/viewMap) на Leaflet + бесплатных тайлах
+  // OpenStreetMap — ключ API больше не нужен, MAPS_CONFIGURED убран;
   // единственное, что ещё может не загрузиться — сама библиотека Leaflet с
   // CDN (см. LIB_LOADED ниже — тот же приём для supabase-js).
   var MAPS_LIB_LOADED = typeof window.L !== "undefined" && !!window.L.map;
@@ -521,7 +549,10 @@
     // теперь настоящий (открытие карточки больше не блокируется, см. клик по
     // "openTicket" и render() ниже) — раз этот пункт меню показывается, он
     // должен реально работать.
-    customer: ["dashboard","tickets","map","hotels"],
+    // 0.3.6: «Карта» убрана отсюда — она больше не отдельный пункт меню,
+    // а часть «Дашборда» (см. viewDashboard), который у «Заказчика» и так уже
+    // есть в списке ниже.
+    customer: ["dashboard","tickets","hotels"],
     // «Ожидает назначения роли» (0.2.9) — роль по умолчанию для только что
     // вошедшего человека (см. supabase_schema.sql), пока Администратор
     // (owner) не назначит настоящую роль в «Команде». Пустой список означает
@@ -536,7 +567,7 @@
     // прикреплённые ими счета, но только для просмотра: сама галочка "Оплачено"
     // рисуется disabled для всех ролей, кроме перечисленных в canEditRegistry()
     // ниже (Администратор/Руководитель/Финансист), независимо от ROLE_NAV.
-    specialist: ["dashboard","tickets","map","team","systemdefects"],
+    specialist: ["dashboard","tickets","team","systemdefects"],
     // "cashexpenses" (0.2.4) добавлен везде, где уже был "registry" — оба живут
     // под одним пунктом меню «Финансы» (см. navItems/navItem ниже), так что
     // право видеть один подраздел даёт право видеть и второй.
@@ -559,7 +590,7 @@
   // openPermissionsModal). Ключ — тот же view, что и в ROLE_NAV/titleMap,
   // подпись — то, что видит владелец в чекбоксах.
   var PERMISSION_VIEWS = [
-    ["dashboard","Дашборд"], ["tickets","Заявки"], ["map","Карта"], ["hotels","Отели"],
+    ["dashboard","Дашборд"], ["tickets","Заявки"], ["hotels","Отели"],
     ["team","Команда"], ["parts","Склад ЗИП"], ["import","Импорт из c-lector"],
     ["registry","Реестр платежей"], ["cashexpenses","Наличные расходы"],
     ["crews","Бригады"], ["systemdefects","Системный брак"]
@@ -667,6 +698,28 @@
   // старых счетов, у которых это значение уже сохранено в базе.
   var TAX_BASIS_LABEL = { regular: "Обычный счёт", simplified: "Упрощёнка у подрядчика (+20%)", cash: "Наличный расчёт (+30%)" };
   var TAX_BASIS_RATE = { regular: 0, simplified: 0.20, cash: 0.30 };
+  // 0.3.6 (по просьбе Антона, п.5): раньше доп. налог был жёстко одним из
+  // трёх готовых значений (0/20/30%) — теперь можно ввести СВОЙ процент
+  // ("custom"), для случаев, которые не укладываются в "упрощёнку"/"нал.".
+  // Сам процент хранится не отдельной колонкой в БД (чтобы не менять схему
+  // ради одного числа), а в уже существующем JSONB-поле extra — тем же
+  // приёмом, что alloc_percent (см. setInvoiceAllocPercent) — и читается
+  // этими двумя функциями вместо прямого обращения к TAX_BASIS_LABEL/RATE.
+  function invoiceCustomTaxPct(iv){
+    var p = iv && iv.extra && iv.extra.custom_tax_pct;
+    return (typeof p==="number" && isFinite(p)) ? p : null;
+  }
+  function taxBasisRate(iv){
+    if(!iv.tax_basis) return 0;
+    if(iv.tax_basis==="custom"){ var pct = invoiceCustomTaxPct(iv); return pct!=null ? pct/100 : null; }
+    return TAX_BASIS_RATE.hasOwnProperty(iv.tax_basis) ? TAX_BASIS_RATE[iv.tax_basis] : null;
+  }
+  function taxBasisLabel(iv){
+    var tb = iv.tax_basis==="regular" ? null : iv.tax_basis;
+    if(!tb) return "";
+    if(tb==="custom"){ var pct = invoiceCustomTaxPct(iv); return "Свой ("+(pct!=null?("+"+fmtKZT(pct)+"%"):"процент не указан")+")"; }
+    return TAX_BASIS_LABEL[tb] || tb;
+  }
   // "Учтено в затратах" = сумма без НДС (снятого по ставке валюты, если
   // "Сумма" указана с НДС) × (1 + доп. налог по способу оплаты). Возвращает
   // null, пока не заполнены сумма/валюта/отметка НДС — колонка в этом случае
@@ -677,8 +730,8 @@
     if(iv.amount==null || iv.vat_included==null) return null;
     var vatRate = CURRENCY_VAT_RATE[iv.currency];
     if(vatRate==null) return null; // валюта не выбрана или не из известных (KZT/RUB/BYN)
-    var taxRate = iv.tax_basis ? TAX_BASIS_RATE[iv.tax_basis] : 0;
-    if(taxRate==null) return null; // на случай неизвестного значения в базе
+    var taxRate = taxBasisRate(iv);
+    if(taxRate==null) return null; // на случай неизвестного значения в базе, либо "свой %" ещё не введён
     var noVat = iv.vat_included ? (iv.amount / (1 + vatRate)) : iv.amount;
     return noVat * (1 + taxRate);
   }
@@ -793,6 +846,23 @@
     if(!base) return true;
     if(/^[\d\s_.\-]+$/.test(base)) return true; // голая дата/номер/только цифры
     return /^(img|image|dsc|dscn|scan|photo|screenshot|снимок|скан|сканирование|фото|документ|document|copy|копия|изображение)[\s_\-]*\d*$/i.test(base);
+  }
+  // 0.3.6 (по просьбе Антона, п.6): "не предупреждать, счёт верный" — рядом с
+  // предупреждением о случайном совпадении имени (см. isGenericInvoiceFileName
+  // выше). В отличие от ungroupInvoice ниже (реально разрывает группировку —
+  // для случая, когда это ДЕЙСТВИТЕЛЬНО два разных счёта), эта отметка ничего
+  // не меняет в данных — просто говорит "я проверил, это один и тот же
+  // документ на все заявки, дальше не спрашивай" для ЭТОГО конкретного файла.
+  function dismissSuspiciousMatch(invoiceId){
+    if(!canEditRegistry()) return;
+    var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
+    if(!iv) return;
+    var extra = Object.assign({}, iv.extra||{}, {suspicious_confirmed:true});
+    iv.extra = extra;
+    render();
+    sb.from("invoices").update({extra:extra}).eq("id", invoiceId).then(function(){
+      addNote(iv.ticket_id, "Предупреждение о случайном совпадении имени файла счёта «"+iv.file_name+"» подтверждено как ложное — больше не показывается.");
+    });
   }
   // "Основная" копия счёта в группе (самая ранняя загрузка) — только на ней
   // указываются реальные Сумма/Валюта/НДС/Налог; у остальных копий эти поля
@@ -1719,10 +1789,52 @@
     if(iv && iv.vat_included===true){ alert("При «с НДС» доп. налог ставится автоматически (прочерк) и недоступен для ручного выбора."); return; }
     var taxBasis = val || null;
     if(iv) iv.tax_basis = taxBasis;
+    // 0.3.6 (по просьбе Антона, п.5): выбор "Свой %" — единственный случай,
+    // когда поле НЕ сворачивается сразу обратно в текст (в отличие от
+    // остальных значений здесь) — тут же нужно показать поле ввода процента
+    // (см. registrySelectRaw/registrySelectCell), иначе выбор "свой" без
+    // возможности сразу его вписать выглядел бы как ничего не произошло.
+    // Закроется он сам, когда процент будет введён — см. setInvoiceCustomTaxPct.
+    // ВАЖНО: пока у счёта вообще нет tax_basis (обычный прочерк), поле и так
+    // рисуется "раскрытым" (registrySelectCell не сворачивает пустое
+    // значение в кнопку) — то есть registryEditingFieldKey для него ДО этого
+    // клика мог быть не установлен вообще (не равен ключу этого поля). Раньше
+    // здесь только СБРАСЫВАЛИ ключ для остальных значений, но никогда не
+    // ВЫСТАВЛЯЛИ его для "custom" — из-за этого сразу после выбора "Свой %…"
+    // registrySelectCell на следующем рендере видел tax_basis="custom" (уже
+    // не пустое) и registryEditingFieldKey, всё ещё не равный ключу поля, и
+    // тут же сворачивал его обратно в кнопку "Свой (процент не указан)" —
+    // поле ввода процента ни разу не появлялось. Явно выставляем ключ здесь.
+    var taxKey = invoiceId+":tax";
+    if(taxBasis==="custom") state.registryEditingFieldKey = taxKey;
+    else if(state.registryEditingFieldKey===taxKey) state.registryEditingFieldKey = null;
+    render();
+    if(taxBasis==="custom"){
+      var pctInput = document.querySelector('.registry-tax-custom-input[data-id="'+invoiceId+'"]');
+      if(pctInput){ pctInput.focus(); pctInput.select(); }
+    }
+    sb.from("invoices").update({tax_basis:taxBasis}).eq("id", invoiceId).then(function(){
+      if(iv) addNote(iv.ticket_id, "Указан способ оплаты счёта «"+iv.file_name+"»: "+(taxBasis?taxBasisLabel(iv):"—")+".");
+    });
+  }
+  // Свой процент доп. налога (см. taxBasisRate/taxBasisLabel выше) — хранится
+  // в extra.custom_tax_pct, тем же приёмом, что alloc_percent
+  // (setInvoiceAllocPercent). Сохраняет и сворачивает поле обратно в текст
+  // (тот же приём, что «Сумма»/«Доля» — не дожидаясь потери фокуса).
+  function setInvoiceCustomTaxPct(invoiceId, val){
+    if(!canEditRegistry()) return;
+    var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
+    if(!iv) return;
+    var raw = String(val||"").replace(",", ".").trim();
+    var pct = raw==="" ? null : Number(raw);
+    if(pct!=null && isNaN(pct)){ render(); return; }
+    var extra = Object.assign({}, iv.extra||{});
+    if(pct==null) delete extra.custom_tax_pct; else extra.custom_tax_pct = pct;
+    iv.extra = extra;
     if(state.registryEditingFieldKey===(invoiceId+":tax")) state.registryEditingFieldKey = null;
     render();
-    sb.from("invoices").update({tax_basis:taxBasis}).eq("id", invoiceId).then(function(){
-      if(iv) addNote(iv.ticket_id, "Указан способ оплаты счёта «"+iv.file_name+"»: "+(taxBasis?(TAX_BASIS_LABEL[taxBasis]||taxBasis):"—")+".");
+    sb.from("invoices").update({extra:extra}).eq("id", invoiceId).then(function(){
+      addNote(iv.ticket_id, "Указан свой процент доп. налога по счёту «"+iv.file_name+"»: "+(pct!=null?(pct+"%"):"—")+".");
     });
   }
   // 0.2.13.1 (доп.): один и тот же счёт иногда прикладывают отдельно к
@@ -1875,7 +1987,7 @@
         primary.amount!=null ? primary.amount : "",
         primary.currency || "",
         primary.vat_included===true ? "С НДС" : (primary.vat_included===false ? "Без НДС" : ""),
-        primary.tax_basis ? (TAX_BASIS_LABEL[primary.tax_basis]||primary.tax_basis) : "",
+        primary.tax_basis ? taxBasisLabel(primary) : "",
         accounted!=null ? accounted : "",
         allSubmitted ? "Да" : "Нет",
         allPaid ? "Да" : "Нет",
@@ -3192,6 +3304,7 @@
           <div class="card kpi"><div class="kpi-label">Выполнено с загрузки ~7 дн. назад</div><div class="kpi-value ok">${closedWeek? ((closedWeek.delta>=0?'+':'')+closedWeek.delta) : '—'}</div><div class="kpi-sub">${closedWeek? ('с '+fmtDateShort(closedWeek.fromDate)+' по '+fmtDateShort(closedWeek.toDate)) : 'нужно ≥2 загрузок из c-lector'}</div></div>
           <div class="card kpi"><div class="kpi-label">Группа 1 в работе</div><div class="kpi-value">${group1Active.length}</div><div class="kpi-sub">критические, на контроле</div></div>
         </div>
+        ${viewMap()}
         <div class="card card-pad">
           <div class="section-title">Требуют внимания</div>
           ${attention.length===0 ? h`<div class="empty-state"><b>Нет заявок с пометкой «особое внимание»</b>Пометка ставится вручную в карточке заявки.</div>` : h`
@@ -3498,12 +3611,19 @@
   // а не зоны профиля).
   function viewTeam(){
     var owner = isOwner();
+    // 0.3.6 (по просьбе Антона, п.2): раньше таблица сотрудников делила экран
+    // пополам с карточкой «Пригласить коллегу» (.two-col, 1.4fr/1fr) — при
+    // такой ширине колонка «Роль» (выпадающий список) сжималась настолько,
+    // что был виден только треугольник раскрытия, без подписи роли. Кнопка
+    // приглашения перенесена в топбар (см. render()), а таблица теперь одна
+    // карточка на всю ширину раздела — колонкам, включая «Роль», достаточно
+    // места без горизонтальной прокрутки.
     return h`
-      <div class="two-col">
+      <div class="row-gap">
         <div class="card card-pad">
           <div class="section-title">Сотрудники, вошедшие в систему</div>
           ${!owner ? h`<div class="helptext" style="margin-bottom:10px;">Роль и удаление сотрудников редактирует только руководитель службы.</div>` : ""}
-          ${state.profiles.length===0 ? h`<div class="empty-state"><b>Пока никто не входил</b>Поделитесь ссылкой на это приложение с коллегами.</div>` : h`
+          ${state.profiles.length===0 ? h`<div class="empty-state"><b>Пока никто не входил</b>Поделитесь ссылкой на это приложение с коллегами (кнопка «Пригласить коллегу» вверху).</div>` : h`
           <div class="table-wrap"><table>
             <thead><tr><th>Имя</th><th>Почта</th><th>Роль</th><th>Статус</th><th>Telegram</th>${owner?h`<th></th>`:''}</tr></thead>
             <tbody>${state.profiles.map(function(m){
@@ -3536,13 +3656,8 @@
               </tr>`;
             }).join("")}</tbody>
           </table></div>`}
-          <div class="helptext" style="margin-top:12px;">Новые коллеги появляются здесь автоматически после первого входа по ссылке — сразу назначьте им роль.</div>
+          <div class="helptext" style="margin-top:12px;">Новые коллеги появляются здесь автоматически после первого входа по ссылке — сразу назначьте им роль. Ссылку на приложение можно скопировать кнопкой «Пригласить коллегу» вверху страницы.</div>
           ${owner ? h`<div class="helptext" style="margin-top:6px;"><a href="#" data-action="telegram-chatid-help">Как узнать Telegram ID для уведомлений?</a></div>` : ""}
-        </div>
-        <div class="card card-pad">
-          <div class="section-title">Пригласить коллегу</div>
-          <p style="font-size:13px;">Отправьте ссылку на это приложение — коллега войдёт своей рабочей почтой (без пароля) и появится в списке слева.</p>
-          <button class="btn" id="copy-link">Скопировать ссылку</button>
         </div>
       </div>`;
   }
@@ -3603,11 +3718,22 @@
       </select>`;
     }
     var vatOn = iv.vat_included===true;
-    return h`<select data-invoice-tax-basis data-id="${iv.id}" data-registry-edit-focus="${key}" ${disabled?'disabled':''} title="${title}">
-      <option value="">—</option>
-      ${vatOn ? "" : h`<option value="simplified" ${iv.tax_basis==='simplified'?'selected':''}>Упрощ. +20%</option>
-      <option value="cash" ${iv.tax_basis==='cash'?'selected':''}>Нал. +30%</option>`}
-    </select>`;
+    // 0.3.6 (по просьбе Антона, п.5): "Свой %…" — доп. налог не только 20%
+    // или 30%, а любое число (см. taxBasisRate/setInvoiceCustomTaxPct выше).
+    // Выбор этого пункта не закрывает поле — сразу под селектом появляется
+    // маленькое поле ввода процента (только пока идёт редактирование ЭТОГО
+    // счёта — data-registry-edit-focus у select уже открывает его при клике
+    // «карандашом», а тут та же логика открытости, что и у select).
+    var customPctInput = (iv.tax_basis==="custom") ? h`<input type="text" inputmode="decimal" class="registry-tax-custom-input" data-invoice-tax-custom-pct data-id="${iv.id}" value="${invoiceCustomTaxPct(iv)!=null?formatAmountInputValue(String(invoiceCustomTaxPct(iv))):''}" placeholder="%" ${disabled?'disabled':''} title="Свой процент доп. налога сверх суммы без НДС">` : "";
+    return h`<div style="display:flex;flex-direction:column;gap:3px;">
+      <select data-invoice-tax-basis data-id="${iv.id}" data-registry-edit-focus="${key}" ${disabled?'disabled':''} title="${title}">
+        <option value="">—</option>
+        ${vatOn ? "" : h`<option value="simplified" ${iv.tax_basis==='simplified'?'selected':''}>Упрощ. +20%</option>
+        <option value="cash" ${iv.tax_basis==='cash'?'selected':''}>Нал. +30%</option>
+        <option value="custom" ${iv.tax_basis==='custom'?'selected':''}>Свой %…</option>`}
+      </select>
+      ${customPctInput}
+    </div>`;
   }
   function registrySelectCell(iv, kind, editableRegistry){
     var key = iv.id+":"+kind;
@@ -3628,7 +3754,7 @@
       // это выглядело как два разных состояния. Показываем оба одинаково.
       var taxForDisplay = iv.tax_basis==="regular" ? null : iv.tax_basis;
       value = taxForDisplay||"";
-      label = taxForDisplay ? (TAX_BASIS_LABEL[taxForDisplay]||taxForDisplay) : "";
+      label = taxForDisplay ? taxBasisLabel(iv) : "";
       forceDisabled = iv.vat_included===true;
       title = forceDisabled ? "При «с НДС» доп. налог не применяется — ставится автоматически прочерком" : "Способ оплаты — влияет на доп. налог в «Учтено в затратах»";
     }
@@ -3720,7 +3846,15 @@
     // 0.3.0: подозрение на случайное совпадение имени файла — только когда
     // это реально РАЗНЫЕ заявки (не просто одна и та же заявка с двумя
     // копиями в "Бригада"/"Материал") и имя типично для сканера/камеры.
-    var suspiciousMatch = isGroup && ticketCount>1 && isGenericInvoiceFileName(primary.file_name);
+    // 0.3.6 (по просьбе Антона, п.6): если счёт на самом деле правильный
+    // (один документ на несколько заявок, просто с типичным именем от
+    // сканера/камеры), раньше это предупреждение убрать было нечем — оно
+    // либо не показывалось совсем, либо висело всегда. "это точно один
+    // счёт" (dismissSuspiciousMatch) ставит отметку в extra.suspicious_confirmed
+    // у primary — не меняет группировку/данные, просто скрывает именно это
+    // предупреждение для этого счёта впредь (в отличие от «это другой
+    // счёт»/ungroupInvoice ниже, которая реально разрывает группировку).
+    var suspiciousMatch = isGroup && ticketCount>1 && isGenericInvoiceFileName(primary.file_name) && !(primary.extra && primary.extra.suspicious_confirmed);
     return h`<tr class="${isGroup?'registry-group-row':''}">
       <td class="mono muted">${rowNum}</td>
       <td class="mono" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${isGroup ? h`<button type="button" class="btn btn-ghost btn-sm registry-expand-btn" data-action="registry-group-toggle" data-key="${escapeHtml(group.key)}" title="${expanded?'Свернуть':'Показать долю каждой заявки'}">${expanded?'▾':'▸'}</button>` : ""}${refCell}</td>
@@ -3728,9 +3862,12 @@
       <td>
         <button class="btn btn-sm registry-file-btn" data-action="invoice-open" data-path="${escapeHtml(primary.file_path)}" title="${escapeHtml(primary.file_name)}">счёт</button>
         ${(!isGroup && group.hiddenCount) ? h`<div class="muted registry-related-line">Также на ${group.hiddenCount} ${pluralRu(group.hiddenCount,'заявке','заявках','заявках')} — скрыто фильтром</div>` : ""}
-        ${suspiciousMatch ? h`<div class="registry-suspicious-match" title="Имя файла типично для сканера/камеры («${escapeHtml(primary.file_name)}») — возможно, это на самом деле РАЗНЫЕ счета со случайно одинаковым именем, а не один общий счёт. Проверьте в развёрнутом виде («это другой счёт»).">⚠ похоже на случайное совпадение имени</div>` : ""}
+        ${suspiciousMatch ? h`<div class="registry-suspicious-match">
+          <span title="Имя файла типично для сканера/камеры («${escapeHtml(primary.file_name)}») — возможно, это на самом деле РАЗНЫЕ счета со случайно одинаковым именем, а не один общий счёт. Проверьте в развёрнутом виде («это другой счёт»).">⚠ похоже на случайное совпадение имени</span>
+          ${editableRegistry ? h` · <a href="#" data-action="suspicious-match-dismiss" data-id="${primary.id}" title="Нет, это точно один и тот же счёт на все эти заявки — просто так называется файл">не предупреждать, счёт верный</a>` : ""}
+        </div>` : ""}
       </td>
-      <td>${(editableRegistry && state.registryEditingAmountId===primary.id)
+      <td class="registry-amount-td">${(editableRegistry && state.registryEditingAmountId===primary.id)
         ? h`<input type="text" inputmode="decimal" class="registry-amount-input" data-invoice-amount data-id="${primary.id}" value="${primary.amount!=null?formatAmountInputValue(String(primary.amount)):''}" placeholder="—">`
         : h`<button type="button" class="registry-amount-display" data-action="${editableRegistry?'registry-amount-edit':''}" data-id="${primary.id}" ${editableRegistry?'':'disabled'} title="${editableRegistry?'Нажмите, чтобы изменить сумму':'Редактировать может только Администратор, Руководитель или Финансист'}">${primary.amount!=null?fmtKZT(primary.amount):'—'}</button>`}</td>
       <td>${registrySelectCell(primary, "currency", editableRegistry)}</td>
@@ -3770,17 +3907,31 @@
       var pct = invoiceAllocPercent(iv);
       var amount = (pct!=null && total!=null) ? (total*pct/100) : null;
       var amtTitle = total!=null ? "Сумма KZT без НДС на эту заявку" : "Сначала укажите сумму счёта (в свёрнутой строке) — без неё нельзя посчитать сумму по проценту";
+      // 0.3.6 (по просьбе Антона, п.5): раньше Валюта/НДС/Налог в развёрнутых
+      // строках были попросту скрыты внутри общего colspan=8 вместе с
+      // «Долей» — по каждой заявке было не видно, на каких условиях вообще
+      // проведён её счёт. Это ОДИН и тот же документ на все заявки группы
+      // (см. registryGroupPrimary/registrySelectCell выше — редактируются
+      // они только на «первичном» счёте), поэтому здесь — те же три поля,
+      // подставленные автоматически из primary, только для чтения (не
+      // редактируются здесь — редактирование остаётся в свёрнутой строке,
+      // чтобы значения не могли разъехаться между копиями одного счёта).
+      var primary = group.primary;
       return h`<tr class="registry-alloc-row">
         <td></td>
         <td class="mono">${tk ? h`<a href="#" data-open-ticket="${tk.id}">${tk.external_ref?escapeHtml(tk.external_ref):'открыть'}</a>` : '—'}</td>
         <td style="text-align:center;">${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
-        <td colspan="8">
-          <span class="muted" style="font-size:12px;display:inline-flex;align-items:center;gap:6px;">
+        <td colspan="2">
+          <span class="muted" style="font-size:12px;display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;">
             Доля: ${registryAllocFieldCell(iv,"pct",pct,editableRegistry,"Процент от суммы счёта на эту заявку")}%
             = ${registryAllocFieldCell(iv,"amt",amount,editableRegistry && total!=null,amtTitle)} ₸
             ${editableRegistry ? h`<a href="#" data-action="invoice-ungroup" data-id="${iv.id}" style="margin-left:6px;font-size:11px;" title="Совпадение имени файла случайное — это на самом деле другой, не связанный счёт">это другой счёт</a>` : ""}
           </span>
         </td>
+        <td class="muted" style="text-align:center;font-size:11.5px;" title="Валюта — как в общем счёте выше (одна на все заявки)">${escapeHtml(primary.currency||'—')}</td>
+        <td class="muted" style="text-align:center;font-size:11.5px;" title="НДС — как в общем счёте выше (один на все заявки)">${primary.vat_included===true?'С НДС':(primary.vat_included===false?'Без':'—')}</td>
+        <td class="muted" style="text-align:center;font-size:11.5px;" title="Способ оплаты (доп. налог) — как в общем счёте выше (один на все заявки)">${primary.tax_basis && primary.tax_basis!=="regular" ? escapeHtml(taxBasisLabel(primary)) : '—'}</td>
+        <td colspan="3"></td>
       </tr>`;
     }).join("");
     return rowsHtml + registryAllocSummaryRow(group, total);
@@ -4947,7 +5098,16 @@
                     <input type="text" id="assign-free-input" data-id="${t.id}" placeholder="…или впишите имя/название вручную" style="max-width:240px;">
                     <button class="btn btn-sm" data-action="assign-free" data-id="${t.id}">Назначить</button>
                   </div>` : ""}
-                  ${(t.status==="dispatched"||t.status==="onsite") ? h`
+                  ${/* 0.3.6 (по просьбе Антона, п.3): раньше блок "сменить исполнителя"
+                       показывался только пока статус заявки был "Диспетчеризована"/"На
+                       объекте" — как только все 4 пункта чек-листа выполнялись,
+                       maybeAutoComplete() сам переводил заявку в "Закрыта" (в т.ч. когда
+                       внешний статус в c-lector уже "Выполнена"), и смена бригады
+                       становилась недоступна НАВСЕГДА, даже если бригаду назначили по
+                       ошибке. reassignSpecialist() сама по себе статус не трогает (это
+                       просто assigned_to) — условие показа было единственным, что
+                       мешало; теперь оно снято: если исполнитель УЖЕ назначен (crewReal),
+                       его можно сменить в любом статусе заявки. */ crewReal ? h`
                   <div class="actions-row" style="margin-bottom:8px;">
                     <select id="reassign-select" style="max-width:240px;">
                       <option value="">Сменить исполнителя…</option>
@@ -5374,15 +5534,18 @@
       return;
     }
     if(!navAllowed(state.route.view)){ state.route = {view: firstAllowedView(), id:null}; }
-    var titleMap = {dashboard:"Дашборд", tickets:"Заявки", team:"Команда", parts:"Склад ЗИП", "import":"Заявки · Импорт из c-lector", registry:"Финансы · Реестр платежей", cashexpenses:"Финансы · Наличные расходы", map:"Карта", crews:"Бригады", hotels:"Отели", systemdefects:"Системный брак"};
-    var body = state.route.view==="tickets"?viewTickets(): state.route.view==="team"?viewTeam(): state.route.view==="parts"?viewParts(): state.route.view==="import"?viewImport(): state.route.view==="registry"?viewRegistry(): state.route.view==="cashexpenses"?viewCashExpenses(): state.route.view==="map"?viewMap(): state.route.view==="crews"?viewCrews(): state.route.view==="hotels"?viewHotels(): state.route.view==="systemdefects"?viewSystemDefects(): viewDashboard();
+    var titleMap = {dashboard:"Дашборд", tickets:"Заявки", team:"Команда", parts:"Склад ЗИП", "import":"Заявки · Импорт из c-lector", registry:"Финансы · Реестр платежей", cashexpenses:"Финансы · Наличные расходы", crews:"Бригады", hotels:"Отели", systemdefects:"Системный брак"};
+    var body = state.route.view==="tickets"?viewTickets(): state.route.view==="team"?viewTeam(): state.route.view==="parts"?viewParts(): state.route.view==="import"?viewImport(): state.route.view==="registry"?viewRegistry(): state.route.view==="cashexpenses"?viewCashExpenses(): state.route.view==="crews"?viewCrews(): state.route.view==="hotels"?viewHotels(): state.route.view==="systemdefects"?viewSystemDefects(): viewDashboard();
 
     // 0.2.17: «Импорт из c-lector» больше не отдельный пункт меню — он почти
     // всё подтягивает автоматически, отдельного раздела для него не нужно.
     // Теперь это вкладка ВНУТРИ «Заявок» (см. ticketsTabs), тем же приёмом,
     // что и «Финансы» → «Реестр платежей»/«Наличные расходы» ниже.
+    // 0.3.6 (по просьбе Антона, п.1): «Карта» больше не отдельный пункт меню —
+    // сама карта переехала на «Дашборд» (см. viewDashboard), чтобы и цифры, и
+    // карта были видны на одном экране, без переключения раздела.
     var navItems = [
-      ["dashboard","Дашборд"], ["tickets","Заявки",["import"]], ["map","Карта"],
+      ["dashboard","Дашборд"], ["tickets","Заявки",["import"]],
       ["systemdefects","Системный брак"],
       ["team","Команда"], ["crews","Бригады"], ["parts","Склад ЗИП"], ["registry","Финансы",["cashexpenses"]], ["hotels","Отели"]
     ].filter(function(x){ return navAllowed(x[0]); });
@@ -5397,6 +5560,7 @@
       <div class="main">
         <div class="topbar">
           <h1>${titleMap[state.route.view]||"Дашборд"}</h1>
+          ${state.route.view==="team" ? h`<button class="btn btn-sm" id="invite-colleague-btn" title="Отправьте ссылку на это приложение — коллега войдёт своей рабочей почтой (без пароля) и появится в списке ниже">Пригласить коллегу</button>` : ""}
           <div class="whoami"><div class="whoami-chip" data-action="me">
             <span class="avatar">${(state.me.name||state.me.email||"?").trim().charAt(0).toUpperCase()}</span>
             <span>${escapeHtml(state.me.name||state.me.email)}</span>
@@ -5406,7 +5570,7 @@
       </div>`);
     renderTicketPanel();
     if(state.selectedTicketId) loadNotesFor(state.selectedTicketId);
-    if(state.route.view==="map") ensureMap();
+    if(state.route.view==="dashboard") ensureMap();
   }
 
   /* ============================== EVENTS ============================== */
@@ -5477,8 +5641,13 @@
       commitCashImport(ccatSel?ccatSel.value:"materials", cperson);
       return;
     }
-    if(t.id==="copy-link"){
-      navigator.clipboard && navigator.clipboard.writeText(window.location.origin+window.location.pathname).then(function(){ t.textContent="Скопировано"; setTimeout(function(){ t.textContent="Скопировать ссылку"; },1500); });
+    if(t.id==="copy-link" || t.id==="invite-colleague-btn"){
+      // 0.3.6: кнопка в топбаре «Команды» (см. render()) делает то же самое,
+      // что и «Скопировать ссылку» в самом разделе — просто вынесена наверх,
+      // чтобы не приходилось прокручивать до второй карточки, которая к тому
+      // же теперь не занимает половину экрана рядом с таблицей сотрудников.
+      var origLabel2 = t.textContent;
+      navigator.clipboard && navigator.clipboard.writeText(window.location.origin+window.location.pathname).then(function(){ t.textContent="Скопировано"; setTimeout(function(){ t.textContent=origLabel2; },1500); });
       return;
     }
     if(t.id==="report-copy-btn"){
@@ -5548,6 +5717,7 @@
       if(action==="invoice-paid-toggle") return setInvoicePaid(id, actionEl.getAttribute("data-val")==="1");
       if(action==="invoice-submitted-toggle") return setInvoiceSubmitted(id, actionEl.getAttribute("data-val")==="1");
       if(action==="invoice-ungroup"){ e.preventDefault(); return ungroupInvoice(id); }
+      if(action==="suspicious-match-dismiss"){ e.preventDefault(); return dismissSuspiciousMatch(id); }
       if(action==="invoice-paid-month-edit"){
         e.preventDefault();
         var firstPaidId = id.split(",")[0];
@@ -5723,6 +5893,7 @@
     if(e.target.matches("[data-invoice-currency]")){ setInvoiceCurrency(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.matches("[data-invoice-vat]")){ setInvoiceVatIncluded(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.matches("[data-invoice-tax-basis]")){ setInvoiceTaxBasis(e.target.getAttribute("data-id"), e.target.value); return; }
+    if(e.target.matches("[data-invoice-tax-custom-pct]")){ setInvoiceCustomTaxPct(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.matches("[data-alloc-percent]")){ setInvoiceAllocPercent(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.matches("[data-alloc-amount]")){ setInvoiceAllocAmount(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.id==="import-file"){ var f=e.target.files&&e.target.files[0]; if(f) loadImportFile(f); return; }
