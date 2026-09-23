@@ -75,6 +75,13 @@
     padding:14px 28px; display:flex; align-items:center; gap:16px;
   }
   .topbar h1{ font-size:18px; margin:0; font-weight:700; flex:1; min-width:0; }
+  /* 0.3.9: гамбургер-кнопка открытия сайдбара на телефоне — на десктопе
+     скрыта (display:none здесь), показывается только внутри мобильной
+     media query ниже (правило там идёт позже по тексту файла и той же
+     специфичности, поэтому и побеждает при узком экране). */
+  .hamburger-btn{ display:none; align-items:center; justify-content:center; width:34px; height:34px; border-radius:8px; border:1px solid var(--line); background:var(--surface); color:var(--ink); cursor:pointer; flex:none; padding:0; }
+  .hamburger-btn svg{ width:18px; height:18px; display:block; }
+  .sidebar-scrim{ display:none; }
   .whoami{ display:flex; align-items:center; gap:6px; }
   .whoami-chip{
     display:flex; align-items:center; gap:8px; background:var(--surface-2); border:1px solid var(--line);
@@ -419,6 +426,39 @@
     .sidebar, .topbar, .wo-toolbar, .no-print{ display:none !important; }
     body, .content{ background:#fff; padding:0; margin:0; }
     .wo-page{ box-shadow:none; border:none; max-width:none; }
+  }
+
+  /* ---------- мобильная адаптация (0.3.9, по просьбе Антона: "чтобы
+     работала на телефоне") — базовый набор: сайдбар прячется за гамбургер,
+     карточка заявки открывается на весь экран, формы/сетки в одну колонку.
+     Тот же порог 880px, что и у .two-col выше — ничего из этого не действует
+     на десктопе (сайдбар остаётся как был, шире экрана — стили просто не
+     применяются). */
+  @media (max-width:880px){
+    #app{ max-width:100%; box-shadow:none; }
+    .hamburger-btn{ display:inline-flex; }
+    .sidebar{
+      position:fixed; top:0; left:0; z-index:26; width:250px; flex:0 0 250px;
+      transform:translateX(-100%); transition:transform .18s ease; box-shadow:8px 0 30px rgba(0,0,0,.22);
+    }
+    .sidebar.open{ transform:translateX(0); }
+    .sidebar-scrim.open{ display:block; position:fixed; inset:0; background:rgba(10,16,22,.35); z-index:25; }
+    .topbar{ padding:12px 14px; gap:10px; }
+    .topbar h1{ font-size:16px; }
+    .content{ padding:16px 14px 40px; }
+    /* карточка заявки (.panel — обычно узкая выезжающая справа панель)
+       на телефоне занимает весь экран, а не 460px/94vw как на десктопе. */
+    .panel{ width:100%; max-width:100%; }
+    /* модалки — тоже на весь экран, без полей вокруг (модал-скрим на
+       десктопе центрирует узкое окно с отступами сверху/по бокам). */
+    .modal-scrim{ padding:0; align-items:stretch; }
+    .modal{ width:100%; max-width:100%; min-height:100vh; border-radius:0; }
+    /* формы/сетки, рассчитанные на 2 колонки на десктопе, на телефоне в
+       одну — как и .two-col выше (тот же приём, другой набор селекторов). */
+    .field-row, .wo-grid, .wo-sign{ grid-template-columns:1fr; }
+    /* .grid-kpi и .report-stats уже сами по себе адаптивны
+       (repeat(auto-fit,minmax(...))) — под них не нужен отдельный override:
+       колонки и так сжимаются вплоть до одной на самых узких экранах. */
   }
 
   .banner{ display:flex; align-items:center; gap:12px; padding:11px 16px; border-radius:9px; background:var(--warn-soft); color:var(--warn); font-size:13px; margin-bottom:18px; font-weight:500; }
@@ -1367,6 +1407,13 @@
     // или "exp:<имя>" (раздельно для двух таблиц, один и тот же прораб может
     // быть свёрнут в одной и развёрнут в другой).
     cashExpandedPersons: {},
+    // 0.3.9 (по просьбе Антона): базовая адаптация под телефон — на узких
+    // экранах сайдбар прячется за пределы экрана и открывается гамбургер-
+    // кнопкой в шапке (см. .hamburger-btn/.sidebar/.sidebar-scrim в <style> и
+    // toggle-sidebar/close-sidebar в обработчике кликов ниже) поверх контента,
+    // как выезжающая панель. На десктопе (шире 880px, тот же порог, что и у
+    // .two-col) это состояние ни на что не влияет — сайдбар всегда на месте.
+    mobileNavOpen: false,
     // 0.2.17: то же самое для «Отелей» — «Зона», «Координаты» и «Лицо от
     // Заказчика» показываются обычным текстом без рамок ввода, если уже
     // заполнены, и превращаются в поля ввода по клику. Ключ вида
@@ -1387,7 +1434,11 @@
     var parts = h.split("/").filter(Boolean);
     return { view: parts[0]||"dashboard", id: parts[1]||null };
   }
-  window.addEventListener("hashchange", function(){ state.route = parseHash(); render(); });
+  // 0.3.9: любая смена раздела (клик по пункту меню, ссылка на заявку,
+  // кнопки "назад"/"вперёд" браузера) закрывает открытое на телефоне
+  // гамбургер-меню — иначе после перехода оно оставалось бы раскрытым поверх
+  // нового раздела.
+  window.addEventListener("hashchange", function(){ state.route = parseHash(); state.mobileNavOpen = false; render(); });
 
   /* ============================== AUTH ============================== */
   function initAuth(){
@@ -5832,8 +5883,12 @@
       // navAllowed выше), поэтому у остальных ролей просто не пройдёт фильтр.
       ["activity","Активность"]
     ].filter(function(x){ return navAllowed(x[0]); });
+    // 0.3.9: затемнение позади выезжающего на телефоне сайдбара — рендерится
+    // всегда (как и сам сайдбар), видимость целиком на CSS (.sidebar-scrim.open,
+    // см. media query выше); клик по нему закрывает меню (data-action="close-sidebar").
     morphInto(app, h`
-      <div class="sidebar">
+      <div class="sidebar-scrim ${state.mobileNavOpen?"open":""}" data-action="close-sidebar"></div>
+      <div class="sidebar ${state.mobileNavOpen?"open":""}">
         <div class="brand"><div class="brand-name">Диспетчерская</div><div class="brand-sub">Keruen Inn · Служба сервиса</div></div>
         <nav class="nav">${navItems.map(function(x){ return navItem(x[0], x[1], x[2]); }).join("")}</nav>
         <div class="nav-footer">
@@ -5842,6 +5897,7 @@
       </div>
       <div class="main">
         <div class="topbar">
+          <button class="hamburger-btn" data-action="toggle-sidebar" title="Меню" aria-label="Меню"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
           <h1>${titleMap[state.route.view]||"Дашборд"}</h1>
           ${state.route.view==="team" ? h`<button class="btn btn-sm" id="invite-colleague-btn" title="Отправьте ссылку на это приложение — коллега войдёт своей рабочей почтой (без пароля) и появится в списке ниже">Пригласить коллегу</button>` : ""}
           <div class="whoami"><div class="whoami-chip" data-action="me">
@@ -5859,7 +5915,10 @@
   /* ============================== EVENTS ============================== */
   document.addEventListener("click", function(e){
     var t = e.target;
-    if(t.closest(".nav-item")) return;
+    // 0.3.9: клик по пункту меню в открытом на телефоне сайдбаре — закрываем
+    // меню (переход по разделу и так произойдёт штатно через hashchange
+    // ниже, здесь просто убираем сам выезжающий сайдбар с экрана).
+    if(t.closest(".nav-item")){ if(state.mobileNavOpen){ state.mobileNavOpen = false; render(); } return; }
     var openTicket = t.closest("[data-open-ticket]");
     // «Заказчик» с 0.2.9 имеет полноценный доступ к разделу «Заявки» (см.
     // ROLE_NAV) — раньше здесь была блокировка открытия карточки для этой
@@ -5946,6 +6005,12 @@
       var action = actionEl.getAttribute("data-action"); var id = actionEl.getAttribute("data-id");
       if(action==="me") return openMeModal();
       if(action==="sign-out") return signOut();
+      // 0.3.9: гамбургер-меню на телефоне — открыть/закрыть сайдбар (кнопкой
+      // в шапке) или закрыть его кликом по затемнению позади (data-action
+      // на .sidebar-scrim, см. render()). На десктопе эти элементы не видны,
+      // клик по ним невозможен, но обработчик не привязан к ширине экрана.
+      if(action==="toggle-sidebar"){ state.mobileNavOpen = !state.mobileNavOpen; render(); return; }
+      if(action==="close-sidebar"){ state.mobileNavOpen = false; render(); return; }
       if(action==="copy-ticket-link"){
         var ticketLinkUrl = window.location.origin+window.location.pathname+"#/tickets/"+id;
         if(navigator.clipboard){
