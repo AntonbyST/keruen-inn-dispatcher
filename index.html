@@ -459,6 +459,30 @@
     /* .grid-kpi и .report-stats уже сами по себе адаптивны
        (repeat(auto-fit,minmax(...))) — под них не нужен отдельный override:
        колонки и так сжимаются вплоть до одной на самых узких экранах. */
+    /* 0.4.0 (по фото Антона: "фото 2-4 — много чего не читается") — все
+       таблицы приложения растянуты в 100% ширины (см. правило "table{...}"
+       выше), а .table-wrap вокруг них — только overflow-x:auto (прокрутка
+       появляется, ТОЛЬКО если таблица шире своего контейнера). На десктопе
+       так и есть: контента внутри .content хватает места, 100% ничего не
+       ломает. На телефоне же 100% заставляет браузер СЖИМАТЬ колонки под
+       ширину экрана вместо того, чтобы дать таблице стать шире и
+       прокручиваться — отсюда обрезанные "счёт"→"c…", наползающие друг на
+       друга суммы и урезанные названия отелей на скриншотах. width:auto
+       вместо 100% (только на телефоне) снимает это ограничение — таблица
+       остаётся на всю ширину карточки, пока содержимого хватает, но
+       становится шире и скроллится по горизонтали, если нет; там, где у
+       таблицы есть <colgroup> с фиксированными ширинами (.registry-table),
+       это те самые пиксельные ширины и работает ровно то же самое решение,
+       что уже применялось к ней на десктопе, просто теперь доступное и на
+       телефоне вместо принудительного сжатия. */
+    .table-wrap table{ width:auto; min-width:100%; }
+    /* Пустая таблица (например, "Наличные расходы" без единой записи) всё
+       равно получает ширину по заголовкам колонок ("КОММЕНТАРИЙ", "ВЫДАНО" и
+       т.п.) — этого достаточно, чтобы таблица стала шире экрана даже без
+       единой строки данных. "Таблица пуста" по центру такой широкой таблицы
+       обрезается на старте (видна только середина, а не весь текст) — по
+       левому краю читается сразу, без прокрутки. */
+    .table-wrap .empty-state{ text-align:left; }
   }
 
   .banner{ display:flex; align-items:center; gap:12px; padding:11px 16px; border-radius:9px; background:var(--warn-soft); color:var(--warn); font-size:13px; margin-bottom:18px; font-weight:500; }
@@ -795,11 +819,18 @@
   // показывает "—", как и незаполненная "Сумма". Начиная с 0.2.15 пустой
   // "Налог" (прочерк) — это ЗНАЧЕНИЕ "без доп. налога" (0%), а не признак
   // незаполненности: при "с НДС" он теперь ставится автоматически.
-  function invoiceCostAccounted(iv){
-    if(iv.amount==null || iv.vat_included==null) return null;
+  // 0.4.0: вынесено из invoiceCostAccounted — та же формула (вычесть НДС,
+  // прибавить доп. налог по способу оплаты счёта iv), но применяется к
+  // произвольной "сырой" сумме, а не обязательно к iv.amount целиком. Нужно
+  // для доли отдельной заявки в общем счёте (см. setInvoiceAllocAmount) —
+  // раньше сумма, введённая туда, считалась уже "Учтено в затратах" этой
+  // заявки и НДС из неё фактически никогда не вычитался (по просьбе Антона,
+  // п.1 — "не отнимается ндс").
+  function invoiceApplyVatTax(iv, rawAmount){
+    if(rawAmount==null || iv.vat_included==null) return null;
     var vatRate = CURRENCY_VAT_RATE[iv.currency];
     if(vatRate==null) return null; // валюта не выбрана или не из известных (KZT/RUB/BYN)
-    var noVat = iv.vat_included ? (iv.amount / (1 + vatRate)) : iv.amount;
+    var noVat = iv.vat_included ? (rawAmount / (1 + vatRate)) : rawAmount;
     // 0.3.7: "Свой" доп. налог фиксированной суммой в ₸ — прибавляется как
     // есть поверх суммы без НДС, а не как ставка (см. invoiceCustomTaxAmount/
     // taxBasisRate выше — так что этот случай проверяем раньше и отдельно).
@@ -810,6 +841,33 @@
     var taxRate = taxBasisRate(iv);
     if(taxRate==null) return null; // на случай неизвестного значения в базе, либо "свой" ещё не введён (ни % ни сумма)
     return noVat * (1 + taxRate);
+  }
+  function invoiceCostAccounted(iv){
+    if(iv.amount==null) return null;
+    return invoiceApplyVatTax(iv, iv.amount);
+  }
+  // 0.4.0: обратное к invoiceApplyVatTax — от уже посчитанной "Учтено в
+  // затратах" суммы обратно к "сырой" (как в документе, с НДС, без вычета
+  // доп. налога). Нужно только для того, чтобы при повторном открытии поля
+  // "= ... ₸" доли счёта (см. registryGroupExpandRows/registryAllocFieldCell)
+  // в него подставлялось то же число, которое туда вводили в прошлый раз, а
+  // не пересчитанная "Учтено в затратах" — иначе поле "забывало бы", что в
+  // него ввели, стоило один раз закрыть и открыть заново.
+  function invoiceUnapplyVatTax(iv, accountedAmount){
+    if(accountedAmount==null || iv.vat_included==null) return null;
+    var vatRate = CURRENCY_VAT_RATE[iv.currency];
+    if(vatRate==null) return null;
+    var noVat;
+    if(iv.tax_basis==="custom" && invoiceCustomTaxAmount(iv)!=null){
+      // Тем же способом, что и в setInvoiceAllocAmount — фикс. доп. налог не
+      // масштабируется по доле, здесь он просто не участвовал в прямом счёте.
+      noVat = accountedAmount;
+    } else {
+      var taxRate = taxBasisRate(iv);
+      if(taxRate==null) return null;
+      noVat = accountedAmount / (1 + taxRate);
+    }
+    return iv.vat_included ? (noVat * (1 + vatRate)) : noVat;
   }
 
   // 0.2.16: "Учтено в затратах" для RUB/BYN счетов переводится в KZT по
@@ -1879,12 +1937,34 @@
     // 0.3.7: тот же фикс, что и в setInvoiceAllocPercent выше — parseAmountInputValue
     // вместо самодельного replace/trim, иначе >3 цифр даёт NaN и "пропадает сумма".
     var raw = parseAmountInputValue(val);
-    var amount = raw==="" ? null : Number(raw);
-    if(amount!=null && isNaN(amount)){ render(); return; }
+    var rawAmount = raw==="" ? null : Number(raw);
+    if(rawAmount!=null && isNaN(rawAmount)){ render(); return; }
     var primary = invoiceGroupPrimary(iv);
     var acc = invoiceAccountedKZT(primary);
-    if(amount!=null && !acc.value){ render(); return; }
-    var pct = amount==null ? null : (amount / acc.value * 100);
+    if(rawAmount!=null && !acc.value){ render(); return; }
+    var pct;
+    if(rawAmount==null){
+      pct = null;
+    } else {
+      // 0.4.0 (по просьбе Антона, п.1: "не отнимается ндс"): раньше введённая
+      // здесь сумма считалась УЖЕ "Учтено в затратах" этой заявки — процент
+      // вычислялся так, что при показе назад получалось ровно то же число, то
+      // есть НДС из введённой суммы фактически никогда не вычитался. Теперь
+      // это сумма ДОЛИ ЭТОЙ ЗАЯВКИ от сырой суммы всего счёта, в ₸ (как она
+      // указана в самом документе на эту заявку) — из неё сначала вычитается
+      // НДС и добавляется доп. налог тем же способом, что и у всего счёта
+      // (см. invoiceApplyVatTax), и только эта величина сравнивается с общей
+      // "Учтено в затратах" счёта, чтобы получить процент.
+      // "Свой" доп. налог ФИКСИРОВАННОЙ суммой (не %) относится ко всему
+      // счёту целиком и не масштабируется по долям — прибавлять его ещё раз
+      // к каждой отдельной доле было бы неверно (см. invoiceApplyVatTax).
+      // Для этого случая снимаем только НДС, без добавления доп. налога.
+      var shareAccounted = (primary.tax_basis==="custom" && invoiceCustomTaxAmount(primary)!=null)
+        ? invoiceApplyVatTax(Object.assign({}, primary, {tax_basis:null}), rawAmount)
+        : invoiceApplyVatTax(primary, rawAmount);
+      if(shareAccounted==null){ render(); return; } // валюта/НДС/налог счёта ещё не заполнены полностью
+      pct = shareAccounted / acc.value * 100;
+    }
     var extra = Object.assign({}, iv.extra||{});
     if(pct==null) delete extra.alloc_percent; else extra.alloc_percent = pct;
     iv.extra = extra;
@@ -4188,33 +4268,46 @@
     var rowsHtml = group.members.map(function(iv){
       var tk = state.tickets.find(function(x){return x.id===iv.ticket_id;});
       var hotel = tk ? hotelById(tk.hotel_id) : null;
+      // 0.3.6 (по просьбе Антона, п.5): Валюта/НДС/Налог у всех заявок
+      // группы одинаковы — это ОДИН и тот же документ на все заявки (см.
+      // registryGroupPrimary/registrySelectCell выше — редактируются они
+      // только на «первичном» счёте), берём их отсюда, только для чтения.
+      var primary = group.primary;
       var pct = invoiceAllocPercent(iv);
       var amount = (pct!=null && total!=null) ? (total*pct/100) : null;
-      var amtTitle = total!=null ? "Сумма KZT без НДС на эту заявку" : "Сначала укажите сумму счёта (в свёрнутой строке) — без неё нельзя посчитать сумму по проценту";
-      // 0.3.6 (по просьбе Антона, п.5): раньше Валюта/НДС/Налог в развёрнутых
-      // строках были попросту скрыты внутри общего colspan=8 вместе с
-      // «Долей» — по каждой заявке было не видно, на каких условиях вообще
-      // проведён её счёт. Это ОДИН и тот же документ на все заявки группы
-      // (см. registryGroupPrimary/registrySelectCell выше — редактируются
-      // они только на «первичном» счёте), поэтому здесь — те же три поля,
-      // подставленные автоматически из primary, только для чтения (не
-      // редактируются здесь — редактирование остаётся в свёрнутой строке,
-      // чтобы значения не могли разъехаться между копиями одного счёта).
-      var primary = group.primary;
+      // 0.4.0: поле "= ... ₸" теперь принимает и показывает СЫРУЮ сумму (как
+      // в документе на эту заявку, с НДС/без вычета доп. налога) — а не уже
+      // готовую "Учтено в затратах" (см. invoiceApplyVatTax/setInvoiceAllocAmount
+      // выше). rawAmount — то же amount, переведённое обратно в сырые
+      // единицы, только для ПОКАЗА в этом поле; сама "Учтено в затратах"
+      // (последняя колонка строки) по-прежнему показывает amount как есть.
+      var rawAmount = amount!=null ? invoiceUnapplyVatTax(primary, amount) : null;
+      var amtTitle = total!=null ? "Сумма по документу на эту заявку (как есть, с НДС) — НДС и доп. налог будут вычтены/добавлены автоматически, как и в общей сумме счёта" : "Сначала укажите сумму счёта (в свёрнутой строке) — без неё нельзя посчитать сумму по проценту";
+      // 0.4.0 (по просьбе Антона, п.2: "окно ввода не должно переходить на
+      // новую строчку") — раньше "Доля: X% = Y ₸" лежала в ячейке шириной
+      // всего 126px (colspan=2 — «Счёт»+«Сумма»), и по мере ввода цифр в поле
+      // суммы flex-wrap:wrap перебрасывал само поле на вторую строку прямо
+      // во время набора. Валюта/НДС/Налог у всех заявок группы одинаковы (это
+      // один и тот же счёт — см. комментарий выше) и уже видны один раз в
+      // свёрнутой строке над этой, так что отдельные колонки под них здесь —
+      // не более чем повтор; забираем их ширину под саму ячейку "Доля"
+      // (colspan=5 вместо 2, ≈308px вместо 126px), а сами значения переносим
+      // компактной подписью строкой ниже — она может переноситься сама по
+      // себе, не задевая поля ввода строкой выше (у той — flex-wrap:nowrap).
       return h`<tr class="registry-alloc-row">
         <td></td>
         <td class="mono">${tk ? h`<a href="#" data-open-ticket="${tk.id}">${tk.external_ref?escapeHtml(tk.external_ref):'открыть'}</a>` : '—'}</td>
         <td style="text-align:center;">${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
-        <td colspan="2">
-          <span class="muted" style="font-size:12px;display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;">
-            Доля: ${registryAllocFieldCell(iv,"pct",pct,editableRegistry,"Процент от суммы счёта на эту заявку")}%
-            = ${registryAllocFieldCell(iv,"amt",amount,editableRegistry && total!=null,amtTitle)} ₸
-            ${editableRegistry ? h`<a href="#" data-action="invoice-ungroup" data-id="${iv.id}" style="margin-left:6px;font-size:11px;" title="Совпадение имени файла случайное — это на самом деле другой, не связанный счёт">это другой счёт</a>` : ""}
-          </span>
+        <td colspan="5">
+          <div style="font-size:12px;display:flex;align-items:center;gap:6px;flex-wrap:nowrap;white-space:nowrap;">
+            <span class="muted">Доля:</span> ${registryAllocFieldCell(iv,"pct",pct,editableRegistry,"Процент от суммы счёта на эту заявку")}<span class="muted">%</span>
+            <span class="muted">=</span> ${registryAllocFieldCell(iv,"amt",rawAmount,editableRegistry && total!=null,amtTitle)}<span class="muted">₸</span>
+          </div>
+          <div class="muted" style="font-size:11px;margin-top:3px;">
+            ${escapeHtml(primary.currency||'—')} · ${primary.vat_included===true?'С НДС':(primary.vat_included===false?'Без':'—')}${(primary.tax_basis && primary.tax_basis!=="regular") ? (' · '+escapeHtml(taxBasisLabel(primary))) : ''}
+            ${editableRegistry ? h` · <a href="#" data-action="invoice-ungroup" data-id="${iv.id}" title="Совпадение имени файла случайное — это на самом деле другой, не связанный счёт">это другой счёт</a>` : ""}
+          </div>
         </td>
-        <td class="muted" style="text-align:center;font-size:11.5px;" title="Валюта — как в общем счёте выше (одна на все заявки)">${escapeHtml(primary.currency||'—')}</td>
-        <td class="muted" style="text-align:center;font-size:11.5px;" title="НДС — как в общем счёте выше (один на все заявки)">${primary.vat_included===true?'С НДС':(primary.vat_included===false?'Без':'—')}</td>
-        <td class="muted" style="text-align:center;font-size:11.5px;" title="Способ оплаты (доп. налог) — как в общем счёте выше (один на все заявки)">${primary.tax_basis && primary.tax_basis!=="regular" ? escapeHtml(taxBasisLabel(primary)) : '—'}</td>
         <td class="mono muted" style="text-align:right;font-size:11.5px;" title="Учтено в затратах по этой заявке — доля общей суммы счёта по указанному выше проценту">${amount!=null ? fmtKZT2(amount) : '—'}</td>
         <td colspan="2"></td>
       </tr>`;
