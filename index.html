@@ -4643,14 +4643,20 @@
     if(!confirm("Удалить эту запись о выдаче?")) return;
     sb.from("cash_advances").delete().eq("id", id).then(function(){});
   }
-  // 0.3.2 (по просьбе Антона, п.3): галочка "Выдано" — подтверждение самим
-  // Финансистом, что деньги реально ушли (в отличие от факта записи выдачи
-  // в систему, который мог внести и Администратор/Руководитель). Только
-  // Финансист может её ставить/снимать — см. isFinance() выше. Патчим
-  // state.cashAdvances локально ДО запроса, как и setInvoicePaid выше, —
-  // чтобы галочка не "прыгала" в ожидании ответа сети.
+  // 0.3.2 (по просьбе Антона, п.3): галочка "Выдано" — подтверждение, что
+  // деньги реально ушли (в отличие от факта записи выдачи в систему).
+  // Раньше это могли делать ТОЛЬКО Финансисты (isFinance()) — по просьбе
+  // Антона (0.4.1: "у администратора должно работать всё, я не могу и
+  // финансист сейчас её снять") расширено до canEditRegistry() — тех же
+  // ролей, что редактируют "Оплачено"/"Сумма" счёта в «Реестре платежей»
+  // (Администратор/Руководитель/Финансист + отдельно выданное право).
+  // Учтите: это снимает независимую проверку "не тот же человек, кто
+  // записал выдачу, подтверждает и её выдачу" — если понадобится обратно
+  // только Финансисту, замените canEditRegistry() здесь и в разметке ниже
+  // обратно на isFinance().
+  function canConfirmCashAdvance(){ return canEditRegistry(); }
   function setCashAdvanceConfirmed(id, val){
-    if(!isFinance()){ alert("Отмечать выдачу как «Выдано» может только Финансист."); return; }
+    if(!canConfirmCashAdvance()){ alert("Отмечать выдачу как «Выдано» может только Администратор, Руководитель или Финансист."); return; }
     var a = (state.cashAdvances||[]).find(function(x){ return x.id===id; });
     var confirmedAt = val ? new Date().toISOString() : (a ? a.confirmed_at : null);
     if(a){ a.confirmed = val; a.confirmed_at = confirmedAt; }
@@ -4881,7 +4887,7 @@
                       <td class="num mono">${fmtSum(a.amount)}</td>
                       <td class="muted">${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
                       <td class="muted">${escapeHtml(a.note||'')}</td>
-                      <td style="text-align:center;"><input type="checkbox" data-action="cash-advance-confirm-toggle" data-id="${a.id}" data-val="${a.confirmed?'0':'1'}" ${a.confirmed?'checked':''} ${isFinance()?'':'disabled'} title="${isFinance()?'Отметить, что деньги фактически выданы':'Отмечать может только Финансист'}"></td>
+                      <td style="text-align:center;"><input type="checkbox" data-action="cash-advance-confirm-toggle" data-id="${a.id}" data-val="${a.confirmed?'0':'1'}" ${a.confirmed?'checked':''} ${canConfirmCashAdvance()?'':'disabled'} title="${canConfirmCashAdvance()?'Отметить, что деньги фактически выданы':'Отмечать может только Администратор, Руководитель или Финансист'}"></td>
                       <td>${a.receipt_path ? h`<a href="#" data-action="cash-receipt-open" data-path="${escapeHtml(a.receipt_path)}" title="${escapeHtml(a.receipt_name||'')}">📎 чек</a>${editable?h` <a href="#" data-action="cash-receipt-delete" data-id="${a.id}" data-path="${escapeHtml(a.receipt_path)}" style="color:var(--crit);" title="Удалить чек">✕</a>`:''}` : (editable ? h`<label class="btn btn-ghost btn-sm" style="cursor:pointer;">Приложить<input type="file" data-cash-receipt-upload="${a.id}" accept="image/*,.pdf" style="display:none;"></label>` : '—')}</td>
                       ${editable?h`<td><a href="#" data-action="cash-advance-delete" data-id="${a.id}" style="color:var(--crit);">✕</a></td>`:''}
                     </tr>`;
