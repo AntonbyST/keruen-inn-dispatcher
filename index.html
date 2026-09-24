@@ -1940,8 +1940,18 @@
     var rawAmount = raw==="" ? null : Number(raw);
     if(rawAmount!=null && isNaN(rawAmount)){ render(); return; }
     var primary = invoiceGroupPrimary(iv);
-    var acc = invoiceAccountedKZT(primary);
-    if(rawAmount!=null && !acc.value){ render(); return; }
+    // 0.4.1 (по просьбе Антона: "валюта субсчёта должна быть как валюта
+    // счёта"): rawAmount вводится и хранится в исходной валюте ДОКУМЕНТА
+    // (primary.currency — BYN/RUB/KZT, как есть в счёте), а не в KZT.
+    // Процент — это просто доля этой суммы от суммы всего счёта, ОБЕ они в
+    // одной и той же исходной валюте, так что курс НБ РК тут вообще не
+    // нужен (он появляется только у "Учтено в затратах" в KZT — см.
+    // invoiceAccountedKZT/registryGroupExpandRows). Раньше здесь по ошибке
+    // делили на acc.value (уже переведённую в KZT сумму счёта) — для
+    // KZT-счетов совпадало случайно, а для BYN/RUB давало долю, заниженную
+    // в разы (во столько, во сколько курс валюты к тенге).
+    var fullAccountedOriginal = invoiceCostAccounted(primary);
+    if(rawAmount!=null && !fullAccountedOriginal){ render(); return; }
     var pct;
     if(rawAmount==null){
       pct = null;
@@ -1950,11 +1960,12 @@
       // здесь сумма считалась УЖЕ "Учтено в затратах" этой заявки — процент
       // вычислялся так, что при показе назад получалось ровно то же число, то
       // есть НДС из введённой суммы фактически никогда не вычитался. Теперь
-      // это сумма ДОЛИ ЭТОЙ ЗАЯВКИ от сырой суммы всего счёта, в ₸ (как она
-      // указана в самом документе на эту заявку) — из неё сначала вычитается
-      // НДС и добавляется доп. налог тем же способом, что и у всего счёта
-      // (см. invoiceApplyVatTax), и только эта величина сравнивается с общей
-      // "Учтено в затратах" счёта, чтобы получить процент.
+      // это сумма ДОЛИ ЭТОЙ ЗАЯВКИ от сырой суммы всего счёта, в валюте
+      // документа (как она указана в самом документе на эту заявку) — из неё
+      // сначала вычитается НДС и добавляется доп. налог тем же способом, что
+      // и у всего счёта (см. invoiceApplyVatTax), и только эта величина
+      // сравнивается с общей "Учтено в затратах" счёта (тоже в валюте
+      // документа), чтобы получить процент.
       // "Свой" доп. налог ФИКСИРОВАННОЙ суммой (не %) относится ко всему
       // счёту целиком и не масштабируется по долям — прибавлять его ещё раз
       // к каждой отдельной доле было бы неверно (см. invoiceApplyVatTax).
@@ -1963,7 +1974,7 @@
         ? invoiceApplyVatTax(Object.assign({}, primary, {tax_basis:null}), rawAmount)
         : invoiceApplyVatTax(primary, rawAmount);
       if(shareAccounted==null){ render(); return; } // валюта/НДС/налог счёта ещё не заполнены полностью
-      pct = shareAccounted / acc.value * 100;
+      pct = shareAccounted / fullAccountedOriginal * 100;
     }
     var extra = Object.assign({}, iv.extra||{});
     if(pct==null) delete extra.alloc_percent; else extra.alloc_percent = pct;
@@ -4275,13 +4286,23 @@
       var primary = group.primary;
       var pct = invoiceAllocPercent(iv);
       var amount = (pct!=null && total!=null) ? (total*pct/100) : null;
-      // 0.4.0: поле "= ... ₸" теперь принимает и показывает СЫРУЮ сумму (как
+      // 0.4.0: поле "= ... " теперь принимает и показывает СЫРУЮ сумму (как
       // в документе на эту заявку, с НДС/без вычета доп. налога) — а не уже
       // готовую "Учтено в затратах" (см. invoiceApplyVatTax/setInvoiceAllocAmount
-      // выше). rawAmount — то же amount, переведённое обратно в сырые
-      // единицы, только для ПОКАЗА в этом поле; сама "Учтено в затратах"
-      // (последняя колонка строки) по-прежнему показывает amount как есть.
-      var rawAmount = amount!=null ? invoiceUnapplyVatTax(primary, amount) : null;
+      // выше). "Учтено в затратах" (последняя колонка строки) по-прежнему
+      // показывает amount (в KZT, посчитанный от total = сумма всего счёта в
+      // KZT) как есть — по просьбе Антона эта колонка всегда именно в тенге.
+      //
+      // 0.4.1 (по просьбе Антона: "валюта субсчёта должна быть как валюта
+      // счёта"): а вот САМО поле ввода — это сумма В ВАЛЮТЕ ДОКУМЕНТА
+      // (primary.currency), не в тенге, и делить её нужно от суммы всего
+      // счёта тоже в валюте документа (invoiceCostAccounted(primary)), а не
+      // от уже переведённой в KZT total — иначе для BYN/RUB счетов сюда
+      // попадало число, случайно домноженное на курс НБ РК (несогласованное
+      // с подписью "BYN"/"RUB" под полем).
+      var fullAccountedOriginal = invoiceCostAccounted(primary);
+      var shareAccountedOriginal = (pct!=null && fullAccountedOriginal!=null) ? (fullAccountedOriginal*pct/100) : null;
+      var rawAmount = shareAccountedOriginal!=null ? invoiceUnapplyVatTax(primary, shareAccountedOriginal) : null;
       var amtTitle = total!=null ? "Сумма по документу на эту заявку (как есть, с НДС) — НДС и доп. налог будут вычтены/добавлены автоматически, как и в общей сумме счёта" : "Сначала укажите сумму счёта (в свёрнутой строке) — без неё нельзя посчитать сумму по проценту";
       // 0.4.0 (по просьбе Антона, п.2: "окно ввода не должно переходить на
       // новую строчку") — раньше "Доля: X% = Y ₸" лежала в ячейке шириной
@@ -4301,7 +4322,7 @@
         <td colspan="5">
           <div style="font-size:12px;display:flex;align-items:center;gap:6px;flex-wrap:nowrap;white-space:nowrap;">
             <span class="muted">Доля:</span> ${registryAllocFieldCell(iv,"pct",pct,editableRegistry,"Процент от суммы счёта на эту заявку")}<span class="muted">%</span>
-            <span class="muted">=</span> ${registryAllocFieldCell(iv,"amt",rawAmount,editableRegistry && total!=null,amtTitle)}<span class="muted">₸</span>
+            <span class="muted">=</span> ${registryAllocFieldCell(iv,"amt",rawAmount,editableRegistry && total!=null,amtTitle)}<span class="muted">${escapeHtml(primary.currency||"₸")}</span>
           </div>
           <div class="muted" style="font-size:11px;margin-top:3px;">
             ${escapeHtml(primary.currency||'—')} · ${primary.vat_included===true?'С НДС':(primary.vat_included===false?'Без':'—')}${(primary.tax_basis && primary.tax_basis!=="regular") ? (' · '+escapeHtml(taxBasisLabel(primary))) : ''}
@@ -4560,6 +4581,26 @@
   function cashExpensesFor(t, category){
     return (state.cashExpenses||[]).filter(function(ce){ return ce.ticket_id===t.id && (category===undefined || ce.category===category); });
   }
+  // 0.4.1 (баг «Итого потрачено 0» при оплаченном счёте): сырая сумма счёта,
+  // относящаяся именно к ЭТОЙ заявке — тот же приём, что и в
+  // invoiceAccountedKZTForTicket выше (доля от суммы «первичной» копии
+  // счёта в группе, см. invoiceGroupMembers/invoiceAllocPercent), только
+  // без вычета НДС/доп.налога и без перевода в KZT — здесь нужна сумма
+  // «как в документе/как оплачено», а не «учтено в затратах». Раньше
+  // ticketCostTotal брал iv.amount заявки напрямую — а когда один и тот же
+  // файл счёта общий на несколько заявок, реальная Сумма хранится ТОЛЬКО на
+  // первичной копии (см. registrySelectCell/invoiceGroupPrimary), у
+  // остальных заявок группы iv.amount в базе так и остаётся null, из-за
+  // чего их доля молча считалась как 0 — даже если счёт отмечен «оплачено»
+  // и доля указана в «Реестре платежей».
+  function invoiceRawAmountForTicket(iv){
+    var members = invoiceGroupMembers(iv);
+    var full = Number(members[0].amount)||0;
+    if(members.length<=1) return full;
+    var pct = invoiceAllocPercent(iv);
+    if(pct==null) return 0; // доля этой заявки в общем счёте ещё не указана
+    return full*pct/100;
+  }
   // "Затраты по заявке" — сколько денег реально ушло на конкретную заявку:
   // сумма ОПЛАЧЕННЫХ счетов (любая категория — и «Бригада», и «Материал») плюс
   // сумма привязанных к заявке наличных расходов (тоже любая категория).
@@ -4567,10 +4608,20 @@
   // предстоящие деньги.
   function ticketCostTotal(t){
     var paidInvoices = (state.invoices||[]).filter(function(iv){ return iv.ticket_id===t.id && iv.paid; });
-    var invoiceSum = paidInvoices.reduce(function(s,iv){ return s + (Number(iv.amount)||0); }, 0);
+    // missingAmountCount — сколько из этих оплаченных счетов реально не
+    // добавили ничего к сумме (Сумма счёта и/или доля этой заявки ещё не
+    // заполнены в «Реестре платежей») — чтобы не показывать в карточке
+    // тихий, необъяснимый "0" вместо честного предупреждения (см. вывод
+    // ниже, у "Затраты по заявке").
+    var missingAmountCount = 0;
+    var invoiceSum = paidInvoices.reduce(function(s,iv){
+      var v = invoiceRawAmountForTicket(iv);
+      if(!v) missingAmountCount++;
+      return s + v;
+    }, 0);
     var cashRows = cashExpensesFor(t);
     var cashSum = cashRows.reduce(function(s,ce){ return s + (Number(ce.amount)||0); }, 0);
-    return { invoiceSum: invoiceSum, cashSum: cashSum, total: invoiceSum + cashSum, invoiceCount: paidInvoices.length, cashCount: cashRows.length };
+    return { invoiceSum: invoiceSum, cashSum: cashSum, total: invoiceSum + cashSum, invoiceCount: paidInvoices.length, cashCount: cashRows.length, missingAmountCount: missingAmountCount };
   }
   function addCashAdvance(data){
     if(!canEditRegistry()){ alert("Фиксировать выдачу наличных может только Администратор, Руководитель или Финансист."); return false; }
@@ -5673,6 +5724,7 @@
               <div class="kv"><span class="k">Итого потрачено</span><span class="v mono" style="font-weight:700;">${fmt(cost.total)}</span></div>
               ${cost.invoiceCount ? h`<div class="kv"><span class="k">из них по счетам</span><span class="v mono">${fmt(cost.invoiceSum)} (${cost.invoiceCount})</span></div>` : ""}
               ${cost.cashCount ? h`<div class="kv"><span class="k">из них наличными</span><span class="v mono">${fmt(cost.cashSum)} (${cost.cashCount})</span></div>` : ""}
+              ${cost.missingAmountCount ? h`<div class="muted" style="font-size:11.5px;color:var(--warn);margin-top:2px;">⚠ ${cost.missingAmountCount===1?'По одному отмеченному «оплачено» счёту':'По '+cost.missingAmountCount+' отмеченным «оплачено» счетам'} ещё не указана сумма (или доля этой заявки) в «Реестре платежей» — сюда пока не включено.</div>` : ""}
             </div>`;
           })()}
           ${legacyInvoiceSection(t)}
