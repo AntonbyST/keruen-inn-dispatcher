@@ -4875,6 +4875,25 @@
     if(!confirm("Удалить эту запись о расходе?")) return;
     sb.from("cash_expenses").delete().eq("id", id).then(function(){});
   }
+  // 0.4.2 (доп., по просьбе Антона): категорию уже внесённого наличного
+  // расхода можно поменять задним числом (например изначально записали как
+  // "Материал", а на деле это "Работа") — раньше категория выбиралась только
+  // один раз, при самом создании расхода (см. addCashExpense/commitCashImport
+  // выше), и дальше была просто текстовой пилюлей без возможности поправить.
+  // Смена категории на "Материал" у расхода, уже привязанного к заявке, тем
+  // же приёмом снимает галочку "оплачено за наличные" (maybeClearMaterialsCashPending),
+  // что и при создании нового расхода этой категории.
+  function setCashExpenseCategory(id, val){
+    if(!canEditRegistry()) return;
+    var category = (val==="other" || val==="crew") ? val : "materials";
+    var ce = (state.cashExpenses||[]).find(function(x){ return x.id===id; });
+    if(ce) ce.category = category;
+    render();
+    sb.from("cash_expenses").update({category: category}).eq("id", id).then(function(res){
+      if(res && res.error){ alert("Не удалось сохранить категорию: " + res.error.message); return; }
+      if(category==="materials" && ce && ce.ticket_id) maybeClearMaterialsCashPending(ce.ticket_id);
+    });
+  }
   // Вставка таблицы для "Расходов" — тот же принцип, что и импорт из c-lector
   // (parseDelimited + угадывание колонок по заголовку), но своя, более узкая
   // карта полей и своя целевая таблица (cash_expenses, не tickets).
@@ -5080,7 +5099,12 @@
                       <td class="num mono">${fmtSum(e.amount)}</td>
                       <td class="muted" style="white-space:nowrap;">${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
                       <td class="mono" style="white-space:nowrap;">${tk ? h`<a href="#" data-open-ticket="${tk.id}">${escapeHtml(tk.external_ref||'')}</a>` : '—'}</td>
-                      <td style="white-space:nowrap;"><span class="pill ${e.category==='materials'?'pill-ok':(e.category==='crew'?'pill-accent':'pill-neutral')}">${CASH_EXPENSE_CATEGORY_LABEL[e.category]||e.category}</span></td>
+                      <td style="white-space:nowrap;">${editable ? h`
+                        <select data-cash-expense-category data-id="${e.id}" title="Изменить категорию расхода — например, если изначально записали как «Материал», а по факту это «Работа»" style="max-width:110px;">
+                          <option value="materials" ${e.category==='materials'?'selected':''}>Материал</option>
+                          <option value="crew" ${e.category==='crew'?'selected':''}>Работа</option>
+                          <option value="other" ${e.category==='other'?'selected':''}>Другое</option>
+                        </select>` : h`<span class="pill ${e.category==='materials'?'pill-ok':(e.category==='crew'?'pill-accent':'pill-neutral')}">${CASH_EXPENSE_CATEGORY_LABEL[e.category]||e.category}</span>`}</td>
                       <td class="muted" style="white-space:nowrap;">${escapeHtml(e.person)}</td>
                       ${editable?h`<td><a href="#" data-action="cash-expense-delete" data-id="${e.id}" style="color:var(--crit);">✕</a></td>`:''}
                     </tr>`;
@@ -6571,6 +6595,7 @@
     if(e.target.matches("[data-alloc-amount]")){ setInvoiceAllocAmount(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.matches("[data-cash-advance-accounted-basis]")){ setCashAdvanceAccountedBasis(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.matches("[data-cash-advance-accounted-custom-pct]")){ setCashAdvanceAccountedCustomPct(e.target.getAttribute("data-id"), e.target.value); return; }
+    if(e.target.matches("[data-cash-expense-category]")){ setCashExpenseCategory(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.id==="import-file"){ var f=e.target.files&&e.target.files[0]; if(f) loadImportFile(f); return; }
     if(e.target.matches("[data-cash-receipt-upload]")){ var crf=e.target.files&&e.target.files[0]; if(crf) uploadCashReceipt(e.target.getAttribute("data-cash-receipt-upload"), crf); return; }
     if(e.target.matches("[data-import-map]")){ state.importMapping[e.target.getAttribute("data-import-map")]=e.target.value; render(); return; }
