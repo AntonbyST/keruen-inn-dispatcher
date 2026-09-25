@@ -2278,6 +2278,28 @@
     XLSX.utils.book_append_sheet(wb, ws, "Реестр платежей");
     XLSX.writeFile(wb, "Реестр_платежей_Keruen_Inn_"+new Date().toISOString().slice(0,10)+".xlsx");
   }
+  // 0.4.2 (по просьбе Антона, п.1): «Сохранить резервную копию» — в отличие
+  // от «Экспорт в Excel» (сводная таблица под просмотр/печать, с округлениями
+  // и без части полей), это дамп «как есть» ВСЕЙ таблицы invoices целиком —
+  // полная копия на случай, если что-то потрётся/собьётся на стороне базы,
+  // из которой при необходимости можно вручную восстановить данные. Формат —
+  // JSON, без сторонних библиотек (Blob + временная ссылка на скачивание).
+  function backupRegistryJson(){
+    var payload = {
+      exported_at: new Date().toISOString(),
+      app: "Диспетчерская Keruen Inn — Реестр платежей (резервная копия)",
+      invoices: state.invoices || []
+    };
+    var blob = new Blob([JSON.stringify(payload, null, 2)], {type:"application/json"});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    // Имя файла латиницей (а не как у "Экспорт в Excel") — some браузеры/ОС
+    // не всегда корректно сохраняют кириллицу в атрибуте download у blob:-ссылок.
+    a.download = "registry_backup_"+new Date().toISOString().slice(0,10)+".json";
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 2000);
+  }
   function reloadPortfolio(){
     sb.from("portfolio_snapshot").select("*").eq("id",1).maybeSingle().then(function(res){
       state.portfolio = res.data || null;
@@ -3167,6 +3189,19 @@
       return h`<a href="#/${t[0]}" class="finance-tab ${active===t[0]?'active':''}">${t[1]}</a>`;
     }).join("")}</div>`;
   }
+  // 0.4.2 (по просьбе Антона, п.6): «Активность» — раньше отдельный пункт
+  // меню, теперь вкладка внутри «Команды» (тот же приём, что и у «Заявки» →
+  // «Импорт из c-lector» выше). Видимость по-прежнему только Администратору —
+  // сама проверка не менялась, она уже была в navAllowed('activity') (см.
+  // 0.3.7, п.4); здесь только не показываем вкладку остальным ролям, раз
+  // саму «Активность» им всё равно не откроет navAllowed.
+  function teamTabs(active){
+    if(!navAllowed("activity")) return "";
+    var tabs = [["team","Команда"], ["activity","Активность"]];
+    return h`<div class="finance-tabs">${tabs.map(function(t){
+      return h`<a href="#/${t[0]}" class="finance-tab ${active===t[0]?'active':''}">${t[1]}</a>`;
+    }).join("")}</div>`;
+  }
   function statusPill(status){ return h`<span class="pill ${STATUS_PILL[status]}">${STATUS_LABEL[status]}</span>`; }
   // Статус, который прислал c-lector.ru — показываем его текстом как есть (там свои
   // формулировки), просто подбираем цвет пилюли по ключевым словам.
@@ -3946,7 +3981,9 @@
       return {m:m, today:today, week:week};
     });
     rows.sort(function(a,b){ return b.week-a.week; });
-    return h`<div class="row-gap">
+    return h`
+      ${teamTabs('activity')}
+      <div class="row-gap">
       <div class="card card-pad">
         <div class="section-title">Активность команды</div>
         <div class="helptext" style="margin-bottom:10px;">Время считается, пока вкладка приложения открыта и видна на экране (свёрнутое или фоновое окно не считается). «Последний раз был» — по любому обращению к приложению.</div>
@@ -3983,6 +4020,7 @@
     // карточка на всю ширину раздела — колонкам, включая «Роль», достаточно
     // места без горизонтальной прокрутки.
     return h`
+      ${teamTabs('team')}
       <div class="row-gap">
         <div class="card card-pad">
           <div class="section-title">Сотрудники, вошедшие в систему</div>
@@ -4473,6 +4511,7 @@
           <div class="chip-toggle"><label><input type="checkbox" data-registry-filter-checkbox="showPaid" ${rf.showPaid?'checked':''}> Показывать оплаченные</label></div>
           ${filtersActive ? h`<a href="#" data-action="clear-registry-filter" style="font-size:12px;">сбросить</a>` : ""}
           <button class="btn btn-sm" data-action="registry-export" ${all.length===0?'disabled':''}>Экспорт в Excel${filtersActive?' (весь реестр)':''}</button>
+          <button class="btn btn-sm btn-ghost" data-action="registry-backup" ${all.length===0?'disabled':''} title="Полная копия всех данных реестра в файл (на случай сбоя) — не то же самое, что «Экспорт в Excel»">Сохранить резервную копию</button>
           <span class="muted" style="margin-left:auto;">${groups.length} из ${allGroups.length} счетов${(!rf.showPaid && hiddenPaidCount>0) ? h` <span title="Снята галочка «Показывать оплаченные»">(скрыто оплаченных вложений: ${hiddenPaidCount})</span>` : ""}</span>
         </div>
         <div class="card">
@@ -4547,7 +4586,12 @@
   // куплено, известно только из его последующего отчёта. Две ленты фактов без
   // формального согласования (по решению Антона): "Выдачи" и "Расходы" —
   // баланс по каждому прорабу приложение считает само (см. viewCashExpenses).
-  var CASH_EXPENSE_CATEGORY_LABEL = { materials: "Материал", other: "Другое" };
+  // 0.4.2 (по просьбе Антона, п.3): категория "работа" ("crew") — рядом с
+  // "materials"/"other". По умолчанию при создании расхода стоит "Материал"
+  // (как и раньше — см. форму ниже), но теперь можно переключить на "Работа",
+  // и такой расход подтянется к пункту чек-листа "Бригада" в карточке заявки
+  // (см. milestoneRow "crew" ниже — тот же приём, что и у "Материал"/"materials").
+  var CASH_EXPENSE_CATEGORY_LABEL = { materials: "Материал", crew: "Работа", other: "Другое" };
   function distinctCashPersons(){
     var set = {};
     (state.cashAdvances||[]).forEach(function(a){ if(a.person) set[a.person]=true; });
@@ -4601,6 +4645,92 @@
     if(pct==null) return 0; // доля этой заявки в общем счёте ещё не указана
     return full*pct/100;
   }
+
+  /* ===== 0.4.2 (по просьбе Антона, п.4-5): «Учтено в затратах» у выдач наличных ===== */
+  // Отдельная колонка у "Выдач" — сколько из выданной наличными суммы вообще
+  // считать затратами компании (а не просто движением денег прорабу на руки).
+  // По умолчанию (способ не выбран) — 0: деньги выданы, но пока не считаются
+  // затратами. Если способ выбран — считается "по-грязному" (гросс-ап от
+  // суммы выдачи), а НЕ наценкой сверху, как у счетов (см. invoiceApplyVatTax
+  // выше — та формула для СЧЕТОВ, здесь сознательно другая, по прямому
+  // примеру Антона: выдано 100 000 ₸, ставка 30% -> 100000/(1-0.3)=142 857,
+  // а не 100000*1.3=130 000).
+  var CASH_ACCOUNTED_BASIS_LABEL = { regular: "Полная сумма (без наценки)", simplified: "Упрощёнка (+20%)", cash: "Наличный расчёт (+30%)" };
+  var CASH_ACCOUNTED_BASIS_RATE = { regular: 0, simplified: 0.20, cash: 0.30 };
+  function cashAdvanceCustomPct(a){
+    var p = a && a.accounted_custom_pct;
+    if(p==null || p==="") return null;
+    var n = Number(p);
+    return isFinite(n) ? n : null;
+  }
+  function cashAdvanceAccountedRate(a){
+    if(!a || !a.accounted_basis) return null; // "не учитывать" (см. cashAdvanceAccounted)
+    if(a.accounted_basis==="custom"){
+      var pct = cashAdvanceCustomPct(a);
+      return pct!=null ? pct/100 : null;
+    }
+    return CASH_ACCOUNTED_BASIS_RATE.hasOwnProperty(a.accounted_basis) ? CASH_ACCOUNTED_BASIS_RATE[a.accounted_basis] : null;
+  }
+  // "Учтено в затратах" самой выдачи — 0, пока способ не выбран; иначе
+  // гросс-ап суммы выдачи по ставке (см. выше). rate>=1 математически не имеет
+  // смысла (деление на 0 или в минус) — считаем как "не указано".
+  function cashAdvanceAccounted(a){
+    var amount = Number(a && a.amount) || 0;
+    var rate = cashAdvanceAccountedRate(a);
+    if(rate==null) return 0;
+    if(rate>=1) return null;
+    return amount / (1 - rate);
+  }
+  function cashAdvanceAccountedLabel(a){
+    if(!a || !a.accounted_basis) return "Не учитывать";
+    if(a.accounted_basis==="custom"){
+      var pct = cashAdvanceCustomPct(a);
+      return "Свой ("+(pct!=null?(pct+"%"):"не указано")+")";
+    }
+    return CASH_ACCOUNTED_BASIS_LABEL[a.accounted_basis] || a.accounted_basis;
+  }
+  function setCashAdvanceAccountedBasis(id, val){
+    if(!canEditRegistry()) return;
+    var a = (state.cashAdvances||[]).find(function(x){ return x.id===id; });
+    var patch = { accounted_basis: val || null };
+    // Смена способа на не-"свой" стирает ранее введённый свой процент — тем же
+    // приёмом, что и setInvoiceTaxBasis у счетов (взаимоисключающие поля).
+    if(val!=="custom") patch.accounted_custom_pct = null;
+    if(a) Object.assign(a, patch);
+    render();
+    sb.from("cash_advances").update(patch).eq("id", id).then(function(res){ if(res && res.error) alert("Не удалось сохранить: " + res.error.message); });
+  }
+  function setCashAdvanceAccountedCustomPct(id, val){
+    if(!canEditRegistry()) return;
+    var pct = val==="" ? null : Number(val);
+    if(pct!=null && !isFinite(pct)) return;
+    var a = (state.cashAdvances||[]).find(function(x){ return x.id===id; });
+    if(a) a.accounted_custom_pct = pct;
+    render();
+    sb.from("cash_advances").update({accounted_custom_pct: pct}).eq("id", id).then(function(res){ if(res && res.error) alert("Не удалось сохранить: " + res.error.message); });
+  }
+  // 0.4.2, п.5: та же ставка, что и у выдачи этому же человеку, применяется и
+  // к его наличным РАСХОДАМ при подсчёте "Затраты по заявке" — расходы не
+  // привязаны к конкретной выдаче (person — свободный текст), поэтому берём
+  // ставку с последней (по дате) выдачи ЭТОГО человека, у которой способ вообще
+  // выбран. Если ни у одной его выдачи способ не указан — расход считается как
+  // есть, без наценки (тот же смысл "не учитывать", что и у самой выдачи).
+  // Пример Антона: у Стефановича стоит "Нал. 30%" — материал за 1000 ₸ из этих
+  // денег разносится в заявку как 1000/(1-0.3)=1429 ₸.
+  function personAccountedRate(person){
+    if(!person) return null;
+    var rows = (state.cashAdvances||[]).filter(function(a){ return a.person===person && a.accounted_basis; });
+    if(!rows.length) return null;
+    rows.sort(function(a,b){ return (b.created_at||b.date||"").localeCompare(a.created_at||a.date||""); });
+    return cashAdvanceAccountedRate(rows[0]);
+  }
+  function cashExpenseAccounted(ce){
+    var raw = Number(ce && ce.amount) || 0;
+    var rate = personAccountedRate(ce && ce.person);
+    if(rate==null || rate>=1) return raw;
+    return raw / (1 - rate);
+  }
+
   // "Затраты по заявке" — сколько денег реально ушло на конкретную заявку:
   // сумма ОПЛАЧЕННЫХ счетов (любая категория — и «Бригада», и «Материал») плюс
   // сумма привязанных к заявке наличных расходов (тоже любая категория).
@@ -4620,7 +4750,13 @@
       return s + v;
     }, 0);
     var cashRows = cashExpensesFor(t);
-    var cashSum = cashRows.reduce(function(s,ce){ return s + (Number(ce.amount)||0); }, 0);
+    // 0.4.2 (по просьбе Антона, п.5): в затраты по заявке наличные расходы
+    // заносятся не "как потрачено", а с учётом ставки доп.налога того же
+    // прораба (см. cashExpenseAccounted/personAccountedRate выше) — если у
+    // прораба такая ставка не задана, cashExpenseAccounted вернёт сумму как
+    // есть, без наценки, так что для тех, у кого «Учтено в затратах» не
+    // включалось (item 4), поведение не меняется.
+    var cashSum = cashRows.reduce(function(s,ce){ return s + cashExpenseAccounted(ce); }, 0);
     return { invoiceSum: invoiceSum, cashSum: cashSum, total: invoiceSum + cashSum, invoiceCount: paidInvoices.length, cashCount: cashRows.length, missingAmountCount: missingAmountCount };
   }
   function addCashAdvance(data){
@@ -4719,7 +4855,7 @@
     if(!person || !description){ alert("Укажите наименование и кто потратил."); return false; }
     var qty = Number(data.qty) || 1;
     var unitCost = Number(data.unit_cost) || 0;
-    var category = data.category==="other" ? "other" : "materials";
+    var category = (data.category==="other" || data.category==="crew") ? data.category : "materials";
     var expTicketId = resolveTicketRef(data.ticket_ref);
     sb.from("cash_expenses").insert({
       date: data.date || new Date().toISOString().slice(0,10),
@@ -4788,7 +4924,11 @@
       var ticket = null, ticketAmbiguous = false;
       if(ticketTokens.length===1){ var tid = resolveTicketRef(ticketTokens[0]); if(tid) ticket = state.tickets.find(function(x){return x.id===tid;}); }
       else if(ticketTokens.length>1){ ticketAmbiguous = true; }
-      var qty = Number(get(row,"qty")) || 1;
+      // 0.4.2 (по просьбе Антона, п.2): было Number(...) — при вставке из Excel
+      // дробное количество приходит с запятой ("0,34"), а Number("0,34") это
+      // NaN, поэтому кол-во молча превращалось в 1. parseMoney() уже умеет
+      // разбирать и запятую, и точку (см. выше, "Цена" использует его же).
+      var qty = parseMoney(get(row,"qty")) || 1;
       var unitCost = parseMoney(get(row,"unit_cost"));
       return {
         description: get(row,"description") || "(без наименования)",
@@ -4810,7 +4950,7 @@
         description: p.description, qty: p.qty, unit_cost: p.unitCost, amount: p.amount,
         hotel_id: p.hotel ? p.hotel.id : null,
         ticket_id: p.ticket ? p.ticket.id : null,
-        category: category==="other" ? "other" : "materials",
+        category: (category==="other" || category==="crew") ? category : "materials",
         person: person, created_by: createdBy
       };
     });
@@ -4870,14 +5010,14 @@
           <div class="card card-pad">
             <div class="section-title">Выдачи</div>
             <div class="table-wrap"><table>
-              <thead><tr><th>Дата</th><th>Кому</th><th class="num">Сумма</th><th>Мотель</th><th>Комментарий</th><th style="text-align:center;">Выдано</th><th>Чек</th>${editable?'<th></th>':''}</tr></thead>
-              <tbody>${advances.length===0 ? h`<tr><td colspan="${editable?8:7}"><div class="empty-state"><b>Пока нет выдач</b>Выдали наличные — впишите ниже.</div></td></tr>` :
+              <thead><tr><th>Дата</th><th>Кому</th><th class="num">Сумма</th><th>Мотель</th><th>Комментарий</th><th>Учтено в затратах${infoTip("Сколько из выданной суммы считать реальной затратой компании. По умолчанию — «Не учитывать» (0): выдача сама по себе ещё не затрата. Если у прораба наличный/упрощённый расчёт, выберите способ — сумма пересчитается «по-грязному» (напр. нал. 30%: 100 000 ₸ выдачи → 142 857 ₸ учтено). Та же ставка потом применяется и к его расходам при разнесении по заявкам.")}</th><th style="text-align:center;">Выдано</th><th>Чек</th>${editable?'<th></th>':''}</tr></thead>
+              <tbody>${advances.length===0 ? h`<tr><td colspan="${editable?9:8}"><div class="empty-state"><b>Пока нет выдач</b>Выдали наличные — впишите ниже.</div></td></tr>` :
                 advanceGroups.map(function(g){
                   var groupKey = "adv:"+g.person;
                   var expanded = cashPersonExpanded(groupKey);
                   var sumGiven = g.rows.reduce(function(s,a){ return s+(Number(a.amount)||0); }, 0);
                   var header = h`<tr class="cash-person-divider" data-action="cash-person-toggle" data-key="${escapeHtml(groupKey)}" style="cursor:pointer;">
-                    <td colspan="${editable?8:7}"><button type="button" class="btn btn-ghost btn-sm registry-expand-btn" style="margin-right:6px;" title="${expanded?'Свернуть':'Показать выдачи'}">${expanded?'▾':'▸'}</button><b>${escapeHtml(g.person)}</b> <span class="muted">— ${g.rows.length} ${ruPlural(g.rows.length,['выдача','выдачи','выдач'])}, ${fmtSum(sumGiven)} ₸</span></td>
+                    <td colspan="${editable?9:8}"><button type="button" class="btn btn-ghost btn-sm registry-expand-btn" style="margin-right:6px;" title="${expanded?'Свернуть':'Показать выдачи'}">${expanded?'▾':'▸'}</button><b>${escapeHtml(g.person)}</b> <span class="muted">— ${g.rows.length} ${ruPlural(g.rows.length,['выдача','выдачи','выдач'])}, ${fmtSum(sumGiven)} ₸</span></td>
                   </tr>`;
                   var body = !expanded ? "" : g.rows.map(function(a){
                     var hotel = a.hotel_id ? hotelById(a.hotel_id) : null;
@@ -4887,6 +5027,17 @@
                       <td class="num mono">${fmtSum(a.amount)}</td>
                       <td class="muted">${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
                       <td class="muted">${escapeHtml(a.note||'')}</td>
+                      <td style="min-width:160px;">
+                        <select data-cash-advance-accounted-basis data-id="${a.id}" ${editable?'':'disabled'}>
+                          <option value="">Не учитывать</option>
+                          <option value="regular" ${a.accounted_basis==='regular'?'selected':''}>Полная сумма</option>
+                          <option value="simplified" ${a.accounted_basis==='simplified'?'selected':''}>Упрощёнка +20%</option>
+                          <option value="cash" ${a.accounted_basis==='cash'?'selected':''}>Нал. +30%</option>
+                          <option value="custom" ${a.accounted_basis==='custom'?'selected':''}>Свой %</option>
+                        </select>
+                        ${a.accounted_basis==='custom' ? h`<input type="number" data-cash-advance-accounted-custom-pct data-id="${a.id}" value="${a.accounted_custom_pct!=null?a.accounted_custom_pct:''}" placeholder="%" min="0" max="99" step="0.1" style="width:60px;margin-top:4px;" ${editable?'':'disabled'}>` : ''}
+                        ${a.accounted_basis ? h`<div class="mono muted" style="font-size:11.5px;margin-top:2px;">${fmtSum(cashAdvanceAccounted(a))} ₸</div>` : ''}
+                      </td>
                       <td style="text-align:center;"><input type="checkbox" data-action="cash-advance-confirm-toggle" data-id="${a.id}" data-val="${a.confirmed?'0':'1'}" ${a.confirmed?'checked':''} ${canConfirmCashAdvance()?'':'disabled'} title="${canConfirmCashAdvance()?'Отметить, что деньги фактически выданы':'Отмечать может только Администратор, Руководитель или Финансист'}"></td>
                       <td>${a.receipt_path ? h`<a href="#" data-action="cash-receipt-open" data-path="${escapeHtml(a.receipt_path)}" title="${escapeHtml(a.receipt_name||'')}">📎 чек</a>${editable?h` <a href="#" data-action="cash-receipt-delete" data-id="${a.id}" data-path="${escapeHtml(a.receipt_path)}" style="color:var(--crit);" title="Удалить чек">✕</a>`:''}` : (editable ? h`<label class="btn btn-ghost btn-sm" style="cursor:pointer;">Приложить<input type="file" data-cash-receipt-upload="${a.id}" accept="image/*,.pdf" style="display:none;"></label>` : '—')}</td>
                       ${editable?h`<td><a href="#" data-action="cash-advance-delete" data-id="${a.id}" style="color:var(--crit);">✕</a></td>`:''}
@@ -4929,7 +5080,7 @@
                       <td class="num mono">${fmtSum(e.amount)}</td>
                       <td class="muted" style="white-space:nowrap;">${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
                       <td class="mono" style="white-space:nowrap;">${tk ? h`<a href="#" data-open-ticket="${tk.id}">${escapeHtml(tk.external_ref||'')}</a>` : '—'}</td>
-                      <td style="white-space:nowrap;"><span class="pill ${e.category==='materials'?'pill-ok':'pill-neutral'}">${CASH_EXPENSE_CATEGORY_LABEL[e.category]||e.category}</span></td>
+                      <td style="white-space:nowrap;"><span class="pill ${e.category==='materials'?'pill-ok':(e.category==='crew'?'pill-accent':'pill-neutral')}">${CASH_EXPENSE_CATEGORY_LABEL[e.category]||e.category}</span></td>
                       <td class="muted" style="white-space:nowrap;">${escapeHtml(e.person)}</td>
                       ${editable?h`<td><a href="#" data-action="cash-expense-delete" data-id="${e.id}" style="color:var(--crit);">✕</a></td>`:''}
                     </tr>`;
@@ -4945,7 +5096,7 @@
               <div class="field"><label>Цена за ед.</label><input type="number" name="unit_cost" min="0" step="0.01" required></div>
               <div class="field"><label>Мотель</label><select name="hotel_id"><option value="">—</option>${hotelOptions}</select></div>
               <div class="field"><label>Заявка (необязательно)</label><input type="text" name="ticket_ref" list="cash-expense-tickets" placeholder="№ c-lector"></div>
-              <div class="field"><label>Категория</label><select name="category"><option value="materials">Материал</option><option value="other">Другое</option></select></div>
+              <div class="field"><label>Категория</label><select name="category"><option value="materials">Материал</option><option value="crew">Работа</option><option value="other">Другое</option></select></div>
               <div class="field"><label>Кто потратил</label><input type="text" name="person" list="cash-persons" placeholder="Имя прораба" required></div>
               <button class="btn btn-primary" type="submit">Добавить</button>
             </form>` : ''}
@@ -4994,7 +5145,7 @@
         }).join("")}
       </div>
       <div class="field-row" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr));margin-top:6px;">
-        <div class="field"><label>Категория (для всех строк)</label><select id="cash-import-category"><option value="materials">Материал</option><option value="other">Другое</option></select></div>
+        <div class="field"><label>Категория (для всех строк)</label><select id="cash-import-category"><option value="materials">Материал</option><option value="crew">Работа</option><option value="other">Другое</option></select></div>
         <div class="field"><label>Кто потратил (для всех строк)</label><input type="text" id="cash-import-person" list="cash-persons" placeholder="Имя прораба" required></div>
       </div>
       <div class="table-wrap" style="max-height:360px;overflow-y:auto;"><table>
@@ -5538,6 +5689,13 @@
               var materialsFiles = invoicesFor(t, "materials").length;
               var materialsCash = cashExpensesFor(t, "materials");
               var materialsCashTotal = materialsCash.reduce(function(sum,ce){ return sum + (Number(ce.amount)||0); }, 0);
+              // 0.4.2 (по просьбе Антона, п.3): наличные расходы категории "Работа"
+              // (см. CASH_EXPENSE_CATEGORY_LABEL) — просто информационная сумма
+              // в пункте "Бригада", тем же приёмом, что и у "Материал" ниже. В
+              // отличие от "Материала" это НЕ влияет на готовность пункта
+              // (crewDone определяется назначением исполнителя, не оплатой).
+              var crewCash = cashExpensesFor(t, "crew");
+              var crewCashTotal = crewCash.reduce(function(sum,ce){ return sum + (Number(ce.amount)||0); }, 0);
               var fmtCashSum = function(n){ return (Number(n)||0).toLocaleString("ru-RU", {maximumFractionDigits:2}); };
               var actPhotoCount = (state.photos||[]).filter(function(p){return p.ticket_id===t.id && p.category==="act";}).length;
               // "Бригада"/"Материал" (версия 0.2.2) больше не переключаются кликом
@@ -5603,6 +5761,7 @@
                     <button class="btn btn-sm" data-action="reassign-free" data-id="${t.id}">Сменить</button>
                   </div>` : ""}
                   ${t.assigned_to ? h`<div class="actions-row" style="margin-bottom:8px;"><a class="btn btn-sm" href="#/workorder/${t.id}">Наряд-задание</a></div>` : ""}
+                  ${crewCash.length ? h`<div class="helptext" style="margin-bottom:8px;">Оплачено наличными (Работа): ${fmtCashSum(crewCashTotal)} (${crewCash.length} ${ruPlural(crewCash.length,["запись","записи","записей"])}) — подтянуто автоматически из «Наличные расходы».</div>` : ""}
                   ${milestoneInvoiceList(t, "crew")}`
               })}
               ${milestoneRow({
@@ -5726,7 +5885,7 @@
             if(!cost.invoiceCount && !cost.cashCount) return "";
             var fmt = function(n){ return (Number(n)||0).toLocaleString("ru-RU", {maximumFractionDigits:2}); };
             return h`<div>
-              <div class="section-title">Затраты по заявке ${infoTip("Сумма оплаченных счетов (Бригада + Материал) и наличных расходов, привязанных к этой заявке. Неоплаченные счета сюда не входят — деньги ещё не потрачены.")}</div>
+              <div class="section-title">Затраты по заявке ${infoTip("Сумма оплаченных счетов (Бригада + Материал) и наличных расходов, привязанных к этой заявке. Неоплаченные счета сюда не входят — деньги ещё не потрачены. Если прорабу, оплатившему расход, в «Финансы → Наличные расходы → Выдачи» указан способ учёта («Учтено в затратах»), сумма расхода досчитывается с наценкой по его ставке (напр. нал. 30%: 1000 ₸ расхода войдёт сюда как 1429 ₸) — раздел «Наличные расходы» при этом продолжает показывать сумму как есть, реально оплаченную.")}</div>
               <div class="kv"><span class="k">Итого потрачено</span><span class="v mono" style="font-weight:700;">${fmt(cost.total)}</span></div>
               ${cost.invoiceCount ? h`<div class="kv"><span class="k">из них по счетам</span><span class="v mono">${fmt(cost.invoiceSum)} (${cost.invoiceCount})</span></div>` : ""}
               ${cost.cashCount ? h`<div class="kv"><span class="k">из них наличными</span><span class="v mono">${fmt(cost.cashSum)} (${cost.cashCount})</span></div>` : ""}
@@ -6026,13 +6185,17 @@
     // 0.3.6 (по просьбе Антона, п.1): «Карта» больше не отдельный пункт меню —
     // сама карта переехала на «Дашборд» (см. viewDashboard), чтобы и цифры, и
     // карта были видны на одном экране, без переключения раздела.
+    // 0.4.2 (по просьбе Антона, п.6): «Активность» была отдельным пунктом
+    // меню — перенесена внутрь «Команды» как вкладка (см. teamTabs()), поэтому
+    // здесь у "team" теперь есть extraActiveViews (пункт меню подсвечивается
+    // активным и когда открыта сама «Активность» — иначе при переходе на
+    // вкладку «Активность» пункт «Команда» в сайдбаре выглядел бы неактивным).
+    // Видимость вкладки «Активность» по-прежнему только Администратору —
+    // ограничение осталось ровно там же, в navAllowed('activity') (0.3.7, п.4).
     var navItems = [
       ["dashboard","Дашборд"], ["tickets","Заявки",["import"]],
       ["systemdefects","Системный брак"],
-      ["team","Команда"], ["crews","Бригады"], ["parts","Склад ЗИП"], ["registry","Финансы",["cashexpenses"]], ["hotels","Отели"],
-      // 0.3.7 (по просьбе Антона, п.4) — только для Администратора (см.
-      // navAllowed выше), поэтому у остальных ролей просто не пройдёт фильтр.
-      ["activity","Активность"]
+      ["team","Команда",["activity"]], ["crews","Бригады"], ["parts","Склад ЗИП"], ["registry","Финансы",["cashexpenses"]], ["hotels","Отели"]
     ].filter(function(x){ return navAllowed(x[0]); });
     // 0.3.9: затемнение позади выезжающего на телефоне сайдбара — рендерится
     // всегда (как и сам сайдбар), видимость целиком на CSS (.sidebar-scrim.open,
@@ -6285,6 +6448,7 @@
         return;
       }
       if(action==="registry-export") return exportRegistryExcel();
+      if(action==="registry-backup") return backupRegistryJson();
       if(action==="tickets-export") return exportTicketsExcel();
       if(action==="toggle-status-filter"){
         var sv = actionEl.getAttribute("data-value");
@@ -6405,6 +6569,8 @@
     if(e.target.matches("[data-invoice-tax-custom-amt]")){ setInvoiceCustomTaxAmount(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.matches("[data-alloc-percent]")){ setInvoiceAllocPercent(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.matches("[data-alloc-amount]")){ setInvoiceAllocAmount(e.target.getAttribute("data-id"), e.target.value); return; }
+    if(e.target.matches("[data-cash-advance-accounted-basis]")){ setCashAdvanceAccountedBasis(e.target.getAttribute("data-id"), e.target.value); return; }
+    if(e.target.matches("[data-cash-advance-accounted-custom-pct]")){ setCashAdvanceAccountedCustomPct(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.id==="import-file"){ var f=e.target.files&&e.target.files[0]; if(f) loadImportFile(f); return; }
     if(e.target.matches("[data-cash-receipt-upload]")){ var crf=e.target.files&&e.target.files[0]; if(crf) uploadCashReceipt(e.target.getAttribute("data-cash-receipt-upload"), crf); return; }
     if(e.target.matches("[data-import-map]")){ state.importMapping[e.target.getAttribute("data-import-map")]=e.target.value; render(); return; }
