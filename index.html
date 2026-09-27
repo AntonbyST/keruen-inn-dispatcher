@@ -592,18 +592,64 @@
   // реально закрывает вход на сайт, а не просто убирает из списков — см.
   // проверку "role===\"customer\" && active===false" в render() ниже.
   var ROLE_LABEL = {dispatcher:"Администратор", specialist:"Гл. инженер", head:"Руководитель", warehouse:"Снабжение", finance:"Финансист", operator:"Диспетчер", customer:"Заказчик", pending:"Ожидает назначения роли"};
-  // Какие разделы меню видит каждая роль. null = видит всё. Это ограничение
-  // только интерфейса (чтобы не путать людей лишними разделами) — на уровне
-  // базы данных (RLS) доступ по-прежнему открыт всем вошедшим, поэтому это
-  // не защита данных, а удобство навигации.
+  // 0.4.4 (по просьбе Антона): «Администратор может быть только один — это
+  // Антон, и он устанавливает права для всех». До этой версии права были
+  // ролевой моделью (ROLE_NAV) + необязательными персональными добавками
+  // (extra_views), причём владелец не мог ОТОБРАТЬ то, что уже даёт роль. Со
+  // 0.4.4 модель другая:
+  //  - "Администратор" как роль больше нельзя назначить никому, кроме самого
+  //    владельца (см. фильтр Object.keys(ROLE_LABEL) в viewTeam ниже) — на
+  //    практике им и так пользовался только Антон, но теперь это гарантия;
+  //  - extra_views — уже НЕ добавка сверх роли, а ПОЛНЫЙ и единственный
+  //    источник истины о том, какие разделы видит человек. Роль лишь задаёт
+  //    РАЗУМНЫЕ ЗНАЧЕНИЯ ПО УМОЛЧАНИЮ, которые подставляются в extra_views в
+  //    момент смены роли (см. reseedPermissionsForRole ниже и обработчик
+  //    "[data-profile-role]"), а дальше окно «Права» может свободными
+  //    галочками добавить ИЛИ УБРАТЬ любой раздел — включая те, что роль дала
+  //    бы по умолчанию. То же для can_edit_registry/can_delete_ticket.
+  // ROLE_NAV сохранён под тем же именем — это по-прежнему таблица "роль →
+  // список разделов", но теперь это только ИСТОЧНИК ЗНАЧЕНИЙ ПО УМОЛЧАНИЮ для
+  // reseed при смене роли, а не то, что проверяет navAllowed() (тот теперь
+  // смотрит только на extra_views — см. ниже).
+  //
+  // Полный список разделов, которые видны в окне «Права» (0.2.10, расширено в
+  // 0.4.4 — теперь это ПОЛНЫЙ список галочек на всё, включая «Активность»,
+  // а не только "добавки сверх роли"). Ключ — тот же view, что и в
+  // ROLE_NAV/titleMap, подпись — то, что видит владелец в чекбоксах.
+  var PERMISSION_VIEWS = [
+    ["dashboard","Дашборд"], ["tickets","Заявки"], ["hotels","Отели"],
+    ["team","Команда"], ["parts","Склад ЗИП"], ["import","Импорт из c-lector"],
+    ["registry","Реестр платежей"], ["cashexpenses","Наличные расходы"],
+    ["overhead","Накладные расходы"],
+    ["crews","Бригады"], ["systemdefects","Системный брак"],
+    // 0.3.7, п.4: «Активность» раньше проверялась отдельным хардкодом
+    // (role==="dispatcher"), в обход extra_views — с 0.4.4 это обычный пункт
+    // списка прав, просто по умолчанию его получает роль Администратора (см.
+    // ROLE_NAV.dispatcher ниже), а не Руководителя, хотя у обоих раньше было
+    // ROLE_NAV===null ("видит всё").
+    ["activity","Активность"]
+  ];
+  // Полный список ключей разделов — нужен, чтобы выразить явным массивом то,
+  // что раньше означало ROLE_NAV[role]===null ("роль видит всё"): extra_views
+  // хранится как настоящая колонка text[] в Supabase, а null туда не запишешь.
+  var ALL_VIEWS = PERMISSION_VIEWS.map(function(v){ return v[0]; });
+  // Какие разделы меню роль даёт ПО УМОЛЧАНИЮ (используется только при смене
+  // роли для reseed extra_views — см. выше и reseedPermissionsForRole). Это
+  // больше НЕ ограничение доступа само по себе.
   // «Команда» доступна всем ролям без исключения (кроме «Заказчика», см. ниже):
   // это единственное место, где назначается роль, и по умолчанию любой новый
   // человек становится «Главный инженер» (specialist) — если убрать отсюда
   // «Команду», человек, первым вошедший в систему, никогда не сможет сам себе
   // (или другим) назначить роль диспетчера/руководителя.
   var ROLE_NAV = {
-    dispatcher: null,
-    head: null,
+    // 0.4.4: раньше null ("видит всё", включая «Активность» через отдельный
+    // хардкод в navAllowed). Теперь явный ALL_VIEWS — единственная роль,
+    // которой по умолчанию открыта «Активность».
+    dispatcher: ALL_VIEWS,
+    // 0.4.4: раньше null, как и у dispatcher, но «Активность» Руководителю
+    // никогда не открывалась (отдельная явная проверка в старом navAllowed) —
+    // сохраняем это же поведение по умолчанию явным ALL_VIEWS минус "activity".
+    head: ALL_VIEWS.filter(function(v){ return v!=="activity"; }),
     // «Заказчик» (0.2.8, расширено в 0.2.9) — внешний человек со стороны
     // отеля/клиента, видит «Дашборд», «Заявки», «Карту» и «Отели» (по просьбе
     // Антона) и намеренно НЕ видит «Команду»: ни к чему показывать внешнему
@@ -629,8 +675,8 @@
     // доступа к самим заявкам эта роль не смогла бы этого делать. "registry"
     // тоже добавлен Снабжению (версия 0.2.2) — чтобы видеть, оплачены ли уже
     // прикреплённые ими счета, но только для просмотра: сама галочка "Оплачено"
-    // рисуется disabled для всех ролей, кроме перечисленных в canEditRegistry()
-    // ниже (Администратор/Руководитель/Финансист), независимо от ROLE_NAV.
+    // рисуется disabled для всех ролей, кроме тех, у кого стоит
+    // can_edit_registry (см. canEditRegistry() ниже).
     specialist: ["dashboard","tickets","team","systemdefects"],
     // "cashexpenses" (0.2.4) добавлен везде, где уже был "registry" — оба живут
     // под одним пунктом меню «Финансы» (см. navItems/navItem ниже), так что
@@ -645,23 +691,30 @@
     finance: ["dashboard","registry","cashexpenses","overhead","team"],
     // «Диспетчер» (0.2.10) — новая роль без своего готового набора разделов:
     // по просьбе Антона она пустая по умолчанию, а какие разделы видит
-    // конкретный диспетчер, он расставляет персонально через «Права» в
-    // «Команде» (см. PERMISSION_VIEWS/extra_views ниже) — то есть для этой
-    // роли ROLE_NAV НЕ задаёт вообще ничего, всё решают галочки конкретного
-    // человека.
+    // конкретный диспетчер, владелец расставляет персонально через «Права» в
+    // «Команде» (см. PERMISSION_VIEWS/extra_views выше).
     operator: []
   };
-  // Полный список разделов, которые можно выдать отдельной галочкой сверх
-  // того, что уже даёт роль (0.2.10, окно «Права» в «Команде» — см.
-  // openPermissionsModal). Ключ — тот же view, что и в ROLE_NAV/titleMap,
-  // подпись — то, что видит владелец в чекбоксах.
-  var PERMISSION_VIEWS = [
-    ["dashboard","Дашборд"], ["tickets","Заявки"], ["hotels","Отели"],
-    ["team","Команда"], ["parts","Склад ЗИП"], ["import","Импорт из c-lector"],
-    ["registry","Реестр платежей"], ["cashexpenses","Наличные расходы"],
-    ["overhead","Накладные расходы"],
-    ["crews","Бригады"], ["systemdefects","Системный брак"]
-  ];
+  // Значения по умолчанию для can_edit_registry/can_delete_ticket при смене
+  // роли (0.4.4) — раньше это были хардкоженные проверки роли прямо внутри
+  // canEditRegistry()/canDeleteTicket(), теперь это только "стартовые"
+  // значения персональной галочки, которую окно «Права» может свободно менять
+  // в любую сторону для любой роли.
+  var ROLE_DEFAULT_EDIT_REGISTRY = {dispatcher:true, head:true, finance:true};
+  var ROLE_DEFAULT_DELETE_TICKET = {dispatcher:true, head:true};
+  // Пересчитать "стартовый" набор прав для роли — используется при смене роли
+  // человека (см. обработчик "[data-profile-role]" ниже), чтобы у только что
+  // назначенной роли сразу были разумные значения по умолчанию, которые
+  // владелец при желании тут же скорректирует в «Правах». ВАЖНО: это ЗАМЕНА
+  // (reseed), а не добавление — старые персональные галочки человека при смене
+  // роли сбрасываются на дефолты новой роли, а не сохраняются вперемешку.
+  function reseedPermissionsForRole(role){
+    return {
+      extra_views: (ROLE_NAV.hasOwnProperty(role) ? ROLE_NAV[role] : []).slice(),
+      can_edit_registry: !!ROLE_DEFAULT_EDIT_REGISTRY[role],
+      can_delete_ticket: !!ROLE_DEFAULT_DELETE_TICKET[role]
+    };
+  }
   function navAllowed(view){
     // Владелец (см. isOwner() ниже) всегда может дойти до «Команды», даже если
     // его собственная роль почему-то "pending" (пустой ROLE_NAV.pending) —
@@ -669,49 +722,35 @@
     // назначаются роли, было бы недостижимо для того самого человека, который
     // один и может там что-то менять. Специально НЕ делаем isOwner() общим
     // пропуском на ВСЕ разделы — это иначе сделало бы невозможной проверку
-    // самих ограничений ROLE_NAV на тестах, которые временно переключают роль
-    // именно на аккаунте владельца (см. test_standalone.js).
+    // самих ограничений на тестах, которые временно переключают роль именно на
+    // аккаунте владельца (см. test_standalone.js).
     if(view==="team" && isOwner()) return true;
-    // 0.3.7 (по просьбе Антона, п.4): «Активность» — статистика по команде
-    // (кто сколько времени провёл на сайте) видна СТРОГО Администратору
-    // (role==="dispatcher"), а не любой роли с ROLE_NAV===null — иначе
-    // «Руководитель» (head), у которого тоже ROLE_NAV.head===null, получил бы
-    // её автоматически, хотя Антон просил только для Администратора. Поэтому
-    // это отдельная явная проверка, а не часть общего ROLE_NAV/PERMISSION_VIEWS
-    // механизма (extra_views тоже не даёт этот раздел — см. return ниже).
-    if(view==="activity") return !!(state.me && state.me.role==="dispatcher");
-    var role = state.me && state.me.role;
-    var allowed = ROLE_NAV.hasOwnProperty(role) ? ROLE_NAV[role] : null;
-    if(allowed===null) return true;
-    if(allowed.indexOf(view) > -1) return true;
-    // Персональные права (0.2.10) — окно «Права» в «Команде» ДОБАВЛЯЕТ разделы
-    // сверх того, что уже даёт роль (а не заменяет их), поэтому если роль уже
-    // разрешила раздел — сюда даже заходить не нужно (see выше), а если нет —
-    // проверяем персональный список extra_views этого конкретного профиля.
+    // 0.4.4: extra_views теперь ЕДИНСТВЕННЫЙ источник истины (раньше — добавка
+    // сверх ROLE_NAV[role], с отдельным хардкодом для "activity"). Роль сама
+    // по себе больше ничего не открывает напрямую — она лишь подставляет
+    // значения по умолчанию в extra_views при смене роли (см.
+    // reseedPermissionsForRole выше).
     var extra = (state.me && state.me.extra_views) || [];
     return extra.indexOf(view) > -1;
   }
   function firstAllowedView(){
-    var role = state.me && state.me.role;
-    var allowed = ROLE_NAV.hasOwnProperty(role) ? ROLE_NAV[role] : null;
-    if(allowed===null) return "dashboard";
     var extra = (state.me && state.me.extra_views) || [];
-    var combined = allowed.concat(extra);
-    if(!combined.length) return "dashboard";
-    return combined[0];
+    for(var i=0;i<PERMISSION_VIEWS.length;i++){
+      var v = PERMISSION_VIEWS[i][0];
+      if(v==="activity") continue; // «Активность» не самостоятельный раздел-посадка
+      if(extra.indexOf(v) > -1) return v;
+    }
+    return "dashboard";
   }
   // Право редактировать «Финансы» — и «Реестр платежей» (галочка «Оплачено»,
-  // версия 0.2.2, п.3), и «Наличные расходы» (версия 0.2.4: выдачи/расходы) —
-  // по умолчанию у Администратора, Руководителя и Финансиста. С 0.2.10 это
-  // право можно ТАКЖЕ выдать отдельной галочкой любому конкретному человеку
-  // через «Права» в «Команде» (state.me.can_edit_registry), независимо от
-  // роли — как и остальной ROLE_NAV/isOwner выше, это ограничение уровня
-  // интерфейса, а не политика Supabase: у остальных ролей просто не
-  // показывается доступ к разделу «Финансы» в меню, а элементы управления
-  // рисуются как disabled на случай прямого перехода по ссылке.
+  // версия 0.2.2, п.3), и «Наличные расходы» (версия 0.2.4: выдачи/расходы).
+  // 0.4.4: раньше это было "роль ИЛИ галочка" (Администратор/Руководитель/
+  // Финансист получали право безусловно) — теперь это ЧИСТО персональная
+  // галочка can_edit_registry, которую окно «Права» выставляет свободно для
+  // любой роли; при смене роли она лишь ПОДСТАВЛЯЕТСЯ по умолчанию (см.
+  // ROLE_DEFAULT_EDIT_REGISTRY/reseedPermissionsForRole выше), а дальше
+  // владелец может её снять даже для этих ролей.
   function canEditRegistry(){
-    var role = state.me && state.me.role;
-    if(role==="dispatcher" || role==="head" || role==="finance") return true;
     return !!(state.me && state.me.can_edit_registry);
   }
   // 0.3.2 (по просьбе Антона, п.3): галочку "Выдано" в «Выдачах» может
@@ -724,18 +763,22 @@
   // когда заявку удалили в c-lector и её уже не нужно держать в системе, или
   // завели по ошибке). Удаление необратимо и каскадом стирает всё, что
   // привязано к заявке (счета, фото, журнал — см. "on delete cascade" в
-  // supabase_schema.sql), поэтому доступно только Администратору/Руководителю,
-  // как и самые чувствительные операции в «Команде»/«Отелях».
+  // supabase_schema.sql).
+  // 0.4.4: как и canEditRegistry() выше, раньше это была проверка роли
+  // (Администратор/Руководитель), теперь — чистая персональная галочка
+  // can_delete_ticket, подставляемая по умолчанию при смене роли (см.
+  // ROLE_DEFAULT_DELETE_TICKET выше), которую владелец может выставить/снять
+  // независимо от роли через окно «Права».
   function canDeleteTicket(){
-    var role = state.me && state.me.role;
-    return role==="dispatcher" || role==="head";
+    return !!(state.me && state.me.can_delete_ticket);
   }
   // Единственный email, которому в разделе «Команда» доступны изменение
-  // роли/зон, включение/отключение и удаление сотрудника — по просьбе Антона
-  // это должен делать только он, а не любой, кто открыл «Команду». Как и
-  // ROLE_NAV выше, это ограничение только интерфейса: RLS в базе остаётся
-  // открытой для всех вошедших, так что это подсказка/удобство, а не
-  // настоящая защита от технически подкованного сотрудника.
+  // роли/зон, включение/отключение и удаление сотрудника, а также окно
+  // «Права» — по просьбе Антона (0.4.4: явно закреплено — администратор может
+  // быть только один, и это он) это должен делать только он, а не любой, кто
+  // открыл «Команду». Как и ROLE_NAV выше, это ограничение только интерфейса:
+  // RLS в базе остаётся открытой для всех вошедших, так что это подсказка/
+  // удобство, а не настоящая защита от технически подкованного сотрудника.
   var OWNER_EMAIL = "anton.byst@gmail.com";
   function isOwner(){ return !!(state.me && state.me.email && state.me.email.toLowerCase() === OWNER_EMAIL.toLowerCase()); }
   // Реестр платежей — по просьбе Антона упрощён до простого списка прикреплённых
@@ -4055,12 +4098,21 @@
             <tbody>${state.profiles.map(function(m){
               var isSelf = state.me && m.id===state.me.id;
               var chatIdFilled = !!(m.telegram_chat_id && String(m.telegram_chat_id).trim());
+              // 0.4.4: «Администратор» может быть только один — сам владелец
+              // (см. isOwner()/OWNER_EMAIL выше). Поэтому эта роль убрана из
+              // выпадающего списка для всех, КРОМЕ строки самого владельца —
+              // назначить её больше никому нельзя. Если у кого-то она уже
+              // почему-то стояла (старые данные до 0.4.4), защитный вариант
+              // ниже не даёт списку "потерять" текущее значение, но при первой
+              // же смене роли human'ом она пропадёт из списка выбора.
+              var rowIsOwner = m.email && m.email.toLowerCase()===OWNER_EMAIL.toLowerCase();
+              var roleOptions = Object.keys(ROLE_LABEL).filter(function(r){ return rowIsOwner || r!=="dispatcher" || m.role==="dispatcher"; });
               return h`<tr>
                 <td class="ttl">${escapeHtml(m.name||"—")}</td>
                 <td class="muted">${escapeHtml(m.email)}</td>
                 <td>
                   ${owner ? h`<select data-profile-role="${m.id}">
-                    ${Object.keys(ROLE_LABEL).map(function(r){return h`<option value="${r}" ${m.role===r?'selected':''}>${ROLE_LABEL[r]}</option>`;}).join("")}
+                    ${roleOptions.map(function(r){return h`<option value="${r}" ${m.role===r?'selected':''}>${ROLE_LABEL[r]}</option>`;}).join("")}
                   </select>` : escapeHtml(ROLE_LABEL[m.role]||m.role)}
                 </td>
                 <td>${owner
@@ -4079,7 +4131,7 @@
                   : ((m.telegram_notify_tickets||m.telegram_notify_overdue_payments) && chatIdFilled ? h`<span class="pill pill-ok">включены</span>` : h`<span class="muted">—</span>`)}
                 </td>
                 ${owner ? h`<td style="white-space:nowrap;">
-                  <button class="btn btn-sm btn-ghost" data-action="edit-permissions" data-id="${m.id}" title="Разделы и права, которые ДОБАВЛЯЮТСЯ этому человеку сверх того, что уже даёт роль">Права</button>
+                  <button class="btn btn-sm btn-ghost" data-action="edit-permissions" data-id="${m.id}" title="Полный список разделов и прав этого человека — можно свободно включать и выключать что угодно, даже то, что обычно даёт роль">Права</button>
                   ${isSelf?'':h`<button class="btn btn-sm btn-ghost btn-danger" data-action="profile-delete" data-id="${m.id}" data-label="${escapeHtml(m.name||m.email)}">Удалить</button>`}
                 </td>` : ''}
               </tr>`;
@@ -6196,35 +6248,39 @@
     document.getElementById("me-signout").addEventListener("click", function(){ closeModal(); signOut(); });
   }
 
-  // Окно «Права» в «Команде» (0.2.10, по просьбе Антона) — владелец службы
-  // может для КОНКРЕТНОГО человека галочками добавить разделы сверх того, что
-  // уже даёт его роль (см. PERMISSION_VIEWS/navAllowed выше), плюс отдельно —
-  // право отмечать счета оплаченными («Оплачено» в «Реестре платежей» и
-  // «Наличные расходы», см. canEditRegistry). Роль при этом не трогаем —
-  // именно поэтому здесь нет отдельного select для роли, это окно только про
-  // ДОПОЛНИТЕЛЬНЫЕ, персональные права.
+  // Окно «Права» в «Команде» (0.2.10, полностью переработано в 0.4.4 по
+  // просьбе Антона: «администратор устанавливает права для всех, меню окна,
+  // галочки» — «полный список галочек на всё»). До 0.4.4 это было окно
+  // ДОБАВОК сверх роли: то, что уже давала роль, рисовалось галочкой
+  // checked+disabled и её нельзя было снять. Теперь это ПОЛНЫЙ, свободно
+  // редактируемый список — каждая галочка (и каждый раздел, и обе особые
+  // права) включается и выключается независимо от роли, включая то, что роль
+  // обычно даёт по умолчанию. Роль лишь ПОДСТАВЛЯЕТ стартовые значения при
+  // смене роли (см. reseedPermissionsForRole) — дальше это окно единственный
+  // источник истины, и сохраняет ровно тот набор, что здесь отмечен.
   function openPermissionsModal(userId){
     var m = state.profiles.find(function(p){ return p.id===userId; });
     if(!m) return;
     var extra = m.extra_views || [];
-    var roleAllowed = ROLE_NAV.hasOwnProperty(m.role) ? ROLE_NAV[m.role] : null;
     openModal(h`
       <div class="modal" data-stop style="width:560px;">
         <div class="modal-head"><h2>Права — ${escapeHtml(m.name||m.email)}</h2><button class="btn btn-ghost" data-close-modal>✕</button></div>
         <form id="permissions-form">
           <div class="modal-body">
-            <div class="helptext" style="margin-bottom:12px;">Роль «${escapeHtml(roleLabel(m.role))}»${roleAllowed===null?' уже даёт доступ ко всем разделам — галочки ниже ничего не добавят.':(roleAllowed&&roleAllowed.length?' уже даёт доступ к: '+roleAllowed.map(function(v){var f=PERMISSION_VIEWS.find(function(x){return x[0]===v;});return f?f[1]:v;}).join(", ")+'.':' пока не даёт доступа ни к одному разделу.')} Галочки ниже ДОБАВЛЯЮТ разделы именно этому человеку, не трогая роль и остальных.${m.role==="pending"?' Пока роль «Ожидает назначения роли» — человек не попадёт даже на «Дашборд», какие бы галочки здесь ни стояли: сначала смените роль (например, на «Диспетчер»).':''}</div>
+            <div class="helptext" style="margin-bottom:12px;">Роль «${escapeHtml(roleLabel(m.role))}» только подставляет эти галочки по умолчанию при смене роли — здесь можно свободно включить или выключить любой раздел и любое право для этого конкретного человека, независимо от роли.${m.role==="pending"?' Пока роль «Ожидает назначения роли» — человек не попадёт даже на «Дашборд», какие бы галочки здесь ни стояли: сначала смените роль.':''}</div>
             <div class="chip-toggle" style="gap:8px;">
               ${PERMISSION_VIEWS.map(function(v){
-                var alreadyByRole = roleAllowed===null || (roleAllowed && roleAllowed.indexOf(v[0])>-1);
-                var checked = alreadyByRole || extra.indexOf(v[0])>-1;
-                return h`<label title="${alreadyByRole?'Уже открыто ролью «'+escapeHtml(roleLabel(m.role))+'»':''}">
-                  <input type="checkbox" name="view_${v[0]}" ${checked?'checked':''} ${alreadyByRole?'disabled':''}> ${v[1]}
+                var checked = extra.indexOf(v[0])>-1;
+                return h`<label>
+                  <input type="checkbox" name="view_${v[0]}" ${checked?'checked':''}> ${v[1]}
                 </label>`;
               }).join("")}
             </div>
             <hr style="margin:14px 0;border:none;border-top:1px solid var(--line);">
-            <div class="chip-toggle"><label title="${(m.role==="dispatcher"||m.role==="head"||m.role==="finance")?'Уже даётся ролью «'+escapeHtml(roleLabel(m.role))+'»':''}"><input type="checkbox" name="editRegistry" ${(m.role==="dispatcher"||m.role==="head"||m.role==="finance")?'checked disabled':(m.can_edit_registry?'checked':'')}> Может отмечать счета оплаченными (Реестр платежей / Наличные расходы)</label></div>
+            <div class="chip-toggle" style="gap:8px;">
+              <label><input type="checkbox" name="editRegistry" ${m.can_edit_registry?'checked':''}> Может отмечать счета оплаченными (Реестр платежей / Наличные расходы)</label>
+              <label><input type="checkbox" name="deleteTicket" ${m.can_delete_ticket?'checked':''}> Может удалять заявки</label>
+            </div>
           </div>
           <div class="modal-foot"><button type="button" class="btn" data-close-modal>Отмена</button><button type="submit" class="btn btn-primary">Сохранить</button></div>
         </form>
@@ -6232,12 +6288,8 @@
     document.getElementById("permissions-form").addEventListener("submit", function(e){
       e.preventDefault();
       var fd = new FormData(e.target);
-      var newExtra = PERMISSION_VIEWS.filter(function(v){
-        var alreadyByRole = roleAllowed===null || (roleAllowed && roleAllowed.indexOf(v[0])>-1);
-        return !alreadyByRole && fd.get("view_"+v[0]);
-      }).map(function(v){ return v[0]; });
-      var editRegistry = (m.role==="dispatcher"||m.role==="head"||m.role==="finance") ? false : !!fd.get("editRegistry");
-      updateProfile(userId, {extra_views:newExtra, can_edit_registry:editRegistry});
+      var newExtra = PERMISSION_VIEWS.filter(function(v){ return fd.get("view_"+v[0]); }).map(function(v){ return v[0]; });
+      updateProfile(userId, {extra_views:newExtra, can_edit_registry: !!fd.get("editRegistry"), can_delete_ticket: !!fd.get("deleteTicket")});
       closeModal();
     });
   }
@@ -6429,8 +6481,11 @@
     // здесь у "team" теперь есть extraActiveViews (пункт меню подсвечивается
     // активным и когда открыта сама «Активность» — иначе при переходе на
     // вкладку «Активность» пункт «Команда» в сайдбаре выглядел бы неактивным).
-    // Видимость вкладки «Активность» по-прежнему только Администратору —
-    // ограничение осталось ровно там же, в navAllowed('activity') (0.3.7, п.4).
+    // Видимость вкладки «Активность» по умолчанию только у Администратора
+    // (см. ROLE_NAV.dispatcher/reseedPermissionsForRole) — но с 0.4.4 это
+    // обычный пункт extra_views/navAllowed('activity'), как и всё остальное,
+    // так что владелец теперь МОЖЕТ выдать его и любому другому человеку
+    // через «Права», в отличие от жёсткого хардкода до версии 0.4.4.
     var navItems = [
       ["dashboard","Дашборд"], ["tickets","Заявки",["import"]],
       ["systemdefects","Системный брак"],
@@ -6848,7 +6903,17 @@
     }
     if(e.target.matches("[data-crew-rename]")) renameCrew(e.target.getAttribute("data-crew-rename"), e.target.value);
     if(e.target.matches("[data-part-qty]")) updatePartQty(e.target.getAttribute("data-part-qty"), e.target.value);
-    if(e.target.matches("[data-profile-role]")){ if(!isOwner()) return; updateProfile(e.target.getAttribute("data-profile-role"), {role:e.target.value}); }
+    if(e.target.matches("[data-profile-role]")){
+      if(!isOwner()) return;
+      var newRole = e.target.value;
+      // 0.4.4: смена роли теперь ещё и переустанавливает "стартовый" набор
+      // персональных прав на значения по умолчанию для новой роли (см.
+      // reseedPermissionsForRole выше) — раньше extra_views/can_edit_registry
+      // были только ДОБАВКОЙ сверх роли и при смене роли не трогались, но
+      // теперь это единственный источник истины, и оставлять его от старой
+      // роли было бы неверно.
+      updateProfile(e.target.getAttribute("data-profile-role"), Object.assign({role:newRole}, reseedPermissionsForRole(newRole)));
+    }
     if(e.target.matches("[data-profile-telegram-chatid]")){
       if(!isOwner()) return;
       var tgId = e.target.getAttribute("data-profile-telegram-chatid");
