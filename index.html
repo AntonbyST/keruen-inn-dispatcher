@@ -635,12 +635,14 @@
     // "cashexpenses" (0.2.4) добавлен везде, где уже был "registry" — оба живут
     // под одним пунктом меню «Финансы» (см. navItems/navItem ниже), так что
     // право видеть один подраздел даёт право видеть и второй.
-    warehouse: ["dashboard","tickets","parts","registry","cashexpenses","team"],
+    // "overhead" (0.4.3) — «Накладные расходы», третья вкладка того же
+    // раздела «Финансы»; добавлен везде, где уже есть "registry"/"cashexpenses".
+    warehouse: ["dashboard","tickets","parts","registry","cashexpenses","overhead","team"],
     // Отдельный пункт меню «Отчёты» (0.2.5) убран в 0.2.6 — тот же отчёт по
     // СЕРВИСу теперь встроен прямо в «Дашборд» (см. viewDashboard), который
     // доступен всем ролям, так что видимость отчёта больше не завязана на роль
     // Финансиста отдельно.
-    finance: ["dashboard","registry","cashexpenses","team"],
+    finance: ["dashboard","registry","cashexpenses","overhead","team"],
     // «Диспетчер» (0.2.10) — новая роль без своего готового набора разделов:
     // по просьбе Антона она пустая по умолчанию, а какие разделы видит
     // конкретный диспетчер, он расставляет персонально через «Права» в
@@ -657,6 +659,7 @@
     ["dashboard","Дашборд"], ["tickets","Заявки"], ["hotels","Отели"],
     ["team","Команда"], ["parts","Склад ЗИП"], ["import","Импорт из c-lector"],
     ["registry","Реестр платежей"], ["cashexpenses","Наличные расходы"],
+    ["overhead","Накладные расходы"],
     ["crews","Бригады"], ["systemdefects","Системный брак"]
   ];
   function navAllowed(view){
@@ -1424,7 +1427,7 @@
     session: null, me: null,           // auth session + own profile row
     authView: "signin", authEmail: "", authError: "",
     tickets: [], profiles: [], parts: [], portfolio: null, invoices: [], photos: [], snapshots: [], crews: [], hotels: [], hotelsLoaded: false,
-    cashAdvances: [], cashExpenses: [],
+    cashAdvances: [], cashExpenses: [], overheadExpenses: [],
     // «Отчёты» → еженедельный отчёт по СЕРВИСу (0.2.5): ежедневные снимки живых
     // счётчиков по отелям (см. ticket_stats_snapshots) — точки сравнения "N
     // дней назад" для расчёта отчёта. reportPeriodDays — сколько дней назад
@@ -1611,7 +1614,7 @@
     };
   }
   function subscribeAll(){
-    reloadTickets(); reloadProfiles(); reloadParts(); reloadPortfolio(); reloadInvoices(); reloadPhotos(); reloadSnapshots(); reloadCrews(); reloadHotels(); reloadCashAdvances(); reloadCashExpenses(); reloadStatsSnapshots(); reloadActivityDaily();
+    reloadTickets(); reloadProfiles(); reloadParts(); reloadPortfolio(); reloadInvoices(); reloadPhotos(); reloadSnapshots(); reloadCrews(); reloadHotels(); reloadCashAdvances(); reloadCashExpenses(); reloadOverheadExpenses(); reloadStatsSnapshots(); reloadActivityDaily();
     // 0.3.7 (по просьбе Антона, п.4): «Активность» — пульс раз в минуту,
     // запускается один раз при первом вызове subscribeAll() (он вызывается из
     // ОБОИХ путей входа — onAuthStateChange и getSession(), см. ниже — поэтому
@@ -1662,6 +1665,10 @@
     }).subscribe();
     sb.channel("cash-expenses-rt").on("postgres_changes", {event:"*", schema:"public", table:"cash_expenses"}, function(payload){
       rtPatchArray(state.cashExpenses, payload, rtSortBy("date", false));
+      render();
+    }).subscribe();
+    sb.channel("overhead-expenses-rt").on("postgres_changes", {event:"*", schema:"public", table:"overhead_expenses"}, function(payload){
+      rtPatchArray(state.overheadExpenses, payload, rtSortBy("date", false));
       render();
     }).subscribe();
     sb.channel("stats-snapshots-rt").on("postgres_changes", {event:"*", schema:"public", table:"ticket_stats_snapshots"}, function(payload){
@@ -1722,6 +1729,9 @@
   }
   function reloadCashExpenses(){
     sb.from("cash_expenses").select("*").order("date", {ascending:false}).then(function(res){ state.cashExpenses = res.data || []; render(); });
+  }
+  function reloadOverheadExpenses(){
+    sb.from("overhead_expenses").select("*").order("date", {ascending:false}).then(function(res){ state.overheadExpenses = res.data || []; render(); });
   }
   function reloadStatsSnapshots(){
     sb.from("ticket_stats_snapshots").select("*").order("snapshot_date", {ascending:true}).then(function(res){
@@ -1890,10 +1900,17 @@
   // это только видимый статус для отслеживания движения счетов.
   function setInvoiceSubmitted(invoiceIdOrIds, val){
     if(!canEditRegistry()){ alert("Отмечать «подано в оплату» может только Администратор, Руководитель или Финансист."); return; }
+    // 0.4.3, п.3: submitted_for_payment_at — момент простановки галочки, нужен
+    // напоминанию в Telegram, чтобы посчитать "прошло больше 24ч" (см.
+    // add-overdue-payment-telegram-notify.sql). overdue_notified_at сбрасываем
+    // при ЛЮБОМ переключении галочки (и когда ставим, и когда снимаем) — если
+    // счёт сняли с "подано в оплату" и поставили заново, отсчёт 24ч и
+    // возможность напомнить снова должны начаться с чистого листа.
+    var nowIso = val ? new Date().toISOString() : null;
     String(invoiceIdOrIds).split(",").forEach(function(invoiceId){
       var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
-      if(iv) iv.submitted_for_payment = val;
-      sb.from("invoices").update({submitted_for_payment:val}).eq("id", invoiceId).then(function(){
+      if(iv){ iv.submitted_for_payment = val; iv.submitted_for_payment_at = nowIso; iv.overdue_notified_at = null; }
+      sb.from("invoices").update({submitted_for_payment:val, submitted_for_payment_at: nowIso, overdue_notified_at: null}).eq("id", invoiceId).then(function(){
         if(iv) addNote(iv.ticket_id, val ? "Счёт «"+iv.file_name+"» подан в оплату." : "Отметка «подано в оплату» снята со счёта «"+iv.file_name+"».");
       });
     });
@@ -3171,7 +3188,14 @@
   // и viewCashExpenses() (0.2.4), чтобы между "Реестр платежей" и "Наличные
   // расходы" можно было переключаться прямо в контенте, не возвращаясь в меню.
   function financeTabs(active){
-    var tabs = [["registry","Реестр платежей"], ["cashexpenses","Наличные расходы"]];
+    // 0.4.3, п.1: третья вкладка «Накладные расходы» — отдельный общий журнал
+    // (не привязан к заявкам/отелям, см. viewOverhead). Фильтруем по
+    // navAllowed, а не показываем всем троим безусловно, как раньше: раз
+    // "overhead" теперь можно выдать/не выдать отдельной галочкой в «Правах»
+    // (см. PERMISSION_VIEWS), роль может иметь доступ к «Финансам», но не к
+    // этой конкретной вкладке.
+    var tabs = [["registry","Реестр платежей"], ["cashexpenses","Наличные расходы"], ["overhead","Накладные расходы"]]
+      .filter(function(t){ return navAllowed(t[0]); });
     return h`<div class="finance-tabs">${tabs.map(function(t){
       return h`<a href="#/${t[0]}" class="finance-tab ${active===t[0]?'active':''}">${t[1]}</a>`;
     }).join("")}</div>`;
@@ -4048,8 +4072,11 @@
                     <label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--ink-soft);margin:0;" title="${chatIdFilled?'Присылать этому человеку сообщение о каждой новой заявке':'Сначала укажите Telegram ID — без него уведомления отправлять некуда'}">
                       <input type="checkbox" data-profile-telegram-notify="${m.id}" ${m.telegram_notify_tickets?'checked':''} ${chatIdFilled?'':'disabled'}> увед.
                     </label>
+                    <label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--ink-soft);margin:0;" title="${chatIdFilled?'Присылать этому человеку напоминание, если счёт больше 24ч «подан в оплату», но ещё не «оплачено»':'Сначала укажите Telegram ID — без него уведомления отправлять некуда'}">
+                      <input type="checkbox" data-profile-telegram-notify-overdue="${m.id}" ${m.telegram_notify_overdue_payments?'checked':''} ${chatIdFilled?'':'disabled'}> увед. (просрочка оплаты)
+                    </label>
                   </div>`
-                  : (m.telegram_notify_tickets && chatIdFilled ? h`<span class="pill pill-ok">включены</span>` : h`<span class="muted">—</span>`)}
+                  : ((m.telegram_notify_tickets||m.telegram_notify_overdue_payments) && chatIdFilled ? h`<span class="pill pill-ok">включены</span>` : h`<span class="muted">—</span>`)}
                 </td>
                 ${owner ? h`<td style="white-space:nowrap;">
                   <button class="btn btn-sm btn-ghost" data-action="edit-permissions" data-id="${m.id}" title="Разделы и права, которые ДОБАВЛЯЮТСЯ этому человеку сверх того, что уже даёт роль">Права</button>
@@ -4591,7 +4618,14 @@
   // (как и раньше — см. форму ниже), но теперь можно переключить на "Работа",
   // и такой расход подтянется к пункту чек-листа "Бригада" в карточке заявки
   // (см. milestoneRow "crew" ниже — тот же приём, что и у "Материал"/"materials").
-  var CASH_EXPENSE_CATEGORY_LABEL = { materials: "Материал", crew: "Работа", other: "Другое" };
+  // 0.4.3, п.2: категория "командировочные" ("travel") — наличные, которые
+  // перечисляются на карточку бригадам/прорабам (по просьбе Антона — не
+  // отдельный раздел, а именно "Наличные", как и "Работа"/"Материал"). В
+  // отличие от "Работа", у "travel" есть особая возможность при создании —
+  // разбивка одного перечисления сразу на несколько заявок (см.
+  // addTravelExpense/parseTicketRefList ниже); после создания это обычные
+  // строки cash_expenses, ничем не отличающиеся от остальных.
+  var CASH_EXPENSE_CATEGORY_LABEL = { materials: "Материал", crew: "Работа", other: "Другое", travel: "Командировочные" };
   function distinctCashPersons(){
     var set = {};
     (state.cashAdvances||[]).forEach(function(a){ if(a.person) set[a.person]=true; });
@@ -4849,6 +4883,12 @@
     return t ? t.id : null;
   }
   function addCashExpense(data){
+    // 0.4.3, п.2: "Командировочные" — единственная категория с возможностью
+    // разбивки одного перечисления сразу на несколько заявок (см. форму —
+    // поле "Заявка" при этой категории принимает список через запятую).
+    // Остальные категории по-прежнему строго "одна заявка на расход" —
+    // решение Антона не менялось (см. resolveTicketRef выше).
+    if(data.category==="travel") return addTravelExpense(data);
     if(!canEditRegistry()){ alert("Вносить наличные расходы может только Администратор, Руководитель или Финансист."); return false; }
     var person = (data.person||"").trim();
     var description = (data.description||"").trim();
@@ -4875,6 +4915,87 @@
     if(!confirm("Удалить эту запись о расходе?")) return;
     sb.from("cash_expenses").delete().eq("id", id).then(function(){});
   }
+  // 0.4.3, п.2: разбор поля "Заявка" для командировочных — список заявок через
+  // запятую/пробел, у каждой опционально можно указать СВОЮ долю через
+  // двоеточие ("526:1000, 530, 531" — Стефановичу дали одним переводом на
+  // 5 заявок, по 526-й точно известно, что туда ушла 1000, остальное поровну
+  // на 530 и 531). Без двоеточия — доля не указана, распределяется поровну
+  // из того, что осталось от общей суммы перечисления после явных долей.
+  function parseTicketRefList(raw){
+    return String(raw||"").split(/[,;\n]+/).map(function(chunk){
+      chunk = chunk.trim();
+      if(!chunk) return null;
+      var m = chunk.match(/^(.+?)\s*[:=]\s*([\d.,\s]+)$/);
+      if(m) return { ref: m[1].trim(), amount: Number(m[2].replace(/\s/g,"").replace(",",".")) };
+      return { ref: chunk, amount: null };
+    }).filter(function(x){ return x && x.ref; });
+  }
+  // Округление до целых при разбивке (по просьбе Антона): делим поровну, а
+  // остаток от деления (копейки/тенге, которые не делятся ровно) раздаём по
+  // одному первым N заявкам в списке — так сумма долей всегда точно равна
+  // исходной сумме, а не "почти" из-за округления каждой доли отдельно.
+  function splitAmountEvenly(total, n){
+    if(n<=0) return [];
+    var base = Math.floor(total/n);
+    var remainder = Math.round(total) - base*n;
+    var out = [];
+    for(var i=0;i<n;i++){ out.push(base + (i<remainder?1:0)); }
+    return out;
+  }
+  // 0.4.3, п.2: командировочные, перечисленные бригаде/прорабу одним переводом
+  // сразу на несколько заявок — по просьбе Антона заносятся в "Наличные"
+  // (категория "travel"), а не в отдельный раздел. Если доли заявок не
+  // указаны явно — распределяются поровну (округление до целых, см.
+  // splitAmountEvenly), и попадают в пункт "Бригада" карточки заявки и в
+  // затраты (см. crewCash в milestoneRow "crew" и ticketCostTotal — оба уже
+  // общие для любой категории/нескольких строк, отдельного кода не требуют).
+  // Налоговый гросс-ап (п. "и не забудет что учитывается с налогами") —
+  // автоматически через personAccountedRate/cashExpenseAccounted, ту же
+  // ставку, что и у прочих наличных расходов этого же человека (0.4.2) —
+  // отдельной логики здесь не нужно, она уже общая для cash_expenses.person.
+  function addTravelExpense(data){
+    if(!canEditRegistry()){ alert("Вносить командировочные расходы может только Администратор, Руководитель или Финансист."); return false; }
+    var person = (data.person||"").trim();
+    var description = (data.description||"").trim() || "Командировочные";
+    if(!person){ alert("Укажите, кому перечислены командировочные (бригада/прораб)."); return false; }
+    var qty = Number(data.qty) || 1;
+    var unitCost = Number(data.unit_cost) || 0;
+    var totalAmount = qty * unitCost;
+    if(!totalAmount || totalAmount<=0){ alert("Укажите сумму перечисления."); return false; }
+    var tokens = parseTicketRefList(data.ticket_ref);
+    if(!tokens.length){ alert("Укажите хотя бы одну заявку — командировочные обязательно разносятся по заявкам. Несколько заявок — через запятую, например «526, 530, 531»."); return false; }
+    var unresolved = [];
+    var resolved = tokens.map(function(tok){
+      var tid = resolveTicketRef(tok.ref);
+      if(!tid) unresolved.push(tok.ref);
+      return { ticketId: tid, amount: tok.amount };
+    });
+    if(unresolved.length){ alert("Не найдены заявки: " + unresolved.join(", ") + ". Проверьте номера (№ c-lector) и повторите."); return false; }
+    var explicitSum = resolved.reduce(function(s,r){ return s + (r.amount!=null ? r.amount : 0); }, 0);
+    var autoRows = resolved.filter(function(r){ return r.amount==null; });
+    if(autoRows.length){
+      var remaining = Math.round(totalAmount) - Math.round(explicitSum);
+      if(remaining<0){ alert("Сумма указанных долей ("+explicitSum+") уже больше общей суммы перечисления ("+totalAmount+")."); return false; }
+      var shares = splitAmountEvenly(remaining, autoRows.length);
+      autoRows.forEach(function(r,i){ r.amount = shares[i]; });
+    } else if(Math.round(explicitSum) !== Math.round(totalAmount)){
+      if(!confirm("Сумма указанных долей по заявкам ("+explicitSum+") не совпадает с общей суммой перечисления ("+totalAmount+"). Всё равно разнести по указанным долям?")) return false;
+    }
+    var dateVal = data.date || new Date().toISOString().slice(0,10);
+    var hotelId = data.hotel_id ? Number(data.hotel_id) : null;
+    var rows = resolved.map(function(r){
+      var share = Math.round(r.amount);
+      return {
+        date: dateVal, description: description, qty: 1, unit_cost: share, amount: share,
+        hotel_id: hotelId, ticket_id: r.ticketId, category: "travel",
+        person: person, created_by: myLabelWithRole()
+      };
+    });
+    sb.from("cash_expenses").insert(rows).then(function(res){
+      if(res && res.error){ alert("Не удалось сохранить командировочные: " + res.error.message); return; }
+    });
+    return true;
+  }
   // 0.4.2 (доп., по просьбе Антона): категорию уже внесённого наличного
   // расхода можно поменять задним числом (например изначально записали как
   // "Материал", а на деле это "Работа") — раньше категория выбиралась только
@@ -4885,7 +5006,7 @@
   // что и при создании нового расхода этой категории.
   function setCashExpenseCategory(id, val){
     if(!canEditRegistry()) return;
-    var category = (val==="other" || val==="crew") ? val : "materials";
+    var category = (val==="other" || val==="crew" || val==="travel") ? val : "materials";
     var ce = (state.cashExpenses||[]).find(function(x){ return x.id===id; });
     if(ce) ce.category = category;
     render();
@@ -4893,6 +5014,36 @@
       if(res && res.error){ alert("Не удалось сохранить категорию: " + res.error.message); return; }
       if(category==="materials" && ce && ce.ticket_id) maybeClearMaterialsCashPending(ce.ticket_id);
     });
+  }
+  // 0.4.3, п.1: «Накладные расходы» — отдельный общий журнал компании
+  // (зарплаты бэк-офиса, прорабов, аренда и т.д.), см. add-overhead-expenses-table.sql.
+  // Намеренно НЕ связан с заявками/отелями и не входит в затраты по заявке —
+  // просто лента "дата / статья / сумма / примечание" для учёта расходов
+  // компании в целом (см. AskUserQuestion в диалоге — выбран этот вариант).
+  function distinctOverheadCategories(){
+    var set = {};
+    (state.overheadExpenses||[]).forEach(function(e){ if(e.category) set[e.category]=true; });
+    return Object.keys(set).sort();
+  }
+  function addOverheadExpense(data){
+    if(!canEditRegistry()){ alert("Вносить накладные расходы может только Администратор, Руководитель или Финансист."); return false; }
+    var category = (data.category||"").trim();
+    var amount = Number(data.amount) || 0;
+    if(!category){ alert("Укажите статью расхода."); return false; }
+    sb.from("overhead_expenses").insert({
+      date: data.date || new Date().toISOString().slice(0,10),
+      category: category, amount: amount,
+      note: (data.note||"").trim() || null,
+      created_by: myLabelWithRole()
+    }).then(function(res){
+      if(res && res.error){ alert("Не удалось сохранить расход: " + res.error.message); return; }
+    });
+    return true;
+  }
+  function deleteOverheadExpense(id){
+    if(!canEditRegistry()) return;
+    if(!confirm("Удалить эту запись о накладном расходе?")) return;
+    sb.from("overhead_expenses").delete().eq("id", id).then(function(){});
   }
   // Вставка таблицы для "Расходов" — тот же принцип, что и импорт из c-lector
   // (parseDelimited + угадывание колонок по заголовку), но своя, более узкая
@@ -4969,7 +5120,7 @@
         description: p.description, qty: p.qty, unit_cost: p.unitCost, amount: p.amount,
         hotel_id: p.hotel ? p.hotel.id : null,
         ticket_id: p.ticket ? p.ticket.id : null,
-        category: (category==="other" || category==="crew") ? category : "materials",
+        category: (category==="other" || category==="crew" || category==="travel") ? category : "materials",
         person: person, created_by: createdBy
       };
     });
@@ -5103,8 +5254,9 @@
                         <select data-cash-expense-category data-id="${e.id}" title="Изменить категорию расхода — например, если изначально записали как «Материал», а по факту это «Работа»" style="max-width:110px;">
                           <option value="materials" ${e.category==='materials'?'selected':''}>Материал</option>
                           <option value="crew" ${e.category==='crew'?'selected':''}>Работа</option>
+                          <option value="travel" ${e.category==='travel'?'selected':''}>Командировочные</option>
                           <option value="other" ${e.category==='other'?'selected':''}>Другое</option>
-                        </select>` : h`<span class="pill ${e.category==='materials'?'pill-ok':(e.category==='crew'?'pill-accent':'pill-neutral')}">${CASH_EXPENSE_CATEGORY_LABEL[e.category]||e.category}</span>`}</td>
+                        </select>` : h`<span class="pill ${e.category==='materials'?'pill-ok':((e.category==='crew'||e.category==='travel')?'pill-accent':'pill-neutral')}">${CASH_EXPENSE_CATEGORY_LABEL[e.category]||e.category}</span>`}</td>
                       <td class="muted" style="white-space:nowrap;">${escapeHtml(e.person)}</td>
                       ${editable?h`<td><a href="#" data-action="cash-expense-delete" data-id="${e.id}" style="color:var(--crit);">✕</a></td>`:''}
                     </tr>`;
@@ -5119,15 +5271,74 @@
               <div class="field"><label>Кол-во</label><input type="number" name="qty" min="0" step="0.01" value="1" required></div>
               <div class="field"><label>Цена за ед.</label><input type="number" name="unit_cost" min="0" step="0.01" required></div>
               <div class="field"><label>Мотель</label><select name="hotel_id"><option value="">—</option>${hotelOptions}</select></div>
-              <div class="field"><label>Заявка (необязательно)</label><input type="text" name="ticket_ref" list="cash-expense-tickets" placeholder="№ c-lector"></div>
-              <div class="field"><label>Категория</label><select name="category"><option value="materials">Материал</option><option value="crew">Работа</option><option value="other">Другое</option></select></div>
-              <div class="field"><label>Кто потратил</label><input type="text" name="person" list="cash-persons" placeholder="Имя прораба" required></div>
+              <div class="field" style="grid-column:span 2;"><label>Заявка (необязательно для «Материал»/«Работа»/«Другое»; для «Командировочные» — обязательно, можно несколько через запятую)</label><input type="text" name="ticket_ref" list="cash-expense-tickets" placeholder="№ c-lector, напр. «526» или «526, 530, 531» или «526:1000, 530, 531» — своя доля через двоеточие"></div>
+              <div class="field"><label>Категория</label><select name="category"><option value="materials">Материал</option><option value="crew">Работа</option><option value="travel">Командировочные</option><option value="other">Другое</option></select></div>
+              <div class="field"><label>Кто потратил / кому перечислено</label><input type="text" name="person" list="cash-persons" placeholder="Имя прораба" required></div>
               <button class="btn btn-primary" type="submit">Добавить</button>
-            </form>` : ''}
+            </form>
+            <div class="helptext" style="margin-top:6px;">«Командировочные»: сумма — это вся перечисленная сумма, заявки — через запятую; если доли не указаны (просто «526, 530, 531»), сумма делится между ними поровну (с округлением до целых), если указаны частично или полностью (напр. «526:1000, 530»), остаток делится поровну между остальными.</div>` : ''}
           </div>
         </div>
 
         ${editable ? cashImportBlock() : ''}
+      </div>`;
+  }
+  // 0.4.3, п.1: третья вкладка «Финансы» — «Накладные расходы». Отдельный
+  // общий журнал компании, без привязки к заявкам/отелям (см. AskUserQuestion
+  // в диалоге) — зарплаты бэк-офиса, прорабов, аренда и т.д. Не участвует ни
+  // в «Затратах по заявке», ни в чек-листах — только своя лента и итог.
+  function viewOverhead(){
+    var editable = canEditRegistry();
+    var rows = (state.overheadExpenses||[]).slice().sort(function(a,b){ return (b.date||"").localeCompare(a.date||""); });
+    var categories = distinctOverheadCategories();
+    var todayIso = new Date().toISOString().slice(0,10);
+    function fmtSum(n){ return (Number(n)||0).toLocaleString("ru-RU", {maximumFractionDigits:2}); }
+    var total = rows.reduce(function(s,e){ return s+(Number(e.amount)||0); }, 0);
+    var byCategory = {};
+    rows.forEach(function(e){ byCategory[e.category] = (byCategory[e.category]||0) + (Number(e.amount)||0); });
+    var categoryTotals = Object.keys(byCategory).sort();
+
+    return h`
+      ${financeTabs('overhead')}
+      <datalist id="overhead-categories">${categories.map(function(c){ return `<option value="${escapeHtml(c)}">`; }).join("")}</datalist>
+      <div class="row-gap">
+        <div class="card card-pad">
+          <div class="section-title">Итого по статьям</div>
+          ${categoryTotals.length===0 ? h`<div class="muted" style="font-size:13px;">Пока нет ни одной записи.</div>` : h`
+          <div class="table-wrap"><table>
+            <thead><tr><th>Статья</th><th class="num">Сумма</th></tr></thead>
+            <tbody>${categoryTotals.map(function(c){
+              return h`<tr><td>${escapeHtml(c)}</td><td class="num mono">${fmtSum(byCategory[c])}</td></tr>`;
+            }).join("")}</tbody>
+            <tfoot><tr><td><b>Итого</b></td><td class="num mono"><b>${fmtSum(total)}</b></td></tr></tfoot>
+          </table></div>`}
+        </div>
+
+        <div class="card card-pad">
+          <div class="section-title">Записи</div>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Дата</th><th>Статья</th><th class="num">Сумма</th><th>Примечание</th><th>Кто внёс</th>${editable?'<th></th>':''}</tr></thead>
+            <tbody>${rows.length===0 ? h`<tr><td colspan="${editable?6:5}"><div class="empty-state"><b>Пока нет записей</b>Внесите накладной расход ниже.</div></td></tr>` :
+              rows.map(function(e){
+                return h`<tr>
+                  <td class="mono muted" style="white-space:nowrap;">${fmtDateShort(e.date)}</td>
+                  <td>${escapeHtml(e.category)}</td>
+                  <td class="num mono">${fmtSum(e.amount)}</td>
+                  <td class="muted">${escapeHtml(e.note||'')}</td>
+                  <td class="muted" style="white-space:nowrap;">${escapeHtml(e.created_by||'')}</td>
+                  ${editable?h`<td><a href="#" data-action="overhead-expense-delete" data-id="${e.id}" style="color:var(--crit);">✕</a></td>`:''}
+                </tr>`;
+              }).join("")}
+            </tbody>
+          </table></div>
+          ${editable ? h`<form id="overhead-expense-form" class="field-row" style="margin-top:12px;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;">
+            <div class="field"><label>Дата</label><input type="date" name="date" value="${todayIso}" required></div>
+            <div class="field"><label>Статья</label><input type="text" name="category" list="overhead-categories" placeholder="напр. Зарплата бэк-офиса" required></div>
+            <div class="field"><label>Сумма</label><input type="number" name="amount" min="0" step="0.01" required></div>
+            <div class="field" style="grid-column:1/-1;"><label>Примечание (необязательно)</label><input type="text" name="note" placeholder="комментарий"></div>
+            <button class="btn btn-primary" type="submit">Добавить</button>
+          </form>` : ''}
+        </div>
       </div>`;
   }
   // Вставка таблицы отчёта прораба — тот же принцип, что и импорт из c-lector
@@ -5169,7 +5380,7 @@
         }).join("")}
       </div>
       <div class="field-row" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr));margin-top:6px;">
-        <div class="field"><label>Категория (для всех строк)</label><select id="cash-import-category"><option value="materials">Материал</option><option value="crew">Работа</option><option value="other">Другое</option></select></div>
+        <div class="field"><label>Категория (для всех строк)</label><select id="cash-import-category"><option value="materials">Материал</option><option value="crew">Работа</option><option value="travel">Командировочные</option><option value="other">Другое</option></select></div>
         <div class="field"><label>Кто потратил (для всех строк)</label><input type="text" id="cash-import-person" list="cash-persons" placeholder="Имя прораба" required></div>
       </div>
       <div class="table-wrap" style="max-height:360px;overflow-y:auto;"><table>
@@ -5718,7 +5929,11 @@
               // в пункте "Бригада", тем же приёмом, что и у "Материал" ниже. В
               // отличие от "Материала" это НЕ влияет на готовность пункта
               // (crewDone определяется назначением исполнителя, не оплатой).
-              var crewCash = cashExpensesFor(t, "crew");
+              // 0.4.3, п.2: командировочные ("travel") — по просьбе Антона тоже
+              // считаются частью затрат на бригаду, суммируются вместе с "Работой"
+              // в этом же блоке (а не отдельной строкой).
+              var crewCashTravel = cashExpensesFor(t, "travel");
+              var crewCash = cashExpensesFor(t, "crew").concat(crewCashTravel);
               var crewCashTotal = crewCash.reduce(function(sum,ce){ return sum + (Number(ce.amount)||0); }, 0);
               var fmtCashSum = function(n){ return (Number(n)||0).toLocaleString("ru-RU", {maximumFractionDigits:2}); };
               var actPhotoCount = (state.photos||[]).filter(function(p){return p.ticket_id===t.id && p.category==="act";}).length;
@@ -5785,7 +6000,7 @@
                     <button class="btn btn-sm" data-action="reassign-free" data-id="${t.id}">Сменить</button>
                   </div>` : ""}
                   ${t.assigned_to ? h`<div class="actions-row" style="margin-bottom:8px;"><a class="btn btn-sm" href="#/workorder/${t.id}">Наряд-задание</a></div>` : ""}
-                  ${crewCash.length ? h`<div class="helptext" style="margin-bottom:8px;">Оплачено наличными (Работа): ${fmtCashSum(crewCashTotal)} (${crewCash.length} ${ruPlural(crewCash.length,["запись","записи","записей"])}) — подтянуто автоматически из «Наличные расходы».</div>` : ""}
+                  ${crewCash.length ? h`<div class="helptext" style="margin-bottom:8px;">Оплачено наличными (${crewCashTravel.length ? 'Работа + Командировочные' : 'Работа'}): ${fmtCashSum(crewCashTotal)} (${crewCash.length} ${ruPlural(crewCash.length,["запись","записи","записей"])}) — подтянуто автоматически из «Наличные расходы».</div>` : ""}
                   ${milestoneInvoiceList(t, "crew")}`
               })}
               ${milestoneRow({
@@ -6199,8 +6414,8 @@
       return;
     }
     if(!navAllowed(state.route.view)){ state.route = {view: firstAllowedView(), id:null}; }
-    var titleMap = {dashboard:"Дашборд", tickets:"Заявки", team:"Команда", parts:"Склад ЗИП", "import":"Заявки · Импорт из c-lector", registry:"Финансы · Реестр платежей", cashexpenses:"Финансы · Наличные расходы", crews:"Бригады", hotels:"Отели", systemdefects:"Системный брак", activity:"Активность"};
-    var body = state.route.view==="tickets"?viewTickets(): state.route.view==="team"?viewTeam(): state.route.view==="parts"?viewParts(): state.route.view==="import"?viewImport(): state.route.view==="registry"?viewRegistry(): state.route.view==="cashexpenses"?viewCashExpenses(): state.route.view==="crews"?viewCrews(): state.route.view==="hotels"?viewHotels(): state.route.view==="systemdefects"?viewSystemDefects(): state.route.view==="activity"?viewActivity(): viewDashboard();
+    var titleMap = {dashboard:"Дашборд", tickets:"Заявки", team:"Команда", parts:"Склад ЗИП", "import":"Заявки · Импорт из c-lector", registry:"Финансы · Реестр платежей", cashexpenses:"Финансы · Наличные расходы", overhead:"Финансы · Накладные расходы", crews:"Бригады", hotels:"Отели", systemdefects:"Системный брак", activity:"Активность"};
+    var body = state.route.view==="tickets"?viewTickets(): state.route.view==="team"?viewTeam(): state.route.view==="parts"?viewParts(): state.route.view==="import"?viewImport(): state.route.view==="registry"?viewRegistry(): state.route.view==="cashexpenses"?viewCashExpenses(): state.route.view==="overhead"?viewOverhead(): state.route.view==="crews"?viewCrews(): state.route.view==="hotels"?viewHotels(): state.route.view==="systemdefects"?viewSystemDefects(): state.route.view==="activity"?viewActivity(): viewDashboard();
 
     // 0.2.17: «Импорт из c-lector» больше не отдельный пункт меню — он почти
     // всё подтягивает автоматически, отдельного раздела для него не нужно.
@@ -6219,7 +6434,7 @@
     var navItems = [
       ["dashboard","Дашборд"], ["tickets","Заявки",["import"]],
       ["systemdefects","Системный брак"],
-      ["team","Команда",["activity"]], ["crews","Бригады"], ["parts","Склад ЗИП"], ["registry","Финансы",["cashexpenses"]], ["hotels","Отели"]
+      ["team","Команда",["activity"]], ["crews","Бригады"], ["parts","Склад ЗИП"], ["registry","Финансы",["cashexpenses","overhead"]], ["hotels","Отели"]
     ].filter(function(x){ return navAllowed(x[0]); });
     // 0.3.9: затемнение позади выезжающего на телефоне сайдбара — рендерится
     // всегда (как и сам сайдбар), видимость целиком на CSS (.sidebar-scrim.open,
@@ -6561,6 +6776,7 @@
       if(action==="hotel-toggle-active"){ toggleHotelActive(id, actionEl.getAttribute("data-val")==="1"); return; }
       if(action==="cash-advance-delete"){ e.preventDefault(); deleteCashAdvance(id); return; }
       if(action==="cash-expense-delete"){ e.preventDefault(); deleteCashExpense(id); return; }
+      if(action==="overhead-expense-delete"){ e.preventDefault(); deleteOverheadExpense(id); return; }
       if(action==="cash-advance-confirm-toggle"){ setCashAdvanceConfirmed(id, actionEl.getAttribute("data-val")==="1"); return; }
       if(action==="cash-receipt-open"){ e.preventDefault(); openCashReceiptFile(actionEl.getAttribute("data-path")); return; }
       if(action==="cash-receipt-delete"){ e.preventDefault(); deleteCashReceipt(id, actionEl.getAttribute("data-path")); return; }
@@ -6638,16 +6854,21 @@
       var tgId = e.target.getAttribute("data-profile-telegram-chatid");
       var tgVal = e.target.value.trim()||null;
       var patch = {telegram_chat_id: tgVal};
-      // без chat_id галочка "увед." всё равно ничего не отправит — снимаем
-      // её сразу, чтобы состояние в базе не выглядело противоречиво.
+      // без chat_id обе галочки "увед." всё равно ничего не отправят — снимаем
+      // их сразу, чтобы состояние в базе не выглядело противоречиво.
       if(!tgVal){
         var mProf = state.profiles.find(function(x){return x.id===tgId;});
         if(mProf && mProf.telegram_notify_tickets) patch.telegram_notify_tickets = false;
+        if(mProf && mProf.telegram_notify_overdue_payments) patch.telegram_notify_overdue_payments = false;
       }
       updateProfile(tgId, patch);
       return;
     }
     if(e.target.matches("[data-profile-telegram-notify]")){ if(!isOwner()) return; updateProfile(e.target.getAttribute("data-profile-telegram-notify"), {telegram_notify_tickets: e.target.checked}); return; }
+    // 0.4.3, п.3: отдельная галочка получателей напоминания "просрочена оплата" —
+    // независимая от "увед." (уведомления о новых заявках), см.
+    // add-overdue-payment-telegram-notify.sql.
+    if(e.target.matches("[data-profile-telegram-notify-overdue]")){ if(!isOwner()) return; updateProfile(e.target.getAttribute("data-profile-telegram-notify-overdue"), {telegram_notify_overdue_payments: e.target.checked}); return; }
     // Кнопки "прикрепить" прямо в строке чек-листа "Ход работ" (milestoneAttachControl) —
     // в отличие от прежних форм с отдельной кнопкой "Отправить", загрузка начинается
     // сразу при выборе файла(ов), можно выбрать несколько штук за один раз.
@@ -6845,6 +7066,11 @@
       e.preventDefault(); var fdce=new FormData(e.target);
       var okCe = addCashExpense({date:fdce.get("date"), description:fdce.get("description"), qty:fdce.get("qty"), unit_cost:fdce.get("unit_cost"), hotel_id:fdce.get("hotel_id"), ticket_ref:fdce.get("ticket_ref"), category:fdce.get("category"), person:fdce.get("person")});
       if(okCe!==false) e.target.reset();
+    }
+    if(e.target.id==="overhead-expense-form"){
+      e.preventDefault(); var fdoe=new FormData(e.target);
+      var okOe = addOverheadExpense({date:fdoe.get("date"), category:fdoe.get("category"), amount:fdoe.get("amount"), note:fdoe.get("note")});
+      if(okOe!==false) e.target.reset();
     }
   });
 
