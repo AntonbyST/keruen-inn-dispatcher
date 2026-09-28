@@ -621,7 +621,7 @@
     ["team","Команда"], ["parts","Склад ЗИП"], ["import","Импорт из c-lector"],
     ["registry","Реестр платежей"], ["cashexpenses","Наличные расходы"],
     ["overhead","Накладные расходы"],
-    ["crews","Бригады"], ["systemdefects","Системный брак"],
+    ["crews","Исполнители"], ["systemdefects","Системный брак"],
     // 0.3.7, п.4: «Активность» раньше проверялась отдельным хардкодом
     // (role==="dispatcher"), в обход extra_views — с 0.4.4 это обычный пункт
     // списка прав, просто по умолчанию его получает роль Администратора (см.
@@ -702,6 +702,17 @@
   // в любую сторону для любой роли.
   var ROLE_DEFAULT_EDIT_REGISTRY = {dispatcher:true, head:true, finance:true};
   var ROLE_DEFAULT_DELETE_TICKET = {dispatcher:true, head:true};
+  // 0.4.5, п.1 (по просьбе Антона): «Реестр платежей» и «Наличные расходы»
+  // раньше делили одну галочку can_edit_registry — теперь это два отдельных
+  // права, чтобы можно было, например, дать прорабу или гл. инженеру доступ
+  // именно к «Наличным расходам» (вносить расходы/выдачи/командировочные,
+  // указывать категорию «Материал»/«Работа»), не давая при этом редактировать
+  // «Реестр платежей». По умолчанию при смене роли — те же роли, что раньше
+  // получали can_edit_registry (владелец может тут же развести их по-разному
+  // через «Права»). «Накладные расходы» (третья вкладка «Финансы») остаются на
+  // can_edit_registry — по решению Антона это ближе к бухгалтерскому реестру
+  // компании, чем к полевым наличным расходам.
+  var ROLE_DEFAULT_EDIT_CASH_EXPENSES = {dispatcher:true, head:true, finance:true};
   // Пересчитать "стартовый" набор прав для роли — используется при смене роли
   // человека (см. обработчик "[data-profile-role]" ниже), чтобы у только что
   // назначенной роли сразу были разумные значения по умолчанию, которые
@@ -712,6 +723,7 @@
     return {
       extra_views: (ROLE_NAV.hasOwnProperty(role) ? ROLE_NAV[role] : []).slice(),
       can_edit_registry: !!ROLE_DEFAULT_EDIT_REGISTRY[role],
+      can_edit_cash_expenses: !!ROLE_DEFAULT_EDIT_CASH_EXPENSES[role],
       can_delete_ticket: !!ROLE_DEFAULT_DELETE_TICKET[role]
     };
   }
@@ -742,8 +754,11 @@
     }
     return "dashboard";
   }
-  // Право редактировать «Финансы» — и «Реестр платежей» (галочка «Оплачено»,
-  // версия 0.2.2, п.3), и «Наличные расходы» (версия 0.2.4: выдачи/расходы).
+  // Право редактировать «Реестр платежей» (галочка «Оплачено», сумма, валюта,
+  // НДС, способ оплаты — версия 0.2.2, п.3) и «Накладные расходы» (0.4.3, п.1
+  // — см. решение Антона в 0.4.5: ближе к бухгалтерскому реестру компании).
+  // 0.4.5, п.1: до этой версии та же галочка ЕЩЁ И открывала «Наличные
+  // расходы» — теперь это отдельное право, см. canEditCashExpenses() ниже.
   // 0.4.4: раньше это было "роль ИЛИ галочка" (Администратор/Руководитель/
   // Финансист получали право безусловно) — теперь это ЧИСТО персональная
   // галочка can_edit_registry, которую окно «Права» выставляет свободно для
@@ -752,6 +767,17 @@
   // владелец может её снять даже для этих ролей.
   function canEditRegistry(){
     return !!(state.me && state.me.can_edit_registry);
+  }
+  // 0.4.5, п.1 (по просьбе Антона): право редактировать «Наличные расходы» —
+  // выдачи прорабам, сами расходы (материал/работа/командировочные/другое),
+  // смену категории, импорт таблицы — отделено от canEditRegistry() выше,
+  // чтобы, например, прораб или гл. инженер могли сами вносить расходы, не
+  // получая при этом доступ к «Реестру платежей». Как и остальные персональные
+  // права, роль лишь подставляет значение по умолчанию при смене роли (см.
+  // ROLE_DEFAULT_EDIT_CASH_EXPENSES/reseedPermissionsForRole выше) — дальше
+  // это свободная галочка в «Правах», независимая от роли.
+  function canEditCashExpenses(){
+    return !!(state.me && state.me.can_edit_cash_expenses);
   }
   // 0.3.2 (по просьбе Антона, п.3): галочку "Выдано" в «Выдачах» может
   // ставить ТОЛЬКО Финансист — строже, чем canEditRegistry() выше (которая
@@ -1529,7 +1555,12 @@
     importHeaders: [], importRows: [], importMapping: {}, importResult: null, importBusy: false, importFileError: "",
     // «Финансы» → «Наличные расходы» (0.2.4): вставка таблицы, как импорт c-lector,
     // но отдельное состояние — свой набор колонок и своя целевая таблица.
-    cashImportHeaders: [], cashImportRows: [], cashImportMapping: {}, cashImportResult: null, cashImportBusy: false, cashImportFileError: ""
+    cashImportHeaders: [], cashImportRows: [], cashImportMapping: {}, cashImportResult: null, cashImportBusy: false, cashImportFileError: "",
+    // 0.4.5, п.5: какие строки предпросмотра импорта (по индексу) и какие уже
+    // сохранённые группы (по group_key) сейчас развёрнуты — см.
+    // cashImportBlock()/viewCashExpenses().
+    cashImportGroupExpanded: {},
+    cashExpenseGroupExpanded: {}
   };
   var notesChannel = null;
 
@@ -1608,7 +1639,7 @@
       // handle_new_user (гонка сразу после первого входа) — role:"pending" в тон
       // реальному значению по умолчанию в БД (см. supabase_schema.sql), чтобы
       // такой человек тоже увидел экран ожидания, а не получил доступ по ошибке.
-      state.me = res.data || {id:state.session.user.id, email:state.session.user.email, name:"", role:"pending", active:true, extra_views:[], can_edit_registry:false};
+      state.me = res.data || {id:state.session.user.id, email:state.session.user.email, name:"", role:"pending", active:true, extra_views:[], can_edit_registry:false, can_edit_cash_expenses:false};
     });
   }
 
@@ -3193,10 +3224,19 @@
     });
   }
 
-  /* ---- Бригады: создание/переименование/участники/удаление ---- */
+  /* ---- Исполнители: создание/переименование/удаление ---- */
+  // 0.4.5, п.3 (по просьбе Антона): раньше "Бригады" были именованными
+  // группами с постоянным списком участников (members) — но поскольку люди
+  // на самом деле свободно переходят из бригады в бригаду, это переработано
+  // в плоский справочник отдельных фамилий ("Исполнители"). Таблица crews в
+  // базе та же самая (внутренний ключ раздела/навигации тоже остался "crews"
+  // — переименовано только то, что видит пользователь), просто теперь каждая
+  // строка — это один человек, а не бригада со своим составом; колонка
+  // members в базе больше не используется (не удаляем, чтобы не усложнять
+  // миграцию, просто не читаем и не пишем в неё).
   function createCrew(name){
     if(!name || !name.trim()) return;
-    sb.from("crews").insert({name:name.trim(), members:[]}).then(function(){});
+    sb.from("crews").insert({name:name.trim()}).then(function(){});
   }
   function renameCrew(id, name){
     if(!name || !name.trim()) return;
@@ -3205,15 +3245,20 @@
   function deleteCrew(id){
     sb.from("crews").delete().eq("id", id).then(function(){});
   }
-  function addCrewMember(crew, name){
-    if(!name || !name.trim()) return;
-    var members = (crew.members||[]).slice();
-    if(members.indexOf(name.trim())===-1) members.push(name.trim());
-    sb.from("crews").update({members:members}).eq("id", crew.id).then(function(){});
-  }
-  function removeCrewMember(crew, name){
-    var members = (crew.members||[]).filter(function(m){ return m!==name; });
-    sb.from("crews").update({members:members}).eq("id", crew.id).then(function(){});
+  // Назначение "Исполнителя" в карточке заявки (см. renderTicketPanel, пункт
+  // "Бригада") принимает и выбор из выпадающего списка, и ручной ввод текста
+  // — если вписанного вручную имени ещё нет ни среди "Главных инженеров"
+  // (специалистов), ни в справочнике "Исполнители", оно добавляется сюда
+  // автоматически, чтобы в следующий раз его можно было просто выбрать.
+  function ensurePerformerInDirectory(name){
+    if(!name) return;
+    var trimmed = String(name).trim();
+    if(!trimmed) return;
+    var isSpecialist = (state.profiles||[]).some(function(m){ return m.role==="specialist" && m.active!==false && (m.name||m.email)===trimmed; });
+    if(isSpecialist) return;
+    var exists = (state.crews||[]).some(function(c){ return c.name===trimmed; });
+    if(exists) return;
+    sb.from("crews").insert({name:trimmed}).then(function(){});
   }
 
   /* ============================== RENDER HELPERS ============================== */
@@ -3454,8 +3499,12 @@
     // состояние (пока только у "Материал"). opts.title — заголовок (1 строка,
     // длинный текст обрезается), opts.meta — счётчик файлов/кнопка "прикрепить"
     // (видны всегда), opts.body — раскрывающееся содержимое, видно только когда
-    // раскрыто.
-    var open = !!(state.milestoneOpen && state.milestoneOpen[opts.key]);
+    // раскрыто. 0.4.5, п.4 (по просьбе Антона): "Работа" лишилась поля "Кол-во
+    // часов" и теперь может остаться вообще без body ("" — раскрывать нечего)
+    // — в этом случае стрелка-шеврон и сам клик по заголовку для раскрытия не
+    // показываются вовсе, чтобы не обещать содержимое, которого нет.
+    var hasBody = !!(opts.body && String(opts.body).length);
+    var open = hasBody && !!(state.milestoneOpen && state.milestoneOpen[opts.key]);
     // opts.warn (пока только у "Материал", см. materialsState()) — промежуточное
     // жёлтое состояние вдобавок к обычному done/не done.
     var iconCls = opts.done ? " done" : (opts.warn ? " warn" : "");
@@ -3463,11 +3512,11 @@
       ? h`<button type="button" class="milestone-icon${iconCls}" data-action="${opts.toggleAction}" data-id="${opts.toggleId}" data-val="${opts.toggleVal}" title="${opts.done?'Снять отметку':'Отметить выполненным'}">${opts.icon}</button>`
       : h`<span class="milestone-icon${iconCls}">${opts.icon}</span>`;
     return h`<div class="milestone-row">
-      <div class="milestone-hd" data-action="toggle-milestone" data-key="${opts.key}">
+      <div class="milestone-hd" data-key="${opts.key}" ${hasBody?h`data-action="toggle-milestone"`:''}>
         ${iconTag}
         <span class="milestone-title" title="${escapeHtml(opts.title)}">${opts.title}</span>
         ${opts.meta||""}
-        <span class="milestone-chevron">${open?'▾':'▸'}</span>
+        ${hasBody ? h`<span class="milestone-chevron">${open?'▾':'▸'}</span>` : ""}
       </div>
       ${open ? h`<div class="milestone-body">${opts.body}</div>` : ""}
     </div>`;
@@ -4287,6 +4336,12 @@
     var primary = group.primary;
     var members = group.members;
     var isGroup = members.length>1;
+    // 0.4.5, п.2 (по просьбе Антона): кнопка "Счёт" в "Реестре платежей" раньше
+    // всегда называлась просто "счёт" — теперь показывает, к какому пункту
+    // чек-листа заявки он был прикреплён: "Материал" (category='materials')
+    // или "Работа" (category='crew', т.е. был прикреплён в разделе "Бригада").
+    // Имя файла по-прежнему видно в title (при наведении) и не меняется.
+    var invoiceBtnLabel = primary.category==='materials' ? 'Материал' : (primary.category==='crew' ? 'Работа' : 'счёт');
     var rows = members.map(function(iv){ return { iv:iv, tk: state.tickets.find(function(x){return x.id===iv.ticket_id;}) }; });
     var hotelsById = {};
     rows.forEach(function(r){ var h2 = r.tk?hotelById(r.tk.hotel_id):null; if(h2) hotelsById[h2.id]=h2; });
@@ -4352,7 +4407,7 @@
       <td class="mono" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${isGroup ? h`<button type="button" class="btn btn-ghost btn-sm registry-expand-btn" data-action="registry-group-toggle" data-key="${escapeHtml(group.key)}" title="${expanded?'Свернуть':'Показать долю каждой заявки'}">${expanded?'▾':'▸'}</button>` : ""}${refCell}</td>
       <td style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center;" title="${escapeHtml(hotelTitle)}">${hotelCell}</td>
       <td>
-        <button class="btn btn-sm registry-file-btn" data-action="invoice-open" data-path="${escapeHtml(primary.file_path)}" title="${escapeHtml(primary.file_name)}">счёт</button>
+        <button class="btn btn-sm registry-file-btn" data-action="invoice-open" data-path="${escapeHtml(primary.file_path)}" title="${escapeHtml(primary.file_name)}">${invoiceBtnLabel}</button>
         ${(!isGroup && group.hiddenCount) ? h`<div class="muted registry-related-line">Также на ${group.hiddenCount} ${pluralRu(group.hiddenCount,'заявке','заявках','заявках')} — скрыто фильтром</div>` : ""}
         ${suspiciousMatch ? h`<div class="registry-suspicious-match">
           <span title="Имя файла типично для сканера/камеры («${escapeHtml(primary.file_name)}») — возможно, это на самом деле РАЗНЫЕ счета со случайно одинаковым именем, а не один общий счёт. Проверьте в развёрнутом виде («это другой счёт»).">⚠ похоже на случайное совпадение имени</span>
@@ -4776,7 +4831,7 @@
     return CASH_ACCOUNTED_BASIS_LABEL[a.accounted_basis] || a.accounted_basis;
   }
   function setCashAdvanceAccountedBasis(id, val){
-    if(!canEditRegistry()) return;
+    if(!canEditCashExpenses()) return;
     var a = (state.cashAdvances||[]).find(function(x){ return x.id===id; });
     var patch = { accounted_basis: val || null };
     // Смена способа на не-"свой" стирает ранее введённый свой процент — тем же
@@ -4787,7 +4842,7 @@
     sb.from("cash_advances").update(patch).eq("id", id).then(function(res){ if(res && res.error) alert("Не удалось сохранить: " + res.error.message); });
   }
   function setCashAdvanceAccountedCustomPct(id, val){
-    if(!canEditRegistry()) return;
+    if(!canEditCashExpenses()) return;
     var pct = val==="" ? null : Number(val);
     if(pct!=null && !isFinite(pct)) return;
     var a = (state.cashAdvances||[]).find(function(x){ return x.id===id; });
@@ -4846,7 +4901,7 @@
     return { invoiceSum: invoiceSum, cashSum: cashSum, total: invoiceSum + cashSum, invoiceCount: paidInvoices.length, cashCount: cashRows.length, missingAmountCount: missingAmountCount };
   }
   function addCashAdvance(data){
-    if(!canEditRegistry()){ alert("Фиксировать выдачу наличных может только Администратор, Руководитель или Финансист."); return false; }
+    if(!canEditCashExpenses()){ alert("Фиксировать выдачу наличных может только тот, кому выдано право «Наличные расходы»."); return false; }
     var person = (data.person||"").trim();
     if(!person){ alert("Укажите, кому выданы наличные."); return false; }
     var amount = Number(data.amount);
@@ -4861,7 +4916,7 @@
     return true;
   }
   function deleteCashAdvance(id){
-    if(!canEditRegistry()) return;
+    if(!canEditCashExpenses()) return;
     if(!confirm("Удалить эту запись о выдаче?")) return;
     sb.from("cash_advances").delete().eq("id", id).then(function(){});
   }
@@ -4869,16 +4924,15 @@
   // деньги реально ушли (в отличие от факта записи выдачи в систему).
   // Раньше это могли делать ТОЛЬКО Финансисты (isFinance()) — по просьбе
   // Антона (0.4.1: "у администратора должно работать всё, я не могу и
-  // финансист сейчас её снять") расширено до canEditRegistry() — тех же
-  // ролей, что редактируют "Оплачено"/"Сумма" счёта в «Реестре платежей»
-  // (Администратор/Руководитель/Финансист + отдельно выданное право).
-  // Учтите: это снимает независимую проверку "не тот же человек, кто
-  // записал выдачу, подтверждает и её выдачу" — если понадобится обратно
-  // только Финансисту, замените canEditRegistry() здесь и в разметке ниже
-  // обратно на isFinance().
-  function canConfirmCashAdvance(){ return canEditRegistry(); }
+  // финансист сейчас её снять") расширено до тех же прав, что редактируют
+  // остальные «Наличные расходы» (0.4.5, п.1: было canEditRegistry() — теперь
+  // это отдельное право canEditCashExpenses()). Учтите: это снимает
+  // независимую проверку "не тот же человек, кто записал выдачу, подтверждает
+  // и её выдачу" — если понадобится обратно только Финансисту, замените
+  // canEditCashExpenses() здесь и в разметке ниже обратно на isFinance().
+  function canConfirmCashAdvance(){ return canEditCashExpenses(); }
   function setCashAdvanceConfirmed(id, val){
-    if(!canConfirmCashAdvance()){ alert("Отмечать выдачу как «Выдано» может только Администратор, Руководитель или Финансист."); return; }
+    if(!canConfirmCashAdvance()){ alert("Отмечать выдачу как «Выдано» может только тот, кому выдано право «Наличные расходы»."); return; }
     var a = (state.cashAdvances||[]).find(function(x){ return x.id===id; });
     var confirmedAt = val ? new Date().toISOString() : (a ? a.confirmed_at : null);
     if(a){ a.confirmed = val; a.confirmed_at = confirmedAt; }
@@ -4941,7 +4995,7 @@
     // Остальные категории по-прежнему строго "одна заявка на расход" —
     // решение Антона не менялось (см. resolveTicketRef выше).
     if(data.category==="travel") return addTravelExpense(data);
-    if(!canEditRegistry()){ alert("Вносить наличные расходы может только Администратор, Руководитель или Финансист."); return false; }
+    if(!canEditCashExpenses()){ alert("Вносить наличные расходы может только тот, кому выдано право «Наличные расходы»."); return false; }
     var person = (data.person||"").trim();
     var description = (data.description||"").trim();
     if(!person || !description){ alert("Укажите наименование и кто потратил."); return false; }
@@ -4963,7 +5017,7 @@
     return true;
   }
   function deleteCashExpense(id){
-    if(!canEditRegistry()) return;
+    if(!canEditCashExpenses()) return;
     if(!confirm("Удалить эту запись о расходе?")) return;
     sb.from("cash_expenses").delete().eq("id", id).then(function(){});
   }
@@ -4994,6 +5048,28 @@
     for(var i=0;i<n;i++){ out.push(base + (i<remainder?1:0)); }
     return out;
   }
+  // 0.4.5, п.5 (по просьбе Антона): тот же принцип, что и splitAmountEvenly
+  // выше, но для количества при разбивке импорта «Наличные расходы» на
+  // несколько заявок — округление до СОТЫХ (а не до целых), потому что
+  // количество материала/работ обычно дробное. Остаток (в сотых) раздаётся
+  // по одной сотой первым N заявкам — сумма долей всегда точно равна исходному
+  // количеству.
+  function splitQtyEvenly(total, n){
+    if(n<=0) return [];
+    var cents = Math.round((Number(total)||0)*100);
+    var base = Math.floor(cents/n);
+    var remainder = cents - base*n;
+    var out = [];
+    for(var i=0;i<n;i++){ out.push((base + (i<remainder?1:0))/100); }
+    return out;
+  }
+  // Ключ группы для импорта «Наличные расходы», где одна строка отчёта прораба
+  // (несколько заявок сразу) разносится на несколько строк cash_expenses —
+  // просто общая метка для сворачивания в один пункт в интерфейсе (см.
+  // viewCashExpenses/cashExpenseGroupRow), в расчётах не участвует.
+  function genGroupKey(){
+    return (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : ("grp-"+Date.now()+"-"+Math.random().toString(36).slice(2,10));
+  }
   // 0.4.3, п.2: командировочные, перечисленные бригаде/прорабу одним переводом
   // сразу на несколько заявок — по просьбе Антона заносятся в "Наличные"
   // (категория "travel"), а не в отдельный раздел. Если доли заявок не
@@ -5006,7 +5082,7 @@
   // ставку, что и у прочих наличных расходов этого же человека (0.4.2) —
   // отдельной логики здесь не нужно, она уже общая для cash_expenses.person.
   function addTravelExpense(data){
-    if(!canEditRegistry()){ alert("Вносить командировочные расходы может только Администратор, Руководитель или Финансист."); return false; }
+    if(!canEditCashExpenses()){ alert("Вносить командировочные расходы может только тот, кому выдано право «Наличные расходы»."); return false; }
     var person = (data.person||"").trim();
     var description = (data.description||"").trim() || "Командировочные";
     if(!person){ alert("Укажите, кому перечислены командировочные (бригада/прораб)."); return false; }
@@ -5057,7 +5133,7 @@
   // же приёмом снимает галочку "оплачено за наличные" (maybeClearMaterialsCashPending),
   // что и при создании нового расхода этой категории.
   function setCashExpenseCategory(id, val){
-    if(!canEditRegistry()) return;
+    if(!canEditCashExpenses()) return;
     var category = (val==="other" || val==="crew" || val==="travel") ? val : "materials";
     var ce = (state.cashExpenses||[]).find(function(x){ return x.id===id; });
     if(ce) ce.category = category;
@@ -5135,6 +5211,20 @@
   // Строит превью строк для подтверждения перед вставкой — дата/мотель/заявка
   // уже разрешены в реальные объекты (или null, если не найдено/неоднозначно),
   // чтобы дальше и предпросмотр, и commitCashImport() читали готовое значение.
+  // 0.4.5, п.5 (по просьбе Антона — прораб Веренков подгружает Excel, где
+  // строка часто указывает СРАЗУ несколько заявок, напр. "437, 438, 452, 452,
+  // 470, 472, 492"): раньше такая строка сохранялась вовсе БЕЗ привязки к
+  // заявке (ticketAmbiguous=true). Теперь колонка "Заявка" разбирается тем же
+  // parseTicketRefList, что и командировочные (см. addTravelExpense) —
+  // одинаковый номер, встретившийся дважды, НЕ схлопывается в один (для
+  // единообразия с уже принятым поведением командировочных), каждое
+  // вхождение получает свою долю. Сумма делится поровну до целых
+  // (splitAmountEvenly), количество — до сотых (splitQtyEvenly); опционально
+  // можно явно указать долю конкретной заявки через "437:1000" — как и в
+  // командировочных, остаток делится поровну между остальными. Такая строка
+  // помечается isGroup=true и при сохранении (commitCashImport) разворачивается
+  // в N строк cash_expenses с общим group_key — они показываются в «Наличных
+  // расходах» одной сворачиваемой группой (см. viewCashExpenses).
   function buildCashImportPreview(){
     var m = state.cashImportMapping;
     function get(row, field){ var idx = m[field]; return (idx!==undefined && idx!=="" && row[idx]!=null) ? row[idx] : ""; }
@@ -5142,39 +5232,80 @@
       var dateRaw = get(row,"date"); var date = parseCLectorDate(dateRaw);
       var hotelName = get(row,"hotel"); var hotel = matchHotelByName(hotelName);
       var ticketRaw = String(get(row,"ticket")||"").trim();
-      var ticketTokens = ticketRaw.split(/[,;]+/).map(function(s){return s.trim();}).filter(Boolean);
-      var ticket = null, ticketAmbiguous = false;
-      if(ticketTokens.length===1){ var tid = resolveTicketRef(ticketTokens[0]); if(tid) ticket = state.tickets.find(function(x){return x.id===tid;}); }
-      else if(ticketTokens.length>1){ ticketAmbiguous = true; }
+      var refTokens = parseTicketRefList(ticketRaw);
+      var ticket = null, ticketAmbiguous = false, isGroup = false, groupTickets = null, groupUnresolvedRefs = null;
+      if(refTokens.length===1){
+        var tid = resolveTicketRef(refTokens[0].ref);
+        if(tid) ticket = state.tickets.find(function(x){return x.id===tid;});
+      } else if(refTokens.length>1){
+        isGroup = true;
+        groupUnresolvedRefs = [];
+        groupTickets = refTokens.map(function(tok){
+          var gtid = resolveTicketRef(tok.ref);
+          var gtk = gtid ? state.tickets.find(function(x){return x.id===gtid;}) : null;
+          if(!gtk) groupUnresolvedRefs.push(tok.ref);
+          return { ref: tok.ref, ticket: gtk, explicitAmount: tok.amount };
+        }).filter(function(r){ return r.ticket; });
+        if(!groupTickets.length){ isGroup = false; ticketAmbiguous = true; }
+      }
       // 0.4.2 (по просьбе Антона, п.2): было Number(...) — при вставке из Excel
       // дробное количество приходит с запятой ("0,34"), а Number("0,34") это
       // NaN, поэтому кол-во молча превращалось в 1. parseMoney() уже умеет
       // разбирать и запятую, и точку (см. выше, "Цена" использует его же).
       var qty = parseMoney(get(row,"qty")) || 1;
       var unitCost = parseMoney(get(row,"unit_cost"));
+      var amount = qty*unitCost;
+      if(isGroup){
+        var n = groupTickets.length;
+        var explicitSum = groupTickets.reduce(function(s,r){ return s + (r.explicitAmount!=null?r.explicitAmount:0); }, 0);
+        var autoRows = groupTickets.filter(function(r){ return r.explicitAmount==null; });
+        var remaining = Math.round(amount) - Math.round(explicitSum);
+        var amountShares = autoRows.length ? splitAmountEvenly(Math.max(remaining,0), autoRows.length) : [];
+        var qtyShares = splitQtyEvenly(qty, n);
+        var autoIdx = 0;
+        groupTickets.forEach(function(r, i){
+          r.qty = qtyShares[i];
+          r.amount = r.explicitAmount!=null ? Math.round(r.explicitAmount) : amountShares[autoIdx++];
+        });
+      }
       return {
         description: get(row,"description") || "(без наименования)",
         dateRaw: dateRaw, date: date,
         hotelName: hotelName, hotel: hotel,
         ticketRaw: ticketRaw, ticket: ticket, ticketAmbiguous: ticketAmbiguous,
-        qty: qty, unitCost: unitCost, amount: qty*unitCost
+        isGroup: isGroup, groupTickets: groupTickets, groupUnresolvedRefs: groupUnresolvedRefs,
+        qty: qty, unitCost: unitCost, amount: amount
       };
     });
   }
   function commitCashImport(category, person){
-    if(!canEditRegistry()) return;
+    if(!canEditCashExpenses()) return;
     var preview = buildCashImportPreview();
     if(!preview.length) return;
     var createdBy = myLabelWithRole();
-    var payload = preview.map(function(p){
-      return {
-        date: p.date ? p.date.toISOString().slice(0,10) : new Date().toISOString().slice(0,10),
-        description: p.description, qty: p.qty, unit_cost: p.unitCost, amount: p.amount,
-        hotel_id: p.hotel ? p.hotel.id : null,
-        ticket_id: p.ticket ? p.ticket.id : null,
-        category: (category==="other" || category==="crew" || category==="travel") ? category : "materials",
-        person: person, created_by: createdBy
-      };
+    var finalCategory = (category==="other" || category==="crew" || category==="travel") ? category : "materials";
+    var payload = [];
+    preview.forEach(function(p){
+      var dateStr = p.date ? p.date.toISOString().slice(0,10) : new Date().toISOString().slice(0,10);
+      if(p.isGroup){
+        var groupKey = genGroupKey();
+        p.groupTickets.forEach(function(r){
+          payload.push({
+            date: dateStr, description: p.description, qty: r.qty, unit_cost: p.unitCost, amount: r.amount,
+            hotel_id: p.hotel ? p.hotel.id : null,
+            ticket_id: r.ticket.id,
+            category: finalCategory, person: person, created_by: createdBy,
+            group_key: groupKey
+          });
+        });
+      } else {
+        payload.push({
+          date: dateStr, description: p.description, qty: p.qty, unit_cost: p.unitCost, amount: p.amount,
+          hotel_id: p.hotel ? p.hotel.id : null,
+          ticket_id: p.ticket ? p.ticket.id : null,
+          category: finalCategory, person: person, created_by: createdBy
+        });
+      }
     });
     state.cashImportBusy = true; render();
     sb.from("cash_expenses").insert(payload).then(function(res){
@@ -5183,15 +5314,72 @@
       state.cashImportResult = { count: payload.length };
       state.cashImportHeaders = []; state.cashImportRows = []; state.cashImportMapping = {};
       render();
-      if(category==="materials"){
+      if(finalCategory==="materials"){
         payload.forEach(function(p){ if(p.ticket_id) maybeClearMaterialsCashPending(p.ticket_id); });
       }
     });
   }
-  function resetCashImport(){ state.cashImportHeaders=[]; state.cashImportRows=[]; state.cashImportMapping={}; state.cashImportResult=null; state.cashImportFileError=""; render(); }
+  function resetCashImport(){ state.cashImportHeaders=[]; state.cashImportRows=[]; state.cashImportMapping={}; state.cashImportResult=null; state.cashImportFileError=""; state.cashImportGroupExpanded={}; render(); }
+  // 0.4.5, п.5: файл Excel/CSV с отчётом прораба — тот же приём, что и
+  // основной импорт заявок (см. loadImportFile выше): xlsx/xls через
+  // XLSX.read, остальное — как разделённый текст. Раньше в «Наличных
+  // расходах» можно было только ВСТАВИТЬ таблицу текстом.
+  function loadCashImportFile(file){
+    var ext = (file.name.split(".").pop()||"").toLowerCase();
+    state.cashImportFileError = "";
+    if(ext==="xlsx" || ext==="xls"){
+      if(typeof XLSX==="undefined" || !XLSX.read){
+        state.cashImportFileError = "Не удалось загрузить модуль для чтения Excel-файлов (возможно, заблокирован интернет/VPN). Обновите страницу и попробуйте снова, либо вставьте таблицу текстом ниже.";
+        render();
+        return;
+      }
+      readFileAsBuffer(file).then(function(buf){
+        var wb = XLSX.read(buf, {type:"array"});
+        var sheet = wb.Sheets[wb.SheetNames[0]];
+        var aoa = XLSX.utils.sheet_to_json(sheet, {header:1, raw:false, defval:""});
+        aoa = aoa.filter(function(r){ return r.some(function(c){ return String(c||"").trim()!==""; }); });
+        if(!aoa.length){ state.cashImportFileError = "Файл прочитан, но в нём не найдено ни одной строки с данными."; render(); return; }
+        setCashImportData(aoa[0].map(String), aoa.slice(1));
+      }).catch(function(err){
+        state.cashImportFileError = "Не удалось прочитать файл: " + (err && err.message ? err.message : err) + ". Проверьте, что это корректный XLSX/XLS-файл, либо вставьте таблицу текстом ниже.";
+        render();
+      });
+    } else {
+      readFileAsText(file).then(function(text){
+        var parsed = parseDelimited(text);
+        if(!parsed.headers.length){ state.cashImportFileError = "Файл прочитан, но в нём не найдено ни одной строки с данными."; render(); return; }
+        setCashImportData(parsed.headers, parsed.rows);
+      }).catch(function(err){
+        state.cashImportFileError = "Не удалось прочитать файл: " + (err && err.message ? err.message : err) + ".";
+        render();
+      });
+    }
+  }
   var CASH_IMPORT_FIELD_LABEL = { date:"Дата", description:"Наименование", qty:"Кол-во", unit_cost:"Цена", hotel:"Мотель", ticket:"№ Заявки" };
+  // 0.4.5, п.5 (по просьбе Антона): строки cash_expenses, полученные разбивкой
+  // ОДНОЙ строки импорта на несколько заявок (см. buildCashImportPreview/
+  // commitCashImport), помечены общим group_key — в ленте «Расходы» их нужно
+  // показывать одной сворачиваемой группой (тем же приёмом, что и общий счёт
+  // на несколько заявок в «Реестре платежей», см. registryGroupRow), а не N
+  // независимыми строками подряд. Строки без group_key (обычные, включая
+  // "Командировочные" — те по-прежнему остаются отдельными строками, это
+  // осознанно не менялось, см. диалог с Антоном) идут как раньше, по одной.
+  function clusterCashExpenseRows(rows){
+    var seenAt = {};
+    var out = [];
+    rows.forEach(function(e){
+      if(e.group_key){
+        if(seenAt.hasOwnProperty(e.group_key)){ out[seenAt[e.group_key]].rows.push(e); return; }
+        seenAt[e.group_key] = out.length;
+        out.push({ isGroup:true, key:e.group_key, rows:[e] });
+      } else {
+        out.push({ isGroup:false, row:e });
+      }
+    });
+    return out;
+  }
   function viewCashExpenses(){
-    var editable = canEditRegistry();
+    var editable = canEditCashExpenses();
     var advances = (state.cashAdvances||[]).slice().sort(function(a,b){ return (b.date||"").localeCompare(a.date||""); });
     var expenses = (state.cashExpenses||[]).slice().sort(function(a,b){ return (b.date||"").localeCompare(a.date||""); });
     var persons = distinctCashPersons();
@@ -5260,7 +5448,7 @@
                         ${a.accounted_basis==='custom' ? h`<input type="number" data-cash-advance-accounted-custom-pct data-id="${a.id}" value="${a.accounted_custom_pct!=null?a.accounted_custom_pct:''}" placeholder="%" min="0" max="99" step="0.1" style="width:60px;margin-top:4px;" ${editable?'':'disabled'}>` : ''}
                         ${a.accounted_basis ? h`<div class="mono muted" style="font-size:11.5px;margin-top:2px;">${fmtSum(cashAdvanceAccounted(a))} ₸</div>` : ''}
                       </td>
-                      <td style="text-align:center;"><input type="checkbox" data-action="cash-advance-confirm-toggle" data-id="${a.id}" data-val="${a.confirmed?'0':'1'}" ${a.confirmed?'checked':''} ${canConfirmCashAdvance()?'':'disabled'} title="${canConfirmCashAdvance()?'Отметить, что деньги фактически выданы':'Отмечать может только Администратор, Руководитель или Финансист'}"></td>
+                      <td style="text-align:center;"><input type="checkbox" data-action="cash-advance-confirm-toggle" data-id="${a.id}" data-val="${a.confirmed?'0':'1'}" ${a.confirmed?'checked':''} ${canConfirmCashAdvance()?'':'disabled'} title="${canConfirmCashAdvance()?'Отметить, что деньги фактически выданы':'Отмечать может только тот, кому выдано право «Наличные расходы»'}"></td>
                       <td>${a.receipt_path ? h`<a href="#" data-action="cash-receipt-open" data-path="${escapeHtml(a.receipt_path)}" title="${escapeHtml(a.receipt_name||'')}">📎 чек</a>${editable?h` <a href="#" data-action="cash-receipt-delete" data-id="${a.id}" data-path="${escapeHtml(a.receipt_path)}" style="color:var(--crit);" title="Удалить чек">✕</a>`:''}` : (editable ? h`<label class="btn btn-ghost btn-sm" style="cursor:pointer;">Приложить<input type="file" data-cash-receipt-upload="${a.id}" accept="image/*,.pdf" style="display:none;"></label>` : '—')}</td>
                       ${editable?h`<td><a href="#" data-action="cash-advance-delete" data-id="${a.id}" style="color:var(--crit);">✕</a></td>`:''}
                     </tr>`;
@@ -5291,7 +5479,7 @@
                   var header = h`<tr class="cash-person-divider" data-action="cash-person-toggle" data-key="${escapeHtml(groupKey)}" style="cursor:pointer;">
                     <td colspan="${editable?10:9}"><button type="button" class="btn btn-ghost btn-sm registry-expand-btn" style="margin-right:6px;" title="${expanded?'Свернуть':'Показать расходы'}">${expanded?'▾':'▸'}</button><b>${escapeHtml(g.person)}</b> <span class="muted">— ${g.rows.length} ${ruPlural(g.rows.length,['расход','расхода','расходов'])}, ${fmtSum(sumSpent)} ₸</span></td>
                   </tr>`;
-                  var body = !expanded ? "" : g.rows.map(function(e){
+                  function cashExpenseRow(e){
                     var hotel = e.hotel_id ? hotelById(e.hotel_id) : null;
                     var tk = e.ticket_id ? state.tickets.find(function(x){return x.id===e.ticket_id;}) : null;
                     return h`<tr>
@@ -5312,6 +5500,25 @@
                       <td class="muted" style="white-space:nowrap;">${escapeHtml(e.person)}</td>
                       ${editable?h`<td><a href="#" data-action="cash-expense-delete" data-id="${e.id}" style="color:var(--crit);">✕</a></td>`:''}
                     </tr>`;
+                  }
+                  var body = !expanded ? "" : clusterCashExpenseRows(g.rows).map(function(cl){
+                    if(!cl.isGroup) return cashExpenseRow(cl.row);
+                    // 0.4.5, п.5: несколько строк одного импортированного пункта
+                    // отчёта (общий group_key, см. clusterCashExpenseRows выше) —
+                    // одна сворачиваемая строка вместо N подряд, тем же приёмом,
+                    // что и общий счёт на несколько заявок в «Реестре платежей».
+                    var gexpanded = !!state.cashExpenseGroupExpanded[cl.key];
+                    var first = cl.rows[0];
+                    var sumAmt = cl.rows.reduce(function(s,e){ return s+(Number(e.amount)||0); }, 0);
+                    var header2 = h`<tr class="registry-group-row">
+                      <td class="mono muted" style="white-space:nowrap;">${fmtDateShort(first.date)}</td>
+                      <td colspan="${editable?9:8}">
+                        <button type="button" class="btn btn-ghost btn-sm registry-expand-btn" data-action="cash-expense-group-toggle" data-key="${escapeHtml(cl.key)}" title="${gexpanded?'Свернуть':'Показать долю каждой заявки'}">${gexpanded?'▾':'▸'}</button>
+                        ${escapeHtml(first.description)} <span class="muted">— общий на ${cl.rows.length} ${pluralRu(cl.rows.length,'заявку','заявки','заявок')}, ${fmtSum(sumAmt)} ₸, ${escapeHtml(first.person)}</span>
+                      </td>
+                    </tr>`;
+                    var subRows = !gexpanded ? "" : cl.rows.map(cashExpenseRow).join("");
+                    return header2 + subRows;
                   }).join("");
                   return header + body;
                 }).join("")}
@@ -5408,9 +5615,10 @@
     }
     if(state.cashImportHeaders.length===0){
       return h`<div class="card card-pad">
-        <div class="section-title">Вставить таблицу отчёта прораба</div>
-        <div class="helptext" style="margin-bottom:8px;">Скопируйте таблицу из Excel (со строкой заголовков: Дата/Наименование/Кол-во/Стоимость/Мотель/№ Заявки — порядок колонок не важен) и вставьте сюда.</div>
-        <div class="field"><textarea id="cash-import-paste" rows="6" placeholder="Вставьте скопированную таблицу (Ctrl+V)…"></textarea></div>
+        <div class="section-title">Импорт отчёта прораба</div>
+        <div class="helptext" style="margin-bottom:8px;">Загрузите файл Excel/CSV (со строкой заголовков: Дата/Наименование/Кол-во/Стоимость/Мотель/№ Заявки — порядок колонок не важен), либо скопируйте таблицу и вставьте текстом ниже. Если в колонке «№ Заявки» указано сразу несколько номеров через запятую (напр. «437, 438, 452») — сумма и количество будут поровну распределены между этими заявками (см. предпросмотр далее).</div>
+        <div class="field"><label>Файл (.xlsx, .xls, .csv)</label><input type="file" id="cash-import-file" accept=".csv,.txt,.xlsx,.xls" style="width:auto;"></div>
+        <div class="field" style="margin-top:6px;"><label>…или вставьте таблицу текстом</label><textarea id="cash-import-paste" rows="6" placeholder="Вставьте скопированную таблицу (Ctrl+V)…"></textarea></div>
         <button class="btn btn-primary" id="cash-import-parse-btn">Разобрать вставленные данные</button>
         ${state.cashImportFileError ? h`<div class="banner" style="margin-top:12px;">${state.cashImportFileError}</div>` : ""}
       </div>`;
@@ -5418,7 +5626,10 @@
     var preview = buildCashImportPreview();
     var unresolvedHotel = preview.filter(function(p){return p.hotelName && !p.hotel;}).length;
     var ambiguousTicket = preview.filter(function(p){return p.ticketAmbiguous;}).length;
+    var groupRowsCount = preview.filter(function(p){return p.isGroup;}).length;
+    var groupsWithUnresolved = preview.filter(function(p){return p.isGroup && p.groupUnresolvedRefs && p.groupUnresolvedRefs.length;});
     var totalAmount = preview.reduce(function(s,p){return s+p.amount;}, 0);
+    var actualRowCount = preview.reduce(function(s,p){ return s + (p.isGroup ? p.groupTickets.length : 1); }, 0);
     return h`<div class="card card-pad">
       <div class="section-title">Проверьте распознанные колонки</div>
       <div class="field-row" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr));">
@@ -5437,7 +5648,31 @@
       </div>
       <div class="table-wrap" style="max-height:360px;overflow-y:auto;"><table>
         <thead><tr><th>Дата</th><th>Наименование</th><th class="num">Кол-во</th><th class="num">Цена</th><th class="num">Сумма</th><th>Мотель</th><th>Заявка</th></tr></thead>
-        <tbody>${preview.map(function(p){
+        <tbody>${preview.map(function(p, idx){
+          if(p.isGroup){
+            var expanded = !!state.cashImportGroupExpanded[idx];
+            var rows = h`<tr>
+              <td class="mono ${p.date?'':'text-warn'}">${p.date ? fmtDateShort(p.date.toISOString()) : (p.dateRaw||'—')}</td>
+              <td>${escapeHtml(p.description)}</td>
+              <td class="num mono">${p.qty}</td>
+              <td class="num mono">${p.unitCost}</td>
+              <td class="num mono">${p.amount}</td>
+              <td class="${p.hotelName && !p.hotel ? 'text-warn' : 'muted'}">${p.hotel ? ('№'+p.hotel.id+' '+escapeHtml(p.hotel.name)) : (p.hotelName || '—')}</td>
+              <td class="mono">
+                <button type="button" class="btn btn-ghost btn-sm" data-action="cash-import-group-toggle" data-id="${idx}" title="${expanded?'Свернуть':'Показать долю каждой заявки'}">${expanded?'▾':'▸'}</button>
+                Общий на ${p.groupTickets.length} ${pluralRu(p.groupTickets.length,'заявку','заявки','заявок')}${p.groupUnresolvedRefs.length?h` <span class="text-warn" title="Эти номера не найдены среди заявок и будут пропущены: ${escapeHtml(p.groupUnresolvedRefs.join(', '))}">(не найдено: ${p.groupUnresolvedRefs.length})</span>`:''}
+              </td>
+            </tr>`;
+            if(expanded){
+              rows += p.groupTickets.map(function(r){
+                return h`<tr class="muted">
+                  <td></td><td style="padding-left:20px;">— ${escapeHtml(r.ticket.external_ref||r.ref)}</td>
+                  <td class="num mono">${r.qty}</td><td class="num mono">—</td><td class="num mono">${r.amount}</td><td></td><td></td>
+                </tr>`;
+              }).join("");
+            }
+            return rows;
+          }
           return h`<tr>
             <td class="mono ${p.date?'':'text-warn'}">${p.date ? fmtDateShort(p.date.toISOString()) : (p.dateRaw||'—')}</td>
             <td>${escapeHtml(p.description)}</td>
@@ -5449,9 +5684,9 @@
           </tr>`;
         }).join("")}</tbody>
       </table></div>
-      <div class="helptext" style="padding-top:8px;">Строк: ${preview.length}. Сумма: ${totalAmount.toLocaleString("ru-RU")}.${unresolvedHotel?' Не распознан мотель у '+unresolvedHotel+' '+pluralRu(unresolvedHotel,'строки','строк','строк')+' — сохранится без мотеля.':''}${ambiguousTicket?' У '+ambiguousTicket+' '+pluralRu(ambiguousTicket,'строки','строк','строк')+' указано несколько заявок сразу — сохранится без привязки к заявке.':''}</div>
+      <div class="helptext" style="padding-top:8px;">Строк: ${preview.length} (после разбивки по заявкам — ${actualRowCount}). Сумма: ${totalAmount.toLocaleString("ru-RU")}.${unresolvedHotel?' Не распознан мотель у '+unresolvedHotel+' '+pluralRu(unresolvedHotel,'строки','строк','строк')+' — сохранится без мотеля.':''}${ambiguousTicket?' У '+ambiguousTicket+' '+pluralRu(ambiguousTicket,'строки','строк','строк')+' указано несколько заявок, но ни одна не распознана — сохранится без привязки к заявке.':''}${groupRowsCount?' '+groupRowsCount+' '+pluralRu(groupRowsCount,'строка','строки','строк')+' с несколькими заявками будут разбиты поровну (▸ — посмотреть долю каждой).':''}${groupsWithUnresolved.length?' Часть номеров в групповых строках не найдена среди заявок — эти доли будут пропущены (см. отметки выше).':''}</div>
       <div style="display:flex;gap:8px;margin-top:8px;">
-        <button class="btn btn-primary" id="cash-import-commit-btn" ${state.cashImportBusy?'disabled':''}>${state.cashImportBusy?'Сохраняю…':'Сохранить '+preview.length+' '+pluralRu(preview.length,'строку','строки','строк')}</button>
+        <button class="btn btn-primary" id="cash-import-commit-btn" ${state.cashImportBusy?'disabled':''}>${state.cashImportBusy?'Сохраняю…':'Сохранить '+actualRowCount+' '+pluralRu(actualRowCount,'строку','строки','строк')}</button>
         <button class="btn btn-ghost" data-action="cash-import-reset">Отмена</button>
       </div>
       ${state.cashImportFileError ? h`<div class="banner" style="margin-top:12px;">${state.cashImportFileError}</div>` : ""}
@@ -5560,43 +5795,42 @@
     </div>`;
   }
 
-  /* ============================== БРИГАДЫ ============================== */
-  // Сколько сейчас активных (не выполненных/не отклонённых) заявок числится за
-  // бригадой — заявка на бригаду хранит assigned_to как "Бригада: <название>"
-  // (см. renderTicketPanel/assign-select).
+  /* ============================== ИСПОЛНИТЕЛИ ============================== */
+  // 0.4.5, п.3 (по просьбе Антона): "Бригады" переработаны в плоский справочник
+  // отдельных фамилий "Исполнители" — люди свободно переходят от заявки к
+  // заявке, а не закреплены за постоянной бригадой (см. комментарий у
+  // createCrew выше). Сколько сейчас активных (не выполненных/не отклонённых)
+  // заявок числится за исполнителем — раньше assigned_to хранил "Бригада:
+  // <название>", теперь новые назначения — просто имя как есть (см.
+  // assignSpecialist/renderTicketPanel); старые записи ДО 0.4.5 могли остаться
+  // с префиксом "Бригада: " — учитываем оба варианта, чтобы счётчик не
+  // занижал их для уже идущих заявок.
   function crewActiveCount(crewName){
-    var label = "Бригада: " + crewName;
-    return state.tickets.filter(function(t){ return t.assigned_to===label && !isTicketDone(t); }).length;
+    return state.tickets.filter(function(t){ return (t.assigned_to===crewName || t.assigned_to===("Бригада: "+crewName)) && !isTicketDone(t); }).length;
   }
   function viewCrews(){
     return h`
       <div class="two-col">
         <div class="card card-pad">
-          <div class="section-title">Бригады</div>
-          ${state.crews.length===0 ? h`<div class="empty-state"><b>Бригад пока нет</b>Создайте первую бригаду справа.</div>` : h`
-          <div class="row-gap">${state.crews.map(function(c){
+          <div class="section-title">Исполнители</div>
+          <div class="helptext" style="margin-bottom:10px;">Справочник фамилий тех, кого назначают исполнителем в пункте «Бригада» карточки заявки — один человек, а не бригада с постоянным составом (он может переходить от заявки к заявке). Пополняется и отсюда, и автоматически — если в карточке заявки вписать новое имя вручную.</div>
+          ${state.crews.length===0 ? h`<div class="empty-state"><b>Исполнителей пока нет</b>Добавьте первого справа.</div>` : h`
+          <div class="row-gap">${state.crews.slice().sort(function(a,b){ return (a.name||"").localeCompare(b.name||"", "ru"); }).map(function(c){
             var activeCount = crewActiveCount(c.name);
             return h`<div class="card card-pad" style="background:var(--surface-2);">
               <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
                 <input type="text" data-crew-rename="${c.id}" value="${escapeHtml(c.name)}" style="flex:1;min-width:160px;font-weight:600;">
-                <span class="pill ${activeCount>0?'pill-accent':'pill-neutral'}" title="Активных заявок на этой бригаде сейчас">${activeCount} в работе</span>
-                <button class="btn btn-sm btn-ghost btn-danger" data-action="crew-delete" data-id="${c.id}">Удалить бригаду</button>
+                <span class="pill ${activeCount>0?'pill-accent':'pill-neutral'}" title="Активных заявок на этом исполнителе сейчас">${activeCount} в работе</span>
+                <button class="btn btn-sm btn-ghost btn-danger" data-action="crew-delete" data-id="${c.id}">Удалить</button>
               </div>
-              <div class="chip-toggle" style="margin-top:10px;">
-                ${(c.members||[]).map(function(m){ return h`<label>${escapeHtml(m)} <a href="#" data-action="crew-member-remove" data-id="${c.id}" data-member="${escapeHtml(m)}" style="color:var(--crit);text-decoration:none;">✕</a></label>`; }).join("") || '<span class="muted" style="font-size:12px;">Участников пока нет.</span>'}
-              </div>
-              <form class="crew-member-form" data-id="${c.id}" style="margin-top:10px;display:flex;gap:6px;">
-                <input type="text" name="member" placeholder="Фамилия И.О." style="flex:1;min-width:140px;">
-                <button class="btn btn-sm" type="submit">Добавить</button>
-              </form>
             </div>`;
           }).join("")}</div>`}
         </div>
         <div class="card card-pad">
-          <div class="section-title">Новая бригада</div>
+          <div class="section-title">Новый исполнитель</div>
           <form id="crew-form">
-            <div class="field"><label>Название бригады</label><input type="text" name="name" required placeholder="напр. Бригада №1"></div>
-            <button class="btn btn-primary" type="submit">Создать</button>
+            <div class="field"><label>Фамилия И.О.</label><input type="text" name="name" required placeholder="напр. Веренков А.С."></div>
+            <button class="btn btn-primary" type="submit">Добавить</button>
           </form>
         </div>
       </div>
@@ -5972,7 +6206,8 @@
           <div>
             <div class="section-title">Ход работ ${infoTip("«Бригада» становится зелёной, когда назначен исполнитель, либо по галочке «бригада не нужна». «Материал» — жёлтый, пока приложенный счёт не отмечен «Оплачено» в «Реестре платежей» (наличные это не отменяют) ЛИБО пока отмечена галочка «оплачено за наличные», но соответствующий расход ещё не внесён в «Наличные расходы»; и зелёный по галочке «материал не нужен», или когда все приложенные счета оплачены, или когда по заявке есть наличный расход категории «Материал» из раздела «Финансы» (напр. счёт на плитку + нал на крестики под неё, либо просто оплата наличными без счёта вообще — тогда сначала ставится галочка «оплачено за наличные», а после того как прораб внесёт сам расход, она снимается автоматически и сумма подтягивается сюда). «Работа» — ручной флажок (для случаев, когда сделано по факту, а подтверждения в системе нет). «Акт» подтверждается прикреплённым файлом, либо тоже вручную, пока файла нет. Во всех случаях тот же значок сразу подсвечивается вверху карточки, у номера заявки. Когда отмечены все 4 пункта (и «Материал» именно зелёный, а не жёлтый), заявка автоматически переходит в статус «Выполнено».")}</div>
             ${(function(){
-              var crewFiles = invoicesFor(t, "crew").length;
+              var crewInvoiceList = invoicesFor(t, "crew");
+              var crewFiles = crewInvoiceList.length;
               var materialsFiles = invoicesFor(t, "materials").length;
               var materialsCash = cashExpensesFor(t, "materials");
               var materialsCashTotal = materialsCash.reduce(function(sum,ce){ return sum + (Number(ce.amount)||0); }, 0);
@@ -5988,6 +6223,19 @@
               var crewCash = cashExpensesFor(t, "crew").concat(crewCashTravel);
               var crewCashTotal = crewCash.reduce(function(sum,ce){ return sum + (Number(ce.amount)||0); }, 0);
               var fmtCashSum = function(n){ return (Number(n)||0).toLocaleString("ru-RU", {maximumFractionDigits:2}); };
+              // 0.4.5, п.3 (по просьбе Антона): общая сумма по пункту "Бригада" —
+              // счета/договоры (category="crew", "Учтено в затратах": без НДС,
+              // с доп. налогом по способу оплаты) + наличные (см. crewCashTotal
+              // выше). Пока курс/сумма хотя бы одного счёта ещё не посчитаны
+              // (acc.state!=="ok"), сумма помечена как приблизительная — во
+              // избежание молчаливого занижения итога.
+              var crewInvoiceSum = 0, crewInvoiceIncomplete = false;
+              crewInvoiceList.forEach(function(iv){
+                var acc = invoiceAccountedKZTForTicket(iv);
+                if(acc.state==="ok" && acc.value!=null) crewInvoiceSum += acc.value;
+                else crewInvoiceIncomplete = true;
+              });
+              var crewGrandTotal = crewInvoiceSum + crewCashTotal;
               var actPhotoCount = (state.photos||[]).filter(function(p){return p.ticket_id===t.id && p.category==="act";}).length;
               // "Бригада"/"Материал" (версия 0.2.2) больше не переключаются кликом
               // по значку — у них теперь свои явные элементы управления в теле
@@ -6020,12 +6268,12 @@
                     <select id="assign-select" style="max-width:240px;">
                       <option value="">Выбрать исполнителя…</option>
                       ${specialists.length ? h`<optgroup label="Главные инженеры">${specialists.map(function(s){return h`<option value="${escapeHtml(s.name||s.email)}">${escapeHtml(s.name||s.email)}</option>`;}).join("")}</optgroup>` : ""}
-                      ${state.crews.length ? h`<optgroup label="Бригады">${state.crews.map(function(c){return h`<option value="Бригада: ${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`;}).join("")}</optgroup>` : ""}
+                      ${state.crews.length ? h`<optgroup label="Исполнители">${state.crews.map(function(c){return h`<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`;}).join("")}</optgroup>` : ""}
                     </select>
                     <button class="btn btn-primary btn-sm" data-action="assign" data-id="${t.id}">Назначить</button>
                   </div>
                   <div class="actions-row" style="margin-bottom:8px;">
-                    <input type="text" id="assign-free-input" data-id="${t.id}" placeholder="…или впишите имя/название вручную" style="max-width:240px;">
+                    <input type="text" id="assign-free-input" data-id="${t.id}" placeholder="…или впишите имя вручную" style="max-width:240px;">
                     <button class="btn btn-sm" data-action="assign-free" data-id="${t.id}">Назначить</button>
                   </div>` : ""}
                   ${/* 0.3.6 (по просьбе Антона, п.3): раньше блок "сменить исполнителя"
@@ -6042,16 +6290,20 @@
                     <select id="reassign-select" style="max-width:240px;">
                       <option value="">Сменить исполнителя…</option>
                       ${specialists.length ? h`<optgroup label="Главные инженеры">${specialists.map(function(s){return h`<option value="${escapeHtml(s.name||s.email)}" ${t.assigned_to===(s.name||s.email)?'selected':''}>${escapeHtml(s.name||s.email)}</option>`;}).join("")}</optgroup>` : ""}
-                      ${state.crews.length ? h`<optgroup label="Бригады">${state.crews.map(function(c){return h`<option value="Бригада: ${escapeHtml(c.name)}" ${t.assigned_to===("Бригада: "+c.name)?'selected':''}>${escapeHtml(c.name)}</option>`;}).join("")}</optgroup>` : ""}
+                      ${state.crews.length ? h`<optgroup label="Исполнители">${state.crews.map(function(c){return h`<option value="${escapeHtml(c.name)}" ${(t.assigned_to===c.name || t.assigned_to===("Бригада: "+c.name))?'selected':''}>${escapeHtml(c.name)}</option>`;}).join("")}</optgroup>` : ""}
                     </select>
                     <button class="btn btn-sm" data-action="reassign" data-id="${t.id}">Сменить</button>
                     ${t.status==="dispatched" ? h`<button class="btn btn-sm" data-action="arrived" data-id="${t.id}">Отметить прибытие</button>` : ""}
                   </div>
                   <div class="actions-row" style="margin-bottom:8px;">
-                    <input type="text" id="reassign-free-input" data-id="${t.id}" placeholder="…или впишите имя/название вручную" style="max-width:240px;">
+                    <input type="text" id="reassign-free-input" data-id="${t.id}" placeholder="…или впишите имя вручную" style="max-width:240px;">
                     <button class="btn btn-sm" data-action="reassign-free" data-id="${t.id}">Сменить</button>
                   </div>` : ""}
                   ${t.assigned_to ? h`<div class="actions-row" style="margin-bottom:8px;"><a class="btn btn-sm" href="#/workorder/${t.id}">Наряд-задание</a></div>` : ""}
+                  ${(crewGrandTotal>0) ? h`<div style="display:flex;align-items:baseline;gap:6px;margin-bottom:10px;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);">
+                    <span style="font-size:12.5px;">Итого по работе:</span>
+                    <b style="font-size:15px;" title="${crewInvoiceIncomplete?'Не все суммы по счетам ещё посчитаны (курс/доля) — итог может увеличиться':'Счета (без НДС, с доп. налогом) + наличные'}">${fmtCashSum(crewGrandTotal)} ₸${crewInvoiceIncomplete?' (не все суммы учтены)':''}</b>
+                  </div>` : ""}
                   ${crewCash.length ? h`<div class="helptext" style="margin-bottom:8px;">Оплачено наличными (${crewCashTravel.length ? 'Работа + Командировочные' : 'Работа'}): ${fmtCashSum(crewCashTotal)} (${crewCash.length} ${ruPlural(crewCash.length,["запись","записи","записей"])}) — подтянуто автоматически из «Наличные расходы».</div>` : ""}
                   ${milestoneInvoiceList(t, "crew")}`
               })}
@@ -6094,12 +6346,14 @@
                 toggleAction: "work-manual-toggle", toggleId: t.id, toggleVal: workDone?'0':'1',
                 title: workDone ? "Работа отмечена выполненной" : "Работа ещё не выполнена",
                 meta: "",
-                body: h`
-                  <div class="actions-row" style="margin-top:0;">
-                    <input type="number" id="repair-hours-input" data-id="${t.id}" min="0" step="0.5" placeholder="Кол-во часов" value="${t.repair_hours!=null?t.repair_hours:''}" style="max-width:160px;">
-                    <span class="helptext">Часы главного инженера на устранение (для табеля, необязательно).</span>
-                    ${feedbackHtml("repair-hours-feedback")}
-                  </div>`
+                // 0.4.5, п.4 (по просьбе Антона): поле "Кол-во часов" (repair_hours)
+                // убрано из интерфейса — им фактически никто не пользовался, остаётся
+                // только сам ручной флажок "выполнено/не выполнено" (см. иконку выше).
+                // Колонку repair_hours в базе не трогаем (просто больше не показываем
+                // и не редактируем), body теперь пустое — см. пункт про пустое body у
+                // milestoneRow ниже, стрелка разворачивания у "Работы" из-за этого
+                // больше не показывается.
+                body: ""
               })}
               ${milestoneRow({
                 key: "act",
@@ -6278,7 +6532,8 @@
             </div>
             <hr style="margin:14px 0;border:none;border-top:1px solid var(--line);">
             <div class="chip-toggle" style="gap:8px;">
-              <label><input type="checkbox" name="editRegistry" ${m.can_edit_registry?'checked':''}> Может отмечать счета оплаченными (Реестр платежей / Наличные расходы)</label>
+              <label><input type="checkbox" name="editRegistry" ${m.can_edit_registry?'checked':''}> Может редактировать «Реестр платежей» и «Накладные расходы»</label>
+              <label><input type="checkbox" name="editCashExpenses" ${m.can_edit_cash_expenses?'checked':''}> Может вносить «Наличные расходы» (выдача под отчёт, расходы, командировочные, импорт)</label>
               <label><input type="checkbox" name="deleteTicket" ${m.can_delete_ticket?'checked':''}> Может удалять заявки</label>
             </div>
           </div>
@@ -6289,7 +6544,7 @@
       e.preventDefault();
       var fd = new FormData(e.target);
       var newExtra = PERMISSION_VIEWS.filter(function(v){ return fd.get("view_"+v[0]); }).map(function(v){ return v[0]; });
-      updateProfile(userId, {extra_views:newExtra, can_edit_registry: !!fd.get("editRegistry"), can_delete_ticket: !!fd.get("deleteTicket")});
+      updateProfile(userId, {extra_views:newExtra, can_edit_registry: !!fd.get("editRegistry"), can_edit_cash_expenses: !!fd.get("editCashExpenses"), can_delete_ticket: !!fd.get("deleteTicket")});
       closeModal();
     });
   }
@@ -6466,7 +6721,7 @@
       return;
     }
     if(!navAllowed(state.route.view)){ state.route = {view: firstAllowedView(), id:null}; }
-    var titleMap = {dashboard:"Дашборд", tickets:"Заявки", team:"Команда", parts:"Склад ЗИП", "import":"Заявки · Импорт из c-lector", registry:"Финансы · Реестр платежей", cashexpenses:"Финансы · Наличные расходы", overhead:"Финансы · Накладные расходы", crews:"Бригады", hotels:"Отели", systemdefects:"Системный брак", activity:"Активность"};
+    var titleMap = {dashboard:"Дашборд", tickets:"Заявки", team:"Команда", parts:"Склад ЗИП", "import":"Заявки · Импорт из c-lector", registry:"Финансы · Реестр платежей", cashexpenses:"Финансы · Наличные расходы", overhead:"Финансы · Накладные расходы", crews:"Исполнители", hotels:"Отели", systemdefects:"Системный брак", activity:"Активность"};
     var body = state.route.view==="tickets"?viewTickets(): state.route.view==="team"?viewTeam(): state.route.view==="parts"?viewParts(): state.route.view==="import"?viewImport(): state.route.view==="registry"?viewRegistry(): state.route.view==="cashexpenses"?viewCashExpenses(): state.route.view==="overhead"?viewOverhead(): state.route.view==="crews"?viewCrews(): state.route.view==="hotels"?viewHotels(): state.route.view==="systemdefects"?viewSystemDefects(): state.route.view==="activity"?viewActivity(): viewDashboard();
 
     // 0.2.17: «Импорт из c-lector» больше не отдельный пункт меню — он почти
@@ -6489,7 +6744,7 @@
     var navItems = [
       ["dashboard","Дашборд"], ["tickets","Заявки",["import"]],
       ["systemdefects","Системный брак"],
-      ["team","Команда",["activity"]], ["crews","Бригады"], ["parts","Склад ЗИП"], ["registry","Финансы",["cashexpenses","overhead"]], ["hotels","Отели"]
+      ["team","Команда",["activity"]], ["crews","Исполнители"], ["parts","Склад ЗИП"], ["registry","Финансы",["cashexpenses","overhead"]], ["hotels","Отели"]
     ].filter(function(x){ return navAllowed(x[0]); });
     // 0.3.9: затемнение позади выезжающего на телефоне сайдбара — рендерится
     // всегда (как и сам сайдбар), видимость целиком на CSS (.sidebar-scrim.open,
@@ -6637,12 +6892,13 @@
       if(action==="import-reset") return resetImport();
       if(action==="assign"){
         var sel=document.getElementById("assign-select"); var name=sel&&sel.value;
-        if(!name){ alert("Выберите исполнителя из списка (назначьте роль в «Команде» или создайте бригаду в «Бригадах», если список пуст)."); return; }
+        if(!name){ alert("Выберите исполнителя из списка (назначьте роль в «Команде» или добавьте в «Исполнители», если список пуст)."); return; }
         assignSpecialist(id,name); return;
       }
       if(action==="assign-free"){
         var afInput=document.getElementById("assign-free-input"); var afName=afInput&&afInput.value&&afInput.value.trim();
-        if(!afName){ alert("Впишите имя или название исполнителя."); return; }
+        if(!afName){ alert("Впишите имя исполнителя."); return; }
+        ensurePerformerInDirectory(afName);
         assignSpecialist(id,afName); if(afInput) afInput.value=""; return;
       }
       if(action==="reassign"){
@@ -6652,7 +6908,8 @@
       }
       if(action==="reassign-free"){
         var rfInput=document.getElementById("reassign-free-input"); var rfName=rfInput&&rfInput.value&&rfInput.value.trim();
-        if(!rfName){ alert("Впишите имя или название нового исполнителя."); return; }
+        if(!rfName){ alert("Впишите имя нового исполнителя."); return; }
+        ensurePerformerInDirectory(rfName);
         reassignSpecialist(id,rfName); if(rfInput) rfInput.value=""; return;
       }
       if(action==="arrived") return markArrived(id);
@@ -6679,6 +6936,18 @@
         var firstPaidId = id.split(",")[0];
         var ivForMonth = (state.invoices||[]).find(function(x){ return x.id===firstPaidId; });
         return openInvoicePaidMonthModal(id, ivForMonth ? ivForMonth.paid_at : null);
+      }
+      if(action==="cash-import-group-toggle"){
+        var ciIdx = actionEl.getAttribute("data-id");
+        state.cashImportGroupExpanded[ciIdx] = !state.cashImportGroupExpanded[ciIdx];
+        render();
+        return;
+      }
+      if(action==="cash-expense-group-toggle"){
+        var ceKey = actionEl.getAttribute("data-key");
+        state.cashExpenseGroupExpanded[ceKey] = !state.cashExpenseGroupExpanded[ceKey];
+        render();
+        return;
       }
       if(action==="registry-group-toggle"){
         var gkey = actionEl.getAttribute("data-key");
@@ -6791,13 +7060,7 @@
       }
       if(action==="toggle-desc-edit"){ state.editingDescShort = !state.editingDescShort; renderTicketPanel(); return; }
       if(action==="note-delete"){ e.preventDefault(); if(confirm("Удалить запись из журнала?")) deleteNote(id); return; }
-      if(action==="crew-delete"){ if(confirm("Удалить бригаду?")) deleteCrew(id); return; }
-      if(action==="crew-member-remove"){
-        e.preventDefault();
-        var crew = state.crews.find(function(c){return c.id===id;});
-        if(crew) removeCrewMember(crew, actionEl.getAttribute("data-member"));
-        return;
-      }
+      if(action==="crew-delete"){ if(confirm("Удалить исполнителя из справочника?")) deleteCrew(id); return; }
       if(action==="wo-download"){
         var tk = state.tickets.find(function(x){return x.id===id;});
         var htmlDoc = "<!doctype html><html><head><meta charset='utf-8'><title>"+workOrderNo(tk)+"</title></head><body>"+document.getElementById("wo-content").outerHTML+"</body></html>";
@@ -6868,6 +7131,7 @@
     if(e.target.matches("[data-cash-advance-accounted-custom-pct]")){ setCashAdvanceAccountedCustomPct(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.matches("[data-cash-expense-category]")){ setCashExpenseCategory(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.id==="import-file"){ var f=e.target.files&&e.target.files[0]; if(f) loadImportFile(f); return; }
+    if(e.target.id==="cash-import-file"){ var cf=e.target.files&&e.target.files[0]; if(cf) loadCashImportFile(cf); return; }
     if(e.target.matches("[data-cash-receipt-upload]")){ var crf=e.target.files&&e.target.files[0]; if(crf) uploadCashReceipt(e.target.getAttribute("data-cash-receipt-upload"), crf); return; }
     if(e.target.matches("[data-import-map]")){ state.importMapping[e.target.getAttribute("data-import-map")]=e.target.value; render(); return; }
     if(e.target.matches("[data-cash-import-map]")){ state.cashImportMapping[e.target.getAttribute("data-cash-import-map")]=e.target.value; render(); return; }
@@ -6878,15 +7142,6 @@
       return;
     }
     if(e.target.id==="case-select") setCaseType(e.target.getAttribute("data-id"), e.target.value);
-    if(e.target.id==="repair-hours-input"){
-      var rh = e.target.value===""?null:Number(e.target.value);
-      var rhId = e.target.getAttribute("data-id");
-      saveTicketField(rhId, {repair_hours: rh}, "repair-hours-feedback").then(function(ok){
-        if(!ok) return;
-        if(rh!=null) maybeAutoComplete(rhId);
-        addNote(rhId, rh!=null ? ("Указаны часы главного инженера на устранение: "+rh+".") : "Часы главного инженера на устранение сброшены.");
-      });
-    }
     if(e.target.id==="desc-short-input"){
       var dsId = e.target.getAttribute("data-id"), dsVal = e.target.value.trim()||null;
       saveTicketField(dsId, {description_short: dsVal}, "desc-short-feedback").then(function(ok){
@@ -7115,12 +7370,6 @@
     if(e.target.id==="crew-form"){
       e.preventDefault(); var fdc=new FormData(e.target); var name=(fdc.get("name")||"").trim();
       if(name){ createCrew(name); e.target.reset(); }
-    }
-    if(e.target.matches(".crew-member-form")){
-      e.preventDefault(); var fdm=new FormData(e.target); var member=(fdm.get("member")||"").trim();
-      var crewId = e.target.getAttribute("data-id");
-      var crew = state.crews.find(function(c){return c.id===crewId;});
-      if(member && crew){ addCrewMember(crew, member); e.target.reset(); }
     }
     if(e.target.id==="cash-advance-form"){
       e.preventDefault(); var fdca=new FormData(e.target);
