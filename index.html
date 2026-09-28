@@ -121,6 +121,20 @@
   .kpi-value.crit{ color:var(--crit); } .kpi-value.ok{ color:var(--ok); } .kpi-value.accent{ color:var(--accent); }
   .kpi-sub{ font-size:12px; color:var(--ink-faint); margin-top:3px; }
 
+  /* «Затраты по заявке» — карточка вместо плоского списка kv (по просьбе
+     Антона: сделать нагляднее/«красивее»), тот же акцентный язык, что и у
+     kpi-плиток на дашборде. */
+  .cost-summary{ background:var(--accent-soft); border:1px solid var(--accent-line); border-radius:10px; padding:14px 16px; }
+  .cost-summary-total{ display:flex; align-items:baseline; justify-content:space-between; gap:10px; }
+  .cost-summary-total-label{ font-size:12.5px; font-weight:600; color:var(--ink-soft); }
+  .cost-summary-total-value{ font-size:24px; font-weight:700; color:var(--accent); font-family:'SF Mono',Consolas,monospace; white-space:nowrap; }
+  .cost-summary-breakdown{ display:flex; flex-wrap:wrap; gap:18px; margin-top:10px; padding-top:10px; border-top:1px solid var(--accent-line); }
+  .cost-summary-item{ display:flex; flex-direction:column; gap:2px; }
+  .cost-summary-item-label{ font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-faint); font-weight:600; }
+  .cost-summary-item-value{ font-size:14.5px; font-weight:600; color:var(--ink); font-family:'SF Mono',Consolas,monospace; }
+  .cost-summary-item-value .count{ font-weight:500; color:var(--ink-faint); font-family:inherit; }
+  .cost-summary-warn{ font-size:11.5px; color:var(--warn); margin-top:8px; }
+
   .row-gap{ display:flex; flex-direction:column; gap:18px; }
   .two-col{ display:grid; grid-template-columns:1.4fr 1fr; gap:18px; align-items:start; }
   @media (max-width:880px){ .two-col{ grid-template-columns:1fr; } }
@@ -534,6 +548,14 @@
     background:var(--surface); border:2px solid var(--line); box-shadow:0 1px 4px rgba(0,0,0,.25); cursor:pointer;
   }
   .map-marker-badge.has-tickets{ color:var(--accent-ink); background:var(--accent); border-color:var(--accent); }
+  /* по просьбе Антона: название отеля видно на самой карте, не только по
+     наведению (см. mapHotelTooltipHtml/подсказка ниже) — подпись под меткой. */
+  .map-marker-label{
+    position:absolute; top:31px; left:50%; transform:translateX(-50%);
+    white-space:nowrap; font-size:11px; font-weight:600; color:var(--ink);
+    background:var(--surface); border:1px solid var(--line); border-radius:5px;
+    padding:1px 6px; box-shadow:0 1px 3px rgba(0,0,0,.22); pointer-events:none;
+  }
   /* 0.3.5: всплывающая подсказка при наведении на метку отеля (см. ensureMap) —
      свои цвета вместо стандартных белых у Leaflet, чтобы не выбивалось из
      тёмной/светлой темы приложения. */
@@ -5011,7 +5033,12 @@
     if(!canEditCashExpenses()){ alert("Фиксировать выдачу наличных может только тот, кому выдано право «Наличные расходы»."); return false; }
     var person = (data.person||"").trim();
     if(!person){ alert("Укажите, кому выданы наличные."); return false; }
-    var amount = Number(data.amount);
+    // по просьбе Антона: поле "Сумма" теперь текстовое (как "Сумма"/"Доля" в
+    // «Реестре платежей») — принимает дробные через запятую и живое
+    // форматирование пробелом между разрядами (см. .registry-amount-input/
+    // formatAmountInputValue), а не <input type="number">, который тихо
+    // отбрасывал запятую при вводе и превращал, например, "100,50" в "10050".
+    var amount = Number(parseAmountInputValue(data.amount));
     if(!amount || amount<=0){ alert("Укажите сумму выдачи."); return false; }
     sb.from("cash_advances").insert({
       date: data.date || new Date().toISOString().slice(0,10),
@@ -5099,8 +5126,13 @@
     if(!canEditCashExpenses()){ alert("Вносить наличные расходы может только тот, кому выдано право «Наличные расходы»."); return false; }
     var person = (data.person||"").trim();
     var description = (data.description||"").trim();
-    var qty = Number(data.qty) || 1;
-    var unitCost = Number(data.unit_cost) || 0;
+    // по просьбе Антона: "Кол-во"/"Цена за ед." — текстовые поля с живым
+    // форматированием (та же .registry-amount-input, что и суммы в «Реестре
+    // платежей»), а не <input type="number"> — тот тихо отбрасывал запятую
+    // при вводе дробного количества ("0,34" превращалось в "034"), давая
+    // молча неверное число без единого признака ошибки для пользователя.
+    var qty = Number(parseAmountInputValue(data.qty)) || 1;
+    var unitCost = Number(parseAmountInputValue(data.unit_cost)) || 0;
     var category = (data.category==="crew") ? "crew" : "materials";
     var tokens = parseTicketRefList(data.ticket_ref);
     // 0.4.6, п.1 (по просьбе Антона): разбивка одного перечисления сразу на
@@ -5590,7 +5622,7 @@
             ${editable ? h`<form id="cash-advance-form" class="field-row" style="margin-top:12px;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;">
               <div class="field"><label>Дата</label><input type="date" name="date" value="${todayIso}" required></div>
               <div class="field"><label>Кому</label><input type="text" name="person" list="cash-persons" placeholder="Имя прораба" required></div>
-              <div class="field"><label>Сумма</label><input type="number" name="amount" min="0" step="0.01" required></div>
+              <div class="field"><label>Сумма</label><input type="text" inputmode="decimal" class="registry-amount-input" name="amount" placeholder="напр. 100 000" required></div>
               <div class="field"><label>Мотель</label><select name="hotel_id"><option value="">—</option>${hotelOptions}</select></div>
               <div class="field" style="grid-column:1/-1;"><label>Комментарий (необязательно)</label><input type="text" name="note" placeholder="повод выдачи"></div>
               <button class="btn btn-primary" type="submit">Выдать</button>
@@ -5676,8 +5708,8 @@
             ${editable ? h`<form id="cash-expense-form" class="field-row" style="margin-top:12px;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px;">
               <div class="field"><label>Дата</label><input type="date" name="date" value="${todayIso}" required></div>
               <div class="field" style="grid-column:span 2;"><label>Наименование</label><input type="text" name="description" placeholder="напр. Саморезы" required></div>
-              <div class="field"><label>Кол-во</label><input type="number" name="qty" min="0" step="0.01" value="1" required></div>
-              <div class="field"><label>Цена за ед.</label><input type="number" name="unit_cost" min="0" step="0.01" required></div>
+              <div class="field"><label>Кол-во</label><input type="text" inputmode="decimal" class="registry-amount-input" name="qty" value="1" required></div>
+              <div class="field"><label>Цена за ед.</label><input type="text" inputmode="decimal" class="registry-amount-input" name="unit_cost" placeholder="напр. 2 000" required></div>
               <div class="field"><label>Мотель</label><select name="hotel_id"><option value="">—</option>${hotelOptions}</select></div>
               <div class="field" style="grid-column:span 2;"><label>Заявка (необязательно; несколько через запятую — сумма разнесётся между ними)</label><input type="text" name="ticket_ref" list="cash-expense-tickets" placeholder="№ c-lector, напр. «526» или «526, 530, 531» или «526:1000, 530, 531» — своя доля через двоеточие"></div>
               <div class="field"><label>Категория</label><select name="category"><option value="materials">Материал</option><option value="crew">Работа</option></select></div>
@@ -5854,10 +5886,11 @@
   // Своя иконка (L.divIcon) вместо стандартной — чтобы число заявок было видно
   // прямо на метке, как раньше на Google-маркере (там это было готовым
   // свойством "label", у Leaflet своей текстовой метки на маркере нет).
-  function mapMarkerIcon(count){
+  function mapMarkerIcon(count, name){
     return L.divIcon({
       className: "map-marker-icon",
-      html: '<div class="map-marker-badge'+(count>0?' has-tickets':'')+'">'+count+'</div>',
+      html: '<div class="map-marker-badge'+(count>0?' has-tickets':'')+'">'+count+'</div>'
+          + '<div class="map-marker-label">'+escapeHtml(name||"")+'</div>',
       iconSize: [28,28], iconAnchor: [14,14]
     });
   }
@@ -5918,7 +5951,7 @@
     state.hotels.forEach(function(hotel){
       if(hotel.lat==null || hotel.lng==null) return;
       var count = counts[hotel.id]||0;
-      var marker = L.marker([hotel.lat, hotel.lng], { icon: mapMarkerIcon(count) }).addTo(mapInstance);
+      var marker = L.marker([hotel.lat, hotel.lng], { icon: mapMarkerIcon(count, hotel.name) }).addTo(mapInstance);
       // 0.3.5: своя всплывающая подсказка (см. mapHotelTooltipHtml) вместо
       // обычного title="" — так в неё помещается несколько строк статистики
       // вместо одной строки, и оформление совпадает с темой приложения.
@@ -5957,30 +5990,36 @@
     return state.tickets.filter(function(t){ return ticketPerformers(t).indexOf(crewName)!==-1 && !isTicketDone(t); }).length;
   }
   function viewCrews(){
+    // по просьбе Антона: раньше каждый исполнитель занимал целую широкую
+    // карточку, а форма добавления жила в отдельном "тяжёлом" блоке справа —
+    // теперь аккуратная таблица (строка на исполнителя), форма добавления —
+    // просто последняя строка той же таблицы.
     return h`
-      <div class="two-col">
-        <div class="card card-pad">
-          <div class="section-title">Исполнители</div>
-          <div class="helptext" style="margin-bottom:10px;">Справочник фамилий тех, кого назначают исполнителем в пункте «Бригада» карточки заявки — один человек, а не бригада с постоянным составом (он может переходить от заявки к заявке). Пополняется и отсюда, и автоматически — если в карточке заявки вписать новое имя вручную.</div>
-          ${state.crews.length===0 ? h`<div class="empty-state"><b>Исполнителей пока нет</b>Добавьте первого справа.</div>` : h`
-          <div class="row-gap">${state.crews.slice().sort(function(a,b){ return (a.name||"").localeCompare(b.name||"", "ru"); }).map(function(c){
-            var activeCount = crewActiveCount(c.name);
-            return h`<div class="card card-pad" style="background:var(--surface-2);">
-              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-                <input type="text" data-crew-rename="${c.id}" value="${escapeHtml(c.name)}" style="flex:1;min-width:160px;font-weight:600;">
-                <span class="pill ${activeCount>0?'pill-accent':'pill-neutral'}" title="Активных заявок на этом исполнителе сейчас">${activeCount} в работе</span>
-                <button class="btn btn-sm btn-ghost btn-danger" data-action="crew-delete" data-id="${c.id}">Удалить</button>
-              </div>
-            </div>`;
-          }).join("")}</div>`}
-        </div>
-        <div class="card card-pad">
-          <div class="section-title">Новый исполнитель</div>
-          <form id="crew-form">
-            <div class="field"><label>Фамилия И.О.</label><input type="text" name="name" required placeholder="напр. Веренков А.С."></div>
-            <button class="btn btn-primary" type="submit">Добавить</button>
-          </form>
-        </div>
+      <div class="card card-pad">
+        <div class="section-title">Исполнители</div>
+        <div class="helptext" style="margin-bottom:10px;">Справочник фамилий тех, кого назначают исполнителем в пункте «Бригада» карточки заявки — один человек, а не бригада с постоянным составом (он может переходить от заявки к заявке). Пополняется и отсюда, и автоматически — если в карточке заявки вписать новое имя вручную.</div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Фамилия И.О.</th><th style="width:120px;">В работе</th><th style="width:1%;"></th></tr></thead>
+          <tbody>
+            ${state.crews.length===0 ? h`<tr><td colspan="3"><div class="empty-state"><b>Исполнителей пока нет</b>Добавьте первого ниже.</div></td></tr>` :
+              state.crews.slice().sort(function(a,b){ return (a.name||"").localeCompare(b.name||"", "ru"); }).map(function(c){
+                var activeCount = crewActiveCount(c.name);
+                return h`<tr>
+                  <td><input type="text" data-crew-rename="${c.id}" value="${escapeHtml(c.name)}" style="width:100%;font-weight:600;"></td>
+                  <td><span class="pill ${activeCount>0?'pill-accent':'pill-neutral'}" title="Активных заявок на этом исполнителе сейчас">${activeCount} в работе</span></td>
+                  <td><button class="btn btn-sm btn-ghost btn-danger" data-action="crew-delete" data-id="${c.id}">Удалить</button></td>
+                </tr>`;
+              }).join("")}
+            <tr class="crew-add-row">
+              <td colspan="3">
+                <form id="crew-form" style="display:flex;gap:8px;align-items:center;margin:0;">
+                  <input type="text" name="name" required placeholder="напр. Веренков А.С." style="flex:1;min-width:160px;">
+                  <button class="btn btn-primary btn-sm" type="submit">Добавить</button>
+                </form>
+              </td>
+            </tr>
+          </tbody>
+        </table></div>
       </div>
       <div class="card card-pad" style="margin-top:18px;">
         <div class="section-title">Ответственный техник по объектам</div>
@@ -6385,6 +6424,17 @@
                 else crewInvoiceIncomplete = true;
               });
               var crewGrandTotal = crewInvoiceSum + crewCashTotal;
+              // по просьбе Антона: у "Материала" тоже должен быть свой "Итого" —
+              // тем же приёмом, что и у "Бригады" выше (счета категории
+              // "materials", "Учтено в затратах" + наличные материалы).
+              var materialsInvoiceList = invoicesFor(t, "materials");
+              var materialsInvoiceSum = 0, materialsInvoiceIncomplete = false;
+              materialsInvoiceList.forEach(function(iv){
+                var acc = invoiceAccountedKZTForTicket(iv);
+                if(acc.state==="ok" && acc.value!=null) materialsInvoiceSum += acc.value;
+                else materialsInvoiceIncomplete = true;
+              });
+              var materialsGrandTotal = materialsInvoiceSum + materialsCashTotal;
               var actPhotoCount = (state.photos||[]).filter(function(p){return p.ticket_id===t.id && p.category==="act";}).length;
               // "Бригада"/"Материал" (версия 0.2.2) больше не переключаются кликом
               // по значку — у них теперь свои явные элементы управления в теле
@@ -6492,7 +6542,11 @@
                   ${t.status==="onsite" ? h`<div class="actions-row" style="margin-bottom:8px;"><button class="btn btn-sm" data-action="materials" data-id="${t.id}">Нужны материалы…</button></div>` : ""}
                   ${t.materials_wait ? h`<div class="helptext" style="margin-bottom:8px;">Ожидаются материалы (срок поставки: ${fmtDateShort(t.materials_eta)}).</div>` : ""}
                   ${materialsFiles ? h`<div class="helptext" style="margin-bottom:8px;">Оплата счёта отмечается галочкой «Оплачено» в «Реестре платежей».</div>` : ""}
-                  ${milestoneInvoiceList(t, "materials")}`
+                  ${milestoneInvoiceList(t, "materials")}
+                  ${(materialsGrandTotal>0) ? h`<div style="display:flex;align-items:baseline;justify-content:space-between;gap:6px;margin-top:10px;padding-top:10px;border-top:1px solid var(--line);">
+                    <span style="font-size:12.5px;color:var(--ink-soft);font-weight:600;">Итого по материалам <span class="muted" style="font-weight:500;">(без НДС)</span></span>
+                    <b class="mono" style="font-size:15px;color:var(--accent);" title="${materialsInvoiceIncomplete?'Не все суммы по счетам ещё посчитаны (курс/доля) — итог может увеличиться':'Счета (без НДС, с доп. налогом) + наличные'}">${fmtCashSum(materialsGrandTotal)} ₸${materialsInvoiceIncomplete?' (не все суммы учтены)':''}</b>
+                  </div>` : ""}`
               })}
               ${milestoneRow({
                 key: "work",
@@ -6587,10 +6641,17 @@
             var fmt = function(n){ return (Number(n)||0).toLocaleString("ru-RU", {maximumFractionDigits:2}); };
             return h`<div>
               <div class="section-title">Затраты по заявке ${infoTip("Сумма оплаченных счетов (Бригада + Материал) и наличных расходов, привязанных к этой заявке. Неоплаченные счета сюда не входят — деньги ещё не потрачены. Если прорабу, оплатившему расход, в «Финансы → Наличные расходы → Выдачи» указан способ учёта («Учтено в затратах»), сумма расхода досчитывается с наценкой по его ставке (напр. нал. 30%: 1000 ₸ расхода войдёт сюда как 1429 ₸) — раздел «Наличные расходы» при этом продолжает показывать сумму как есть, реально оплаченную.")}</div>
-              <div class="kv"><span class="k">Итого потрачено</span><span class="v mono" style="font-weight:700;">${fmt(cost.total)}</span></div>
-              ${cost.invoiceCount ? h`<div class="kv"><span class="k">из них по счетам</span><span class="v mono">${fmt(cost.invoiceSum)} (${cost.invoiceCount})</span></div>` : ""}
-              ${cost.cashCount ? h`<div class="kv"><span class="k">из них наличными</span><span class="v mono">${fmt(cost.cashSum)} (${cost.cashCount})</span></div>` : ""}
-              ${cost.missingAmountCount ? h`<div class="muted" style="font-size:11.5px;color:var(--warn);margin-top:2px;">⚠ ${cost.missingAmountCount===1?'По одному отмеченному «оплачено» счёту':'По '+cost.missingAmountCount+' отмеченным «оплачено» счетам'} ещё не указана сумма (или доля этой заявки) в «Реестре платежей» — сюда пока не включено.</div>` : ""}
+              <div class="cost-summary">
+                <div class="cost-summary-total">
+                  <span class="cost-summary-total-label">Итого потрачено</span>
+                  <span class="cost-summary-total-value">${fmt(cost.total)} ₸</span>
+                </div>
+                ${(cost.invoiceCount || cost.cashCount) ? h`<div class="cost-summary-breakdown">
+                  ${cost.invoiceCount ? h`<div class="cost-summary-item"><span class="cost-summary-item-label">из них по счетам</span><span class="cost-summary-item-value">${fmt(cost.invoiceSum)} ₸ <span class="count">(${cost.invoiceCount})</span></span></div>` : ""}
+                  ${cost.cashCount ? h`<div class="cost-summary-item"><span class="cost-summary-item-label">из них наличными</span><span class="cost-summary-item-value">${fmt(cost.cashSum)} ₸ <span class="count">(${cost.cashCount})</span></span></div>` : ""}
+                </div>` : ""}
+                ${cost.missingAmountCount ? h`<div class="cost-summary-warn">⚠ ${cost.missingAmountCount===1?'По одному отмеченному «оплачено» счёту':'По '+cost.missingAmountCount+' отмеченным «оплачено» счетам'} ещё не указана сумма (или доля этой заявки) в «Реестре платежей» — сюда пока не включено.</div>` : ""}
+              </div>
             </div>`;
           })()}
           ${legacyInvoiceSection(t)}
@@ -7052,10 +7113,16 @@
         addCrewPerformer(id,cpName); return;
       }
       if(action==="crew-performer-add-free"){
-        var cpInput=document.getElementById("crew-performer-free-input"); var cpFreeName=cpInput&&cpInput.value&&cpInput.value.trim();
-        if(!cpFreeName){ alert("Впишите имя исполнителя."); return; }
-        ensurePerformerInDirectory(cpFreeName);
-        addCrewPerformer(id,cpFreeName); if(cpInput) cpInput.value=""; return;
+        var cpInput=document.getElementById("crew-performer-free-input"); var cpFreeRaw=cpInput&&cpInput.value&&cpInput.value.trim();
+        if(!cpFreeRaw){ alert("Впишите имя исполнителя."); return; }
+        // по просьбе Антона: если вписали несколько имён через запятую разом
+        // (напр. "Нижник Александр, Восканян Гиворг"), это ДВА разных
+        // исполнителя, каждый — свой элемент crew_names со своим ✕, а не одна
+        // строка с обоими именами (которую потом нельзя разобрать/удалить по
+        // отдельности).
+        var cpFreeNames = String(cpFreeRaw).split(/[,;\n]+/).map(function(s){ return s.trim(); }).filter(Boolean);
+        cpFreeNames.forEach(function(n){ ensurePerformerInDirectory(n); addCrewPerformer(id,n); });
+        if(cpInput) cpInput.value=""; return;
       }
       if(action==="crew-performer-remove"){
         var cpRemoveName = actionEl.getAttribute("data-name");
