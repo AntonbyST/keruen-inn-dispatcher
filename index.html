@@ -206,6 +206,27 @@
   /* 0.2.19: строка-разделитель месяца оплаты внутри «Реестра платежей» (см.
      paidMonthDividerRow) — легче строки итогов, чтобы не спутать с ней. */
   .registry-month-divider td{ background:var(--surface-2); font-weight:600; padding-top:6px; padding-bottom:6px; color:var(--ink-soft); }
+  /* 0.4.6, п.2 (по просьбе Антона): развёрнутая строка "общий счёт/расход на
+     несколько заявок" (см. registryGroupRow в «Реестре платежей» и
+     cashExpenseRow-группу в «Расходах») раньше не имела вообще никакого
+     оформления и сливалась с обычными строками — акцентный фон + рамка
+     сверху/снизу выделяют её как отдельную сущность, а не рядовую строку. */
+  .registry-group-row td{ background:var(--accent-soft); border-top:1px solid var(--accent-line); border-bottom:1px solid var(--accent-line); }
+  /* Позиции внутри такой развёрнутой группы (по одной на каждую заявку) —
+     тем же приёмом, что и у .registry-alloc-row ниже: чуть притенённый фон,
+     чтобы визуально оставаться "под" группой, не притворяясь обычной строкой. */
+  .cash-expense-subrow td{ background:var(--surface-2); }
+  /* 0.3.8/0.4.6: заголовок группы "по прорабу" в «Выдачах»/«Расходах» (см.
+     cash-person-divider) — раньше тоже без всякого фона, выделялся только
+     жирным именем; теперь того же уровня, что и заголовок месяца в «Реестре»
+     (см. .registry-month-divider выше), чтобы верхний уровень группировки
+     был явно виден. */
+  .cash-person-divider td{ background:var(--surface-2); font-weight:600; padding-top:6px; padding-bottom:6px; }
+  /* 0.4.6, п.3: второй уровень группировки в «Расходах» — месяц внутри
+     прораба (см. cashExpenseMonthKey/groupCashExpensesByMonth) — тот же приём,
+     что и .registry-month-divider, но с отступом слева (padding-left задаётся
+     инлайново в разметке), чтобы визуально быть "внутри" строки прораба. */
+  .cash-expense-month-divider td{ background:var(--surface-2); font-weight:500; padding-top:5px; padding-bottom:5px; color:var(--ink-soft); }
   /* 0.2.13.1: реестр платежей стал 10-колоночным (валюта/НДС/налог/учтено) —
      компактный режим, чтобы всё помещалось без горизонтальной прокрутки на
      обычном экране. table-layout:fixed заставляет колонки уважать ширины из
@@ -1560,7 +1581,18 @@
     // сохранённые группы (по group_key) сейчас развёрнуты — см.
     // cashImportBlock()/viewCashExpenses().
     cashImportGroupExpanded: {},
-    cashExpenseGroupExpanded: {}
+    cashExpenseGroupExpanded: {},
+    // 0.4.6, п.3 (по просьбе Антона): «Расходы» (в отличие от «Выдач» и от
+    // Реестра) теперь трёхуровневый разворот — прораб → месяц → отдельные
+    // позиции, и, в отличие от cashExpandedPersons выше (там по умолчанию
+    // развёрнуто), здесь по умолчанию СВЁРНУТО на обоих уровнях (список
+    // расходов обычно длинный, в отличие от списка выдач). Отдельные карты
+    // состояния (не переиспользуем cashExpandedPersons/"exp:"-ключи) — чтобы
+    // не смешивать разные значения по умолчанию для одного и того же ключа.
+    // Ключ месяца — "<прораб>:<YYYY-MM>" (или "<прораб>:unknown", если у
+    // расхода почему-то нет даты).
+    cashExpandedExpensePersons: {},
+    cashExpandedExpenseMonths: {}
   };
   var notesChannel = null;
 
@@ -2436,7 +2468,7 @@
       if(!hotel) return; // отель мог быть переименован/удалён из «Отелей» ещё до первого запуска
       sb.from("tickets").insert({
         hotel_id: ex.hotelId, zone: hotel.zone, ticket_group: ex.group, description: ex.description,
-        status: ex.status, assigned_to: ex.assignedTo||null, created_by:"Пример", created_at: ex.createdAt,
+        status: ex.status, assigned_to: ex.assignedTo||null, crew_names: ex.assignedTo?[ex.assignedTo]:[], created_by:"Пример", created_at: ex.createdAt,
         arrival_deadline: addHours(ex.createdAt, ZONE_HOURS[hotel.zone]),
         arrived_at: ex.status==="onsite" ? addHours(ex.createdAt,4) : null,
         resolution_deadline: ex.status==="onsite" ? addBusinessDays(addHours(ex.createdAt,4),3) : null,
@@ -2759,33 +2791,61 @@
     var t = state.tickets.find(function(x){return x.id===id;});
     if(t) Object.assign(t, patch);
   }
-  function assignSpecialist(id, name){
-    // Назначение реального исполнителя снимает "бригада не нужна" (0.2.2), если
-    // она почему-то была отмечена раньше — состояния взаимоисключающие по смыслу.
-    var patch = {assigned_to:name, status:"dispatched", crew_not_needed:false};
+  // 0.4.6 (по просьбе Антона): "Бригада" — теперь список исполнителей, а не
+  // одно имя (старое поле tickets.assigned_to допускало только одного).
+  // tickets.crew_names (text[]) — новый источник истины, см.
+  // add-0.4.6-crew-names.sql (миграция переносит старые assigned_to в
+  // crew_names одним элементом массива, очищая легаси-префикс "Бригада: ").
+  // assigned_to в базе НЕ трогаем и не пишем в него больше — оставлен как
+  // есть, на случай сверки со старыми выгрузками/журналом. ticketPerformers()
+  // подстраховывается им же, если crew_names почему-то пуст (не должно
+  // происходить после миграции, но на всякий случай для старых/тестовых
+  // данных).
+  function ticketPerformers(t){
+    if(t && Array.isArray(t.crew_names) && t.crew_names.length) return t.crew_names;
+    if(t && t.assigned_to) return [String(t.assigned_to).replace(/^Бригада:\s*/, "")];
+    return [];
+  }
+  // Добавление ОДНОГО исполнителя в список "Бригады" заявки. Первое
+  // назначение (список был пуст) сразу переводит заявку в статус "onsite" —
+  // Антон подтвердил: отдельную ручную отметку "прибытие" не используют,
+  // факт назначения и означает выезд/начало работы. Без этого перехода
+  // сломались бы кнопка "Нужны материалы" и раздел "Категория (по осмотру)"
+  // в карточке — обе завязаны на status==="onsite". Второе и последующие
+  // имена статус уже не трогают (заявка там, где и была).
+  function addCrewPerformer(id, name){
+    name = (name||"").trim();
+    if(!name) return;
+    var t = state.tickets.find(function(x){ return x.id===id; });
+    if(!t) return;
+    var list = ticketPerformers(t).slice();
+    if(list.indexOf(name)!==-1){ alert("«"+name+"» уже назначен(а) на эту заявку."); return; }
+    var wasEmpty = list.length===0;
+    list.push(name);
+    var patch = { crew_names: list, crew_not_needed:false };
+    if(wasEmpty && t.status!=="onsite" && t.status!=="closed" && t.status!=="rejected"){
+      patch.status = "onsite";
+      patch.arrived_at = new Date().toISOString();
+    }
     patchTicketLocal(id, patch);
-    sb.from("tickets").update(patch).eq("id",id).then(function(){
-      addNote(id, "Назначен главный инженер: "+name+".");
+    sb.from("tickets").update(patch).eq("id",id).then(function(res){
+      if(res && res.error){ alert("Не удалось назначить исполнителя: " + res.error.message); return; }
+      addNote(id, (wasEmpty?"Назначен исполнитель: ":"Добавлен исполнитель: ")+name+".");
       maybeAutoComplete(id);
     });
   }
-  // Смена исполнителя уже назначенной заявки (в отличие от assignSpecialist выше,
-  // не трогает status/дедлайны — те уже отсчитываются от прибытия/устранения).
-  function reassignSpecialist(id, name){
-    var patch = {assigned_to:name, crew_not_needed:false};
-    patchTicketLocal(id, patch);
-    sb.from("tickets").update(patch).eq("id",id).then(function(){
-      addNote(id, "Исполнитель изменён на: "+name+".");
-      maybeAutoComplete(id);
-    });
-  }
-  function markArrived(id){
-    // Срок устранения (resolution_deadline) сюда больше не пишем — он приходит
-    // только из c-lector при импорте, платформа его сама не считает.
-    var patch = {status:"onsite", arrived_at:new Date().toISOString()};
-    patchTicketLocal(id, patch);
-    sb.from("tickets").update(patch).eq("id",id).then(function(){
-      addNote(id, "Главный инженер прибыл на объект.");
+  // Снятие одного исполнителя с заявки (остальные, если есть, остаются) — не
+  // трогает статус заявки: он уже отсчитывается от факта первого назначения
+  // (см. addCrewPerformer выше), откатывать его назад при снятии человека нет
+  // смысла.
+  function removeCrewPerformer(id, name){
+    var t = state.tickets.find(function(x){ return x.id===id; });
+    if(!t) return;
+    var list = ticketPerformers(t).filter(function(n){ return n!==name; });
+    patchTicketLocal(id, {crew_names:list});
+    sb.from("tickets").update({crew_names:list}).eq("id",id).then(function(res){
+      if(res && res.error){ alert("Не удалось убрать исполнителя: " + res.error.message); return; }
+      addNote(id, "Исполнитель "+name+" убран с заявки.");
     });
   }
   // ВАЖНО: в отличие от соседних сеттеров выше/ниже, эта функция не пишет
@@ -2862,9 +2922,9 @@
   }
   // "Бригада не нужна" (версия 0.2.2) — заменяет прежнюю безымянную ручную
   // отметку crew_manual_done ("выполнено вручную" без указания, кто именно):
-  // теперь пункт "Бригада" зелёный либо когда реально назначен исполнитель
-  // (assigned_to — см. "Назначить"/"Сменить" в теле пункта), либо когда явно
-  // отмечено, что бригада для этой заявки не нужна.
+  // теперь пункт "Бригада" зелёный либо когда реально назначен хотя бы один
+  // исполнитель (tickets.crew_names, см. addCrewPerformer/"Добавить" в теле
+  // пункта), либо когда явно отмечено, что бригада для этой заявки не нужна.
   function setCrewNotNeeded(id, val){
     var patch = {crew_not_needed:val};
     patchTicketLocal(id, patch);
@@ -3027,7 +3087,7 @@
       // "Работа" — всегда просто ручной флажок (см. STATUS_ICON_DEFS выше: фото
       // в "Работа" больше не участвуют — "Фото" теперь отдельная галерея
       // замечаний, а не признак сделанной работы).
-      var allDone = (!!t.assigned_to || !!t.crew_not_needed) && materialsIsGreen(t) && !!t.work_manual_done && !!t.act_signed;
+      var allDone = (ticketPerformers(t).length>0 || !!t.crew_not_needed) && materialsIsGreen(t) && !!t.work_manual_done && !!t.act_signed;
       if(!allDone) return;
       var patch = {status:"closed", closed_at:new Date().toISOString()};
       patchTicketLocal(id, patch);
@@ -3400,8 +3460,8 @@
   function materialsIsGreen(t){ return materialsState(t)==="ok"; }
   var STATUS_ICON_DEFS = [
     { key:'crew', svg:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 0-5.6 5.6L2 19l3 3 7.1-7.1a4 4 0 0 0 5.6-5.6l-2.5 2.5-2-2 2.5-2.5z"/></svg>',
-      lit:function(t){ return !!t.assigned_to || !!t.crew_not_needed; },
-      label:function(t){ return t.assigned_to ? "Бригада назначена: "+t.assigned_to : (t.crew_not_needed ? "Бригада не нужна для этой заявки" : "Бригада ещё не назначена"); } },
+      lit:function(t){ return ticketPerformers(t).length>0 || !!t.crew_not_needed; },
+      label:function(t){ var performers=ticketPerformers(t); return performers.length ? "Бригада назначена: "+performers.join(", ") : (t.crew_not_needed ? "Бригада не нужна для этой заявки" : "Бригада ещё не назначена"); } },
     { key:'materials', svg:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg>',
       lit:function(t){ return materialsIsGreen(t); },
       state:function(t){ return materialsState(t); },
@@ -3554,13 +3614,15 @@
       // invoiceGroupMembers), показывается доля этой заявки (по проценту из
       // «Реестра платежей»), а не сумма всего счёта целиком.
       var acc = invoiceAccountedKZTForTicket(iv);
+      // 0.4.6 (по просьбе Антона): статус — слева, сумма — справа отдельной
+      // колонкой (min-width, чтобы суммы визуально выравнивались по
+      // вертикали в списке файлов, как в «Реестре платежей»), имя файла —
+      // посередине, обрезается многоточием, если не влезает.
       return h`<div class="invoice-row" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 10px;border:1px solid var(--line);border-radius:8px;">
-        <button type="button" class="btn btn-sm" data-action="invoice-open" data-path="${escapeHtml(iv.file_path)}">${escapeHtml(iv.file_name)}</button>
-        <span class="mono muted" style="font-size:12px;" title="${acc.shared?('Сумма без НДС по этой заявке'+(acc.percent!=null?' ('+acc.percent+'% от счёта)':' — доля этой заявки ещё не указана в «Реестре платежей» (счёт общий на несколько заявок)')):'Сумма без НДС'}">${accountedKZTLabel(acc)}${acc.state==="ok" && !acc.currency ? ' ₸' : ''}</span>
-        <div style="margin-left:auto;display:flex;align-items:center;gap:8px;">
-          ${invoicePaidPill(iv)}
-          <button type="button" class="btn btn-sm btn-ghost btn-danger" data-action="invoice-delete" data-id="${iv.id}" data-path="${escapeHtml(iv.file_path)}" title="Удалить файл">✕</button>
-        </div>
+        ${invoicePaidPill(iv)}
+        <button type="button" class="btn btn-sm" data-action="invoice-open" data-path="${escapeHtml(iv.file_path)}" style="flex:1;min-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;justify-content:flex-start;">${escapeHtml(iv.file_name)}</button>
+        <span class="mono muted" style="font-size:12px;min-width:84px;text-align:right;" title="${acc.shared?('Сумма без НДС по этой заявке'+(acc.percent!=null?' ('+acc.percent+'% от счёта)':' — доля этой заявки ещё не указана в «Реестре платежей» (счёт общий на несколько заявок)')):'Сумма без НДС'}">${accountedKZTLabel(acc)}${acc.state==="ok" && !acc.currency ? ' ₸' : ''}</span>
+        <button type="button" class="btn btn-sm btn-ghost btn-danger" data-action="invoice-delete" data-id="${iv.id}" data-path="${escapeHtml(iv.file_path)}" title="Удалить файл">✕</button>
       </div>`;
     }).join("")}</div>`;
   }
@@ -3936,7 +3998,7 @@
     var rows = list.map(function(t){
       var hotel = hotelById(t.hotel_id); var di = deadlineInfo(t);
       return [
-        t.external_ref||"", hotel?("№"+hotel.id+" "+hotel.name):"", t.location||"", displayShort(t), ticketStatusLabel(t), t.assigned_to||"", di.label, t.attention_flag?("Да"+(t.attention_note?": "+t.attention_note:"")):"",
+        t.external_ref||"", hotel?("№"+hotel.id+" "+hotel.name):"", t.location||"", displayShort(t), ticketStatusLabel(t), ticketPerformers(t).join(", "), di.label, t.attention_flag?("Да"+(t.attention_note?": "+t.attention_note:"")):"",
         STATUS_ICON_BY_KEY.crew && STATUS_ICON_BY_KEY.crew.lit(t) ? "Да" : "Нет",
         STATUS_ICON_BY_KEY.materials && STATUS_ICON_BY_KEY.materials.lit(t) ? "Да" : "Нет",
         STATUS_ICON_BY_KEY.work && STATUS_ICON_BY_KEY.work.lit(t) ? "Да" : "Нет",
@@ -4721,18 +4783,24 @@
   // формального согласования (по решению Антона): "Выдачи" и "Расходы" —
   // баланс по каждому прорабу приложение считает само (см. viewCashExpenses).
   // 0.4.2 (по просьбе Антона, п.3): категория "работа" ("crew") — рядом с
-  // "materials"/"other". По умолчанию при создании расхода стоит "Материал"
-  // (как и раньше — см. форму ниже), но теперь можно переключить на "Работа",
-  // и такой расход подтянется к пункту чек-листа "Бригада" в карточке заявки
+  // "materials". По умолчанию при создании расхода стоит "Материал" (как и
+  // раньше — см. форму ниже), но теперь можно переключить на "Работа", и
+  // такой расход подтянется к пункту чек-листа "Бригада" в карточке заявки
   // (см. milestoneRow "crew" ниже — тот же приём, что и у "Материал"/"materials").
-  // 0.4.3, п.2: категория "командировочные" ("travel") — наличные, которые
-  // перечисляются на карточку бригадам/прорабам (по просьбе Антона — не
-  // отдельный раздел, а именно "Наличные", как и "Работа"/"Материал"). В
-  // отличие от "Работа", у "travel" есть особая возможность при создании —
-  // разбивка одного перечисления сразу на несколько заявок (см.
-  // addTravelExpense/parseTicketRefList ниже); после создания это обычные
-  // строки cash_expenses, ничем не отличающиеся от остальных.
-  var CASH_EXPENSE_CATEGORY_LABEL = { materials: "Материал", crew: "Работа", other: "Другое", travel: "Командировочные" };
+  //
+  // 0.4.6, п.1 (по просьбе Антона: "категория может быть либо работа (в т.ч.
+  // командировочные) либо материалы") — категорий теперь ровно ДВЕ. Раньше
+  // были ещё "other" ("Другое") и отдельная "travel" ("Командировочные", см.
+  // add-0.4.6-cash-categories.sql — переведены в "materials"/"crew"
+  // соответственно). "Командировочные" не исчезли как явление — это просто
+  // расход категории "Работа" (перечисление бригаде/прорабу), по-прежнему с
+  // возможностью разбивки одного перечисления сразу на несколько заявок —
+  // только эта возможность больше не привязана к отдельной категории:
+  // разбивка теперь работает для ЛЮБОЙ категории, если в поле "Заявка"
+  // указано больше одной заявки через запятую (см. addCashExpense/
+  // parseTicketRefList ниже — раньше это было отдельной функцией
+  // addTravelExpense только для category==="travel").
+  var CASH_EXPENSE_CATEGORY_LABEL = { materials: "Материал", crew: "Работа" };
   function distinctCashPersons(){
     var set = {};
     (state.cashAdvances||[]).forEach(function(a){ if(a.person) set[a.person]=true; });
@@ -4753,12 +4821,51 @@
     });
     return order.sort().map(function(p){ return {person:p, rows:map[p]}; });
   }
-  // Свёрнута ли группа прораба в «Выдачах»/«Расходах» (см. state.cashExpandedPersons
+  // Свёрнута ли группа прораба в «Выдачах» (см. state.cashExpandedPersons
   // выше) — по умолчанию РАЗВЁРНУТА (в отличие от истории оплаченных счетов в
-  // «Реестре платежей», где по умолчанию свёрнуто).
+  // «Реестре платежей», где по умолчанию свёрнуто). С 0.4.6 «Расходы» больше
+  // не пользуются этой функцией — см. cashExpensePersonExpanded ниже.
   function cashPersonExpanded(key){
     var m = state.cashExpandedPersons || {};
     return m[key] !== false; // неопределённое значение (ключа ещё нет) = развёрнуто
+  }
+  // 0.4.6, п.3 (по просьбе Антона): «в Расходах статьи по людям должны быть в
+  // свёрнутом виде, потом разворачиваешь — по месяцам, потом разворачиваешь и
+  // по позициям» — три уровня раскрытия вместо одного (прораб → месяц →
+  // отдельные строки), и, в отличие от «Выдач» выше, оба верхних уровня по
+  // умолчанию СВЁРНУТЫ (см. state.cashExpandedExpensePersons/
+  // cashExpandedExpenseMonths — отдельные карты именно для этого, а не
+  // cashExpandedPersons/cashPersonExpanded выше, у которых другое значение по
+  // умолчанию). Третий уровень (сама позиция расхода внутри месяца) — как и
+  // раньше, группа по нескольким заявкам сворачивается/разворачивается
+  // отдельно, см. clusterCashExpenseRows/cashExpenseGroupExpanded.
+  function cashExpensePersonExpanded(person){
+    return !!(state.cashExpandedExpensePersons||{})[person];
+  }
+  function cashExpenseMonthKey(e){
+    return (e && e.date) ? String(e.date).slice(0,7) : null;
+  }
+  // Группировка строк расхода одного прораба по месяцу (по дате самого
+  // расхода, e.date — в отличие от paidMonthKey/«Реестра», где группировка по
+  // дате ОПЛАТЫ счёта: у наличных расходов нет отдельного понятия "оплата",
+  // дата одна). Без даты (в теории не должно случаться — см. addCashExpense,
+  // дата всегда проставляется) — отдельная группа "unknown", в самом конце.
+  function groupCashExpensesByMonth(rows){
+    var map = {}, order = [];
+    (rows||[]).forEach(function(e){
+      var key = cashExpenseMonthKey(e) || "unknown";
+      if(!map[key]){ map[key] = []; order.push(key); }
+      map[key].push(e);
+    });
+    order.sort(function(a,b){
+      if(a==="unknown") return 1;
+      if(b==="unknown") return -1;
+      return b.localeCompare(a); // сначала последний месяц
+    });
+    return order.map(function(key){ return {key:key, rows:map[key]}; });
+  }
+  function cashExpenseMonthExpanded(key){
+    return !!(state.cashExpandedExpenseMonths||{})[key];
   }
   // Расходы конкретной заявки (по одной, не по нескольким — см. cash_expenses.ticket_id
   // в схеме) — используется и в materialsState() (пункт "Материал" чек-листа),
@@ -4989,22 +5096,84 @@
     return t ? t.id : null;
   }
   function addCashExpense(data){
-    // 0.4.3, п.2: "Командировочные" — единственная категория с возможностью
-    // разбивки одного перечисления сразу на несколько заявок (см. форму —
-    // поле "Заявка" при этой категории принимает список через запятую).
-    // Остальные категории по-прежнему строго "одна заявка на расход" —
-    // решение Антона не менялось (см. resolveTicketRef выше).
-    if(data.category==="travel") return addTravelExpense(data);
     if(!canEditCashExpenses()){ alert("Вносить наличные расходы может только тот, кому выдано право «Наличные расходы»."); return false; }
     var person = (data.person||"").trim();
     var description = (data.description||"").trim();
-    if(!person || !description){ alert("Укажите наименование и кто потратил."); return false; }
     var qty = Number(data.qty) || 1;
     var unitCost = Number(data.unit_cost) || 0;
-    var category = (data.category==="other" || data.category==="crew") ? data.category : "materials";
-    var expTicketId = resolveTicketRef(data.ticket_ref);
+    var category = (data.category==="crew") ? "crew" : "materials";
+    var tokens = parseTicketRefList(data.ticket_ref);
+    // 0.4.6, п.1 (по просьбе Антона): разбивка одного перечисления сразу на
+    // несколько заявок — раньше была только у отдельной категории
+    // "Командировочные" (см. историю/add-0.4.6-cash-categories.sql), теперь
+    // работает для ЛЮБОЙ категории: как только в поле "Заявка" указано
+    // больше одной заявки через запятую — весь расход трактуется как одно
+    // перечисление, разносимое по заявкам (см. parseTicketRefList/
+    // splitAmountEvenly выше — перенесено сюда из прежней отдельной функции
+    // addTravelExpense почти без изменений). Ровно одна заявка (или ни одной)
+    // — как и раньше, просто обычная строка с привязкой к заявке или без неё.
+    if(tokens.length > 1){
+      if(!person){ alert("Укажите, кто потратил / кому перечислено."); return false; }
+      var totalAmount = qty * unitCost;
+      if(!totalAmount || totalAmount<=0){ alert("Укажите сумму перечисления."); return false; }
+      var unresolved = [];
+      var resolved = tokens.map(function(tok){
+        var tid = resolveTicketRef(tok.ref);
+        if(!tid) unresolved.push(tok.ref);
+        return { ticketId: tid, amount: tok.amount };
+      });
+      if(unresolved.length){ alert("Не найдены заявки: " + unresolved.join(", ") + ". Проверьте номера (№ c-lector) и повторите."); return false; }
+      var explicitSum = resolved.reduce(function(s,r){ return s + (r.amount!=null ? r.amount : 0); }, 0);
+      var autoRows = resolved.filter(function(r){ return r.amount==null; });
+      if(autoRows.length){
+        var remaining = Math.round(totalAmount) - Math.round(explicitSum);
+        if(remaining<0){ alert("Сумма указанных долей ("+explicitSum+") уже больше общей суммы перечисления ("+totalAmount+")."); return false; }
+        var shares = splitAmountEvenly(remaining, autoRows.length);
+        autoRows.forEach(function(r,i){ r.amount = shares[i]; });
+      } else if(Math.round(explicitSum) !== Math.round(totalAmount)){
+        if(!confirm("Сумма указанных долей по заявкам ("+explicitSum+") не совпадает с общей суммой перечисления ("+totalAmount+"). Всё равно разнести по указанным долям?")) return false;
+      }
+      var descFallback = description || (category==="crew" ? "Командировочные" : "Материалы");
+      var dateVal = data.date || new Date().toISOString().slice(0,10);
+      var hotelId = data.hotel_id ? Number(data.hotel_id) : null;
+      // 0.4.6, п.3: «Расходы» по умолчанию свёрнуты (прораб/месяц) — но только
+      // что добавленная запись должна быть видна сразу, а не спрятана только
+      // что появившимся свёрнутым уровнем. Разворачиваем оба уровня для ЭТОЙ
+      // записи заранее (см. cashExpensePersonExpanded/cashExpenseMonthExpanded).
+      state.cashExpandedExpensePersons = state.cashExpandedExpensePersons || {};
+      state.cashExpandedExpensePersons[person] = true;
+      state.cashExpandedExpenseMonths = state.cashExpandedExpenseMonths || {};
+      state.cashExpandedExpenseMonths[person+"::"+dateVal.slice(0,7)] = true;
+      // Общий group_key — чтобы такое перечисление, как и импортированные из
+      // таблицы (см. commitCashImport), сворачивалось в «Расходах» в одну
+      // строку (см. clusterCashExpenseRows/viewCashExpenses) вместо N подряд.
+      var groupKey = genGroupKey();
+      var rows = resolved.map(function(r){
+        var share = Math.round(r.amount);
+        return {
+          date: dateVal, description: descFallback, qty: 1, unit_cost: share, amount: share,
+          hotel_id: hotelId, ticket_id: r.ticketId, category: category,
+          person: person, created_by: myLabelWithRole(), group_key: groupKey
+        };
+      });
+      sb.from("cash_expenses").insert(rows).then(function(res){
+        if(res && res.error){ alert("Не удалось сохранить расход: " + res.error.message); return; }
+        if(category==="materials") rows.forEach(function(r){ if(r.ticket_id) maybeClearMaterialsCashPending(r.ticket_id); });
+      });
+      return true;
+    }
+    if(!person || !description){ alert("Укажите наименование и кто потратил."); return false; }
+    var expTicketId = tokens.length ? resolveTicketRef(tokens[0].ref) : null;
+    // 0.4.6, п.3: та же немедленная развёртка, что и в разбивке выше — иначе
+    // только что добавленная запись пряталась бы за свёрнутыми по умолчанию
+    // прорабом/месяцем.
+    var singleDateVal = data.date || new Date().toISOString().slice(0,10);
+    state.cashExpandedExpensePersons = state.cashExpandedExpensePersons || {};
+    state.cashExpandedExpensePersons[person] = true;
+    state.cashExpandedExpenseMonths = state.cashExpandedExpenseMonths || {};
+    state.cashExpandedExpenseMonths[person+"::"+singleDateVal.slice(0,7)] = true;
     sb.from("cash_expenses").insert({
-      date: data.date || new Date().toISOString().slice(0,10),
+      date: singleDateVal,
       description: description, qty: qty, unit_cost: unitCost, amount: qty*unitCost,
       hotel_id: data.hotel_id ? Number(data.hotel_id) : null,
       ticket_id: expTicketId,
@@ -5070,60 +5239,10 @@
   function genGroupKey(){
     return (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : ("grp-"+Date.now()+"-"+Math.random().toString(36).slice(2,10));
   }
-  // 0.4.3, п.2: командировочные, перечисленные бригаде/прорабу одним переводом
-  // сразу на несколько заявок — по просьбе Антона заносятся в "Наличные"
-  // (категория "travel"), а не в отдельный раздел. Если доли заявок не
-  // указаны явно — распределяются поровну (округление до целых, см.
-  // splitAmountEvenly), и попадают в пункт "Бригада" карточки заявки и в
-  // затраты (см. crewCash в milestoneRow "crew" и ticketCostTotal — оба уже
-  // общие для любой категории/нескольких строк, отдельного кода не требуют).
-  // Налоговый гросс-ап (п. "и не забудет что учитывается с налогами") —
-  // автоматически через personAccountedRate/cashExpenseAccounted, ту же
-  // ставку, что и у прочих наличных расходов этого же человека (0.4.2) —
-  // отдельной логики здесь не нужно, она уже общая для cash_expenses.person.
-  function addTravelExpense(data){
-    if(!canEditCashExpenses()){ alert("Вносить командировочные расходы может только тот, кому выдано право «Наличные расходы»."); return false; }
-    var person = (data.person||"").trim();
-    var description = (data.description||"").trim() || "Командировочные";
-    if(!person){ alert("Укажите, кому перечислены командировочные (бригада/прораб)."); return false; }
-    var qty = Number(data.qty) || 1;
-    var unitCost = Number(data.unit_cost) || 0;
-    var totalAmount = qty * unitCost;
-    if(!totalAmount || totalAmount<=0){ alert("Укажите сумму перечисления."); return false; }
-    var tokens = parseTicketRefList(data.ticket_ref);
-    if(!tokens.length){ alert("Укажите хотя бы одну заявку — командировочные обязательно разносятся по заявкам. Несколько заявок — через запятую, например «526, 530, 531»."); return false; }
-    var unresolved = [];
-    var resolved = tokens.map(function(tok){
-      var tid = resolveTicketRef(tok.ref);
-      if(!tid) unresolved.push(tok.ref);
-      return { ticketId: tid, amount: tok.amount };
-    });
-    if(unresolved.length){ alert("Не найдены заявки: " + unresolved.join(", ") + ". Проверьте номера (№ c-lector) и повторите."); return false; }
-    var explicitSum = resolved.reduce(function(s,r){ return s + (r.amount!=null ? r.amount : 0); }, 0);
-    var autoRows = resolved.filter(function(r){ return r.amount==null; });
-    if(autoRows.length){
-      var remaining = Math.round(totalAmount) - Math.round(explicitSum);
-      if(remaining<0){ alert("Сумма указанных долей ("+explicitSum+") уже больше общей суммы перечисления ("+totalAmount+")."); return false; }
-      var shares = splitAmountEvenly(remaining, autoRows.length);
-      autoRows.forEach(function(r,i){ r.amount = shares[i]; });
-    } else if(Math.round(explicitSum) !== Math.round(totalAmount)){
-      if(!confirm("Сумма указанных долей по заявкам ("+explicitSum+") не совпадает с общей суммой перечисления ("+totalAmount+"). Всё равно разнести по указанным долям?")) return false;
-    }
-    var dateVal = data.date || new Date().toISOString().slice(0,10);
-    var hotelId = data.hotel_id ? Number(data.hotel_id) : null;
-    var rows = resolved.map(function(r){
-      var share = Math.round(r.amount);
-      return {
-        date: dateVal, description: description, qty: 1, unit_cost: share, amount: share,
-        hotel_id: hotelId, ticket_id: r.ticketId, category: "travel",
-        person: person, created_by: myLabelWithRole()
-      };
-    });
-    sb.from("cash_expenses").insert(rows).then(function(res){
-      if(res && res.error){ alert("Не удалось сохранить командировочные: " + res.error.message); return; }
-    });
-    return true;
-  }
+  // 0.4.6: отдельная функция addTravelExpense (командировочные, категория
+  // "travel") удалена — с этой версии разбивка одного перечисления на
+  // несколько заявок общая для любой категории, прямо внутри addCashExpense
+  // выше (см. комментарий там).
   // 0.4.2 (доп., по просьбе Антона): категорию уже внесённого наличного
   // расхода можно поменять задним числом (например изначально записали как
   // "Материал", а на деле это "Работа") — раньше категория выбиралась только
@@ -5134,7 +5253,7 @@
   // что и при создании нового расхода этой категории.
   function setCashExpenseCategory(id, val){
     if(!canEditCashExpenses()) return;
-    var category = (val==="other" || val==="crew" || val==="travel") ? val : "materials";
+    var category = (val==="crew") ? "crew" : "materials";
     var ce = (state.cashExpenses||[]).find(function(x){ return x.id===id; });
     if(ce) ce.category = category;
     render();
@@ -5283,7 +5402,7 @@
     var preview = buildCashImportPreview();
     if(!preview.length) return;
     var createdBy = myLabelWithRole();
-    var finalCategory = (category==="other" || category==="crew" || category==="travel") ? category : "materials";
+    var finalCategory = (category==="crew") ? "crew" : "materials";
     var payload = [];
     preview.forEach(function(p){
       var dateStr = p.date ? p.date.toISOString().slice(0,10) : new Date().toISOString().slice(0,10);
@@ -5307,6 +5426,13 @@
         });
       }
     });
+    // 0.4.6, п.3: та же немедленная развёртка, что и в addCashExpense — после
+    // импорта прораб и все затронутые месяцы должны быть сразу видны в
+    // «Расходах», а не спрятаны за свёрнутыми по умолчанию уровнями.
+    state.cashExpandedExpensePersons = state.cashExpandedExpensePersons || {};
+    state.cashExpandedExpensePersons[person] = true;
+    state.cashExpandedExpenseMonths = state.cashExpandedExpenseMonths || {};
+    payload.forEach(function(p){ state.cashExpandedExpenseMonths[person+"::"+String(p.date).slice(0,7)] = true; });
     state.cashImportBusy = true; render();
     sb.from("cash_expenses").insert(payload).then(function(res){
       state.cashImportBusy = false;
@@ -5358,12 +5484,16 @@
   var CASH_IMPORT_FIELD_LABEL = { date:"Дата", description:"Наименование", qty:"Кол-во", unit_cost:"Цена", hotel:"Мотель", ticket:"№ Заявки" };
   // 0.4.5, п.5 (по просьбе Антона): строки cash_expenses, полученные разбивкой
   // ОДНОЙ строки импорта на несколько заявок (см. buildCashImportPreview/
-  // commitCashImport), помечены общим group_key — в ленте «Расходы» их нужно
-  // показывать одной сворачиваемой группой (тем же приёмом, что и общий счёт
-  // на несколько заявок в «Реестре платежей», см. registryGroupRow), а не N
-  // независимыми строками подряд. Строки без group_key (обычные, включая
-  // "Командировочные" — те по-прежнему остаются отдельными строками, это
-  // осознанно не менялось, см. диалог с Антоном) идут как раньше, по одной.
+  // commitCashImport) ИЛИ одного перечисления через форму (см. addCashExpense,
+  // разбивка на несколько заявок через запятую в поле "Заявка" — с 0.4.6
+  // работает для любой категории, не только для бывших "командировочных"),
+  // помечены общим group_key — в ленте «Расходы» их нужно показывать одной
+  // сворачиваемой группой (тем же приёмом, что и общий счёт на несколько
+  // заявок в «Реестре платежей», см. registryGroupRow — и, по просьбе Антона,
+  // 0.4.6, визуально выделенной, см. .registry-group-row в <style>, иначе
+  // такая группа сливается с обычными строками расходов), а не N независимыми
+  // строками подряд. Строки без group_key (одна заявка на расход или совсем
+  // без заявки) идут как раньше, по одной.
   function clusterCashExpenseRows(rows){
     var seenAt = {};
     var out = [];
@@ -5472,19 +5602,25 @@
             <div class="table-wrap"><table>
               <thead><tr><th>Дата</th><th>Наименование</th><th class="num">Кол-во</th><th class="num">Цена</th><th class="num">Сумма</th><th>Мотель</th><th>Заявка</th><th>Категория</th><th>Прораб</th>${editable?'<th></th>':''}</tr></thead>
               <tbody>${expenses.length===0 ? h`<tr><td colspan="${editable?10:9}"><div class="empty-state"><b>Пока нет расходов</b>Внесите отчёт прораба ниже — вручную или вставкой таблицы.</div></td></tr>` :
+                // 0.4.6, п.3 (по просьбе Антона: "статьи по людям должны быть в
+                // свёрнутом виде, потом разворачиваешь — по месяцам, потом
+                // разворачиваешь и по позициям") — три уровня вместо одного
+                // (прораб → месяц → отдельные строки/группы по заявкам), оба
+                // верхних по умолчанию свёрнуты (см. cashExpensePersonExpanded/
+                // cashExpenseMonthExpanded выше).
                 expenseGroups.map(function(g){
-                  var groupKey = "exp:"+g.person;
-                  var expanded = cashPersonExpanded(groupKey);
+                  var pExpanded = cashExpensePersonExpanded(g.person);
                   var sumSpent = g.rows.reduce(function(s,e){ return s+(Number(e.amount)||0); }, 0);
-                  var header = h`<tr class="cash-person-divider" data-action="cash-person-toggle" data-key="${escapeHtml(groupKey)}" style="cursor:pointer;">
-                    <td colspan="${editable?10:9}"><button type="button" class="btn btn-ghost btn-sm registry-expand-btn" style="margin-right:6px;" title="${expanded?'Свернуть':'Показать расходы'}">${expanded?'▾':'▸'}</button><b>${escapeHtml(g.person)}</b> <span class="muted">— ${g.rows.length} ${ruPlural(g.rows.length,['расход','расхода','расходов'])}, ${fmtSum(sumSpent)} ₸</span></td>
+                  var header = h`<tr class="cash-person-divider" data-action="cash-expense-person-toggle" data-key="${escapeHtml(g.person)}" style="cursor:pointer;">
+                    <td colspan="${editable?10:9}"><button type="button" class="btn btn-ghost btn-sm registry-expand-btn" style="margin-right:6px;" title="${pExpanded?'Свернуть':'Показать расходы'}">${pExpanded?'▾':'▸'}</button><b>${escapeHtml(g.person)}</b> <span class="muted">— ${g.rows.length} ${ruPlural(g.rows.length,['расход','расхода','расходов'])}, ${fmtSum(sumSpent)} ₸</span></td>
                   </tr>`;
-                  function cashExpenseRow(e){
+                  if(!pExpanded) return header;
+                  function cashExpenseRow(e, inGroup){
                     var hotel = e.hotel_id ? hotelById(e.hotel_id) : null;
                     var tk = e.ticket_id ? state.tickets.find(function(x){return x.id===e.ticket_id;}) : null;
-                    return h`<tr>
+                    return h`<tr class="${inGroup?'cash-expense-subrow':''}">
                       <td class="mono muted" style="white-space:nowrap;">${fmtDateShort(e.date)}</td>
-                      <td style="max-width:260px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${escapeHtml(e.description)}">${escapeHtml(e.description)}</td>
+                      <td style="max-width:260px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;${inGroup?'padding-left:30px;':''}" title="${escapeHtml(e.description)}">${escapeHtml(e.description)}</td>
                       <td class="num mono">${e.qty}</td>
                       <td class="num mono">${fmtSum(e.unit_cost)}</td>
                       <td class="num mono">${fmtSum(e.amount)}</td>
@@ -5494,31 +5630,44 @@
                         <select data-cash-expense-category data-id="${e.id}" title="Изменить категорию расхода — например, если изначально записали как «Материал», а по факту это «Работа»" style="max-width:110px;">
                           <option value="materials" ${e.category==='materials'?'selected':''}>Материал</option>
                           <option value="crew" ${e.category==='crew'?'selected':''}>Работа</option>
-                          <option value="travel" ${e.category==='travel'?'selected':''}>Командировочные</option>
-                          <option value="other" ${e.category==='other'?'selected':''}>Другое</option>
-                        </select>` : h`<span class="pill ${e.category==='materials'?'pill-ok':((e.category==='crew'||e.category==='travel')?'pill-accent':'pill-neutral')}">${CASH_EXPENSE_CATEGORY_LABEL[e.category]||e.category}</span>`}</td>
+                        </select>` : h`<span class="pill ${e.category==='materials'?'pill-ok':(e.category==='crew'?'pill-accent':'pill-neutral')}">${CASH_EXPENSE_CATEGORY_LABEL[e.category]||e.category}</span>`}</td>
                       <td class="muted" style="white-space:nowrap;">${escapeHtml(e.person)}</td>
                       ${editable?h`<td><a href="#" data-action="cash-expense-delete" data-id="${e.id}" style="color:var(--crit);">✕</a></td>`:''}
                     </tr>`;
                   }
-                  var body = !expanded ? "" : clusterCashExpenseRows(g.rows).map(function(cl){
-                    if(!cl.isGroup) return cashExpenseRow(cl.row);
-                    // 0.4.5, п.5: несколько строк одного импортированного пункта
-                    // отчёта (общий group_key, см. clusterCashExpenseRows выше) —
-                    // одна сворачиваемая строка вместо N подряд, тем же приёмом,
-                    // что и общий счёт на несколько заявок в «Реестре платежей».
-                    var gexpanded = !!state.cashExpenseGroupExpanded[cl.key];
-                    var first = cl.rows[0];
-                    var sumAmt = cl.rows.reduce(function(s,e){ return s+(Number(e.amount)||0); }, 0);
-                    var header2 = h`<tr class="registry-group-row">
-                      <td class="mono muted" style="white-space:nowrap;">${fmtDateShort(first.date)}</td>
-                      <td colspan="${editable?9:8}">
-                        <button type="button" class="btn btn-ghost btn-sm registry-expand-btn" data-action="cash-expense-group-toggle" data-key="${escapeHtml(cl.key)}" title="${gexpanded?'Свернуть':'Показать долю каждой заявки'}">${gexpanded?'▾':'▸'}</button>
-                        ${escapeHtml(first.description)} <span class="muted">— общий на ${cl.rows.length} ${pluralRu(cl.rows.length,'заявку','заявки','заявок')}, ${fmtSum(sumAmt)} ₸, ${escapeHtml(first.person)}</span>
-                      </td>
+                  var body = groupCashExpensesByMonth(g.rows).map(function(m){
+                    var monthKey = g.person + "::" + m.key;
+                    var mExpanded = cashExpenseMonthExpanded(monthKey);
+                    var sumMonth = m.rows.reduce(function(s,e){ return s+(Number(e.amount)||0); }, 0);
+                    var monthLabel = m.key==="unknown" ? "Дата не указана" : monthLabelRu(m.key);
+                    var monthHeader = h`<tr class="cash-expense-month-divider" data-action="cash-expense-month-toggle" data-key="${escapeHtml(monthKey)}" style="cursor:pointer;">
+                      <td colspan="${editable?10:9}" style="padding-left:28px;"><button type="button" class="btn btn-ghost btn-sm registry-expand-btn" style="margin-right:6px;" title="${mExpanded?'Свернуть месяц':'Показать расходы за месяц'}">${mExpanded?'▾':'▸'}</button>${escapeHtml(monthLabel)} <span class="muted">— ${m.rows.length} ${ruPlural(m.rows.length,['расход','расхода','расходов'])}, ${fmtSum(sumMonth)} ₸</span></td>
                     </tr>`;
-                    var subRows = !gexpanded ? "" : cl.rows.map(cashExpenseRow).join("");
-                    return header2 + subRows;
+                    if(!mExpanded) return monthHeader;
+                    var items = clusterCashExpenseRows(m.rows).map(function(cl){
+                      if(!cl.isGroup) return cashExpenseRow(cl.row);
+                      // 0.4.5, п.5: несколько строк одного импортированного/введённого
+                      // пункта (общий group_key, см. clusterCashExpenseRows выше) —
+                      // одна сворачиваемая строка вместо N подряд, тем же приёмом,
+                      // что и общий счёт на несколько заявок в «Реестре платежей».
+                      // 0.4.6, п.2 (по просьбе Антона): такая строка визуально
+                      // выделена (см. .registry-group-row в <style>) — раньше
+                      // сливалась с обычными строками расходов, когда была
+                      // развёрнута.
+                      var gexpanded = !!state.cashExpenseGroupExpanded[cl.key];
+                      var first = cl.rows[0];
+                      var sumAmt = cl.rows.reduce(function(s,e){ return s+(Number(e.amount)||0); }, 0);
+                      var header2 = h`<tr class="registry-group-row">
+                        <td class="mono muted" style="white-space:nowrap;">${fmtDateShort(first.date)}</td>
+                        <td colspan="${editable?9:8}" style="padding-left:20px;">
+                          <button type="button" class="btn btn-ghost btn-sm registry-expand-btn" data-action="cash-expense-group-toggle" data-key="${escapeHtml(cl.key)}" title="${gexpanded?'Свернуть':'Показать долю каждой заявки'}">${gexpanded?'▾':'▸'}</button>
+                          ${escapeHtml(first.description)} <span class="muted">— общий на ${cl.rows.length} ${pluralRu(cl.rows.length,'заявку','заявки','заявок')}, ${fmtSum(sumAmt)} ₸, ${escapeHtml(first.person)}</span>
+                        </td>
+                      </tr>`;
+                      var subRows = !gexpanded ? "" : cl.rows.map(function(e){ return cashExpenseRow(e, true); }).join("");
+                      return header2 + subRows;
+                    }).join("");
+                    return monthHeader + items;
                   }).join("");
                   return header + body;
                 }).join("")}
@@ -5530,12 +5679,12 @@
               <div class="field"><label>Кол-во</label><input type="number" name="qty" min="0" step="0.01" value="1" required></div>
               <div class="field"><label>Цена за ед.</label><input type="number" name="unit_cost" min="0" step="0.01" required></div>
               <div class="field"><label>Мотель</label><select name="hotel_id"><option value="">—</option>${hotelOptions}</select></div>
-              <div class="field" style="grid-column:span 2;"><label>Заявка (необязательно для «Материал»/«Работа»/«Другое»; для «Командировочные» — обязательно, можно несколько через запятую)</label><input type="text" name="ticket_ref" list="cash-expense-tickets" placeholder="№ c-lector, напр. «526» или «526, 530, 531» или «526:1000, 530, 531» — своя доля через двоеточие"></div>
-              <div class="field"><label>Категория</label><select name="category"><option value="materials">Материал</option><option value="crew">Работа</option><option value="travel">Командировочные</option><option value="other">Другое</option></select></div>
+              <div class="field" style="grid-column:span 2;"><label>Заявка (необязательно; несколько через запятую — сумма разнесётся между ними)</label><input type="text" name="ticket_ref" list="cash-expense-tickets" placeholder="№ c-lector, напр. «526» или «526, 530, 531» или «526:1000, 530, 531» — своя доля через двоеточие"></div>
+              <div class="field"><label>Категория</label><select name="category"><option value="materials">Материал</option><option value="crew">Работа</option></select></div>
               <div class="field"><label>Кто потратил / кому перечислено</label><input type="text" name="person" list="cash-persons" placeholder="Имя прораба" required></div>
               <button class="btn btn-primary" type="submit">Добавить</button>
             </form>
-            <div class="helptext" style="margin-top:6px;">«Командировочные»: сумма — это вся перечисленная сумма, заявки — через запятую; если доли не указаны (просто «526, 530, 531»), сумма делится между ними поровну (с округлением до целых), если указаны частично или полностью (напр. «526:1000, 530»), остаток делится поровну между остальными.</div>` : ''}
+            <div class="helptext" style="margin-top:6px;">Несколько заявок в поле «Заявка» через запятую (например, командировочные, перечисленные бригаде сразу на несколько заявок) — сумма считается одним перечислением и разносится между ними: доли не указаны (просто «526, 530, 531») — поровну, с округлением до целых; указаны частично или полностью (напр. «526:1000, 530») — остаток делится поровну между остальными.</div>` : ''}
           </div>
         </div>
 
@@ -5643,7 +5792,7 @@
         }).join("")}
       </div>
       <div class="field-row" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr));margin-top:6px;">
-        <div class="field"><label>Категория (для всех строк)</label><select id="cash-import-category"><option value="materials">Материал</option><option value="crew">Работа</option><option value="travel">Командировочные</option><option value="other">Другое</option></select></div>
+        <div class="field"><label>Категория (для всех строк)</label><select id="cash-import-category"><option value="materials">Материал</option><option value="crew">Работа</option></select></div>
         <div class="field"><label>Кто потратил (для всех строк)</label><input type="text" id="cash-import-person" list="cash-persons" placeholder="Имя прораба" required></div>
       </div>
       <div class="table-wrap" style="max-height:360px;overflow-y:auto;"><table>
@@ -5799,14 +5948,13 @@
   // 0.4.5, п.3 (по просьбе Антона): "Бригады" переработаны в плоский справочник
   // отдельных фамилий "Исполнители" — люди свободно переходят от заявки к
   // заявке, а не закреплены за постоянной бригадой (см. комментарий у
-  // createCrew выше). Сколько сейчас активных (не выполненных/не отклонённых)
-  // заявок числится за исполнителем — раньше assigned_to хранил "Бригада:
-  // <название>", теперь новые назначения — просто имя как есть (см.
-  // assignSpecialist/renderTicketPanel); старые записи ДО 0.4.5 могли остаться
-  // с префиксом "Бригада: " — учитываем оба варианта, чтобы счётчик не
-  // занижал их для уже идущих заявок.
+  // createCrew выше). 0.4.6: заявку теперь может вести сразу несколько
+  // исполнителей (tickets.crew_names) — ticketPerformers() отдаёт их списком
+  // (и сама подчищает легаси-префикс "Бригада: " у старых записей assigned_to,
+  // если crew_names почему-то пуст), поэтому здесь достаточно проверить
+  // includes.
   function crewActiveCount(crewName){
-    return state.tickets.filter(function(t){ return (t.assigned_to===crewName || t.assigned_to===("Бригада: "+crewName)) && !isTicketDone(t); }).length;
+    return state.tickets.filter(function(t){ return ticketPerformers(t).indexOf(crewName)!==-1 && !isTicketDone(t); }).length;
   }
   function viewCrews(){
     return h`
@@ -6085,7 +6233,7 @@
           <div class="wo-field"><div class="k">Объект</div><div class="v">№${hotel.id} ${hotel.name}${hotel.zone?(' · Зона '+hotel.zone):''}</div></div>
           ${t.location ? h`<div class="wo-field"><div class="k">Локация</div><div class="v">${escapeHtml(t.location)}</div></div>` : ""}
           <div class="wo-field"><div class="k">Категория</div><div class="v">${GROUP_LABEL[t.ticket_group]}</div></div>
-          <div class="wo-field"><div class="k">Исполнитель</div><div class="v">${t.assigned_to? escapeHtml(t.assigned_to): "не назначен"}</div></div>
+          <div class="wo-field"><div class="k">Исполнитель</div><div class="v">${ticketPerformers(t).length? escapeHtml(ticketPerformers(t).join(", ")): "не назначен"}</div></div>
           <div class="wo-field"><div class="k">Срок реагирования</div><div class="v">${t.arrival_deadline? fmtDateShort(t.arrival_deadline): "—"}</div></div>
           <div class="wo-field"><div class="k">Дата регистрации</div><div class="v">${fmtDate(t.created_at)}</div></div>
           <div class="wo-field"><div class="k">Срок устранения</div><div class="v">${t.resolution_deadline? fmtDate(t.resolution_deadline): "не указан (нет данных c-lector)"}</div></div>
@@ -6094,7 +6242,7 @@
         <div class="wo-desc">${escapeHtml(t.description)}</div>
         <div class="helptext" style="margin-bottom:6px;">Основание: Регламент подачи, рассмотрения заявок и определения гарантийных случаев (Приложение №2 к Протоколу разногласий по ДС №10) и Регламент организации и работы Службы сервиса.</div>
         <div class="wo-sign">
-          <div class="sign-line">Исполнитель: _______________________ / ${t.assigned_to?escapeHtml(t.assigned_to):''} /</div>
+          <div class="sign-line">Исполнитель: _______________________ / ${ticketPerformers(t).length?escapeHtml(ticketPerformers(t).join(", ")):''} /</div>
           <div class="sign-line">Представитель Заказчика на объекте: _______________________ /</div>
         </div>
       </div>`;
@@ -6216,11 +6364,12 @@
               // в пункте "Бригада", тем же приёмом, что и у "Материал" ниже. В
               // отличие от "Материала" это НЕ влияет на готовность пункта
               // (crewDone определяется назначением исполнителя, не оплатой).
-              // 0.4.3, п.2: командировочные ("travel") — по просьбе Антона тоже
-              // считаются частью затрат на бригаду, суммируются вместе с "Работой"
-              // в этом же блоке (а не отдельной строкой).
-              var crewCashTravel = cashExpensesFor(t, "travel");
-              var crewCash = cashExpensesFor(t, "crew").concat(crewCashTravel);
+              // 0.4.3, п.2 / 0.4.6, п.1: командировочные — по просьбе Антона тоже
+              // считаются частью затрат на бригаду; с 0.4.6 это больше не
+              // отдельная категория "travel" (объединена с "Работой"/"crew" —
+              // см. CASH_EXPENSE_CATEGORY_LABEL/add-0.4.6-cash-categories.sql),
+              // так что здесь достаточно одной категории.
+              var crewCash = cashExpensesFor(t, "crew");
               var crewCashTotal = crewCash.reduce(function(sum,ce){ return sum + (Number(ce.amount)||0); }, 0);
               var fmtCashSum = function(n){ return (Number(n)||0).toLocaleString("ru-RU", {maximumFractionDigits:2}); };
               // 0.4.5, п.3 (по просьбе Антона): общая сумма по пункту "Бригада" —
@@ -6242,7 +6391,20 @@
               // пункта ("Назначить"/"Сменить" или галочка "не нужна(-ен)"), значок
               // только отображает состояние. "Работа"/"Акт" — как раньше: значок
               // кликабелен вручную, пока нет реального подтверждения (фото/файл).
-              var crewReal = !!t.assigned_to, crewNotNeeded = !!t.crew_not_needed, crewDone = crewReal||crewNotNeeded;
+              // 0.4.6 (по просьбе Антона): исполнителей на заявке теперь может
+              // быть несколько — ticketPerformers() отдаёт список имён
+              // (tickets.crew_names), вместо одного t.assigned_to. Прежние
+              // "Назначить"/"Сменить" (разные экраны для первого назначения и
+              // смены) слиты в одно всегда доступное "Добавить" — добавить
+              // можно в любой момент, независимо от того, есть уже кто-то или
+              // нет; у каждого уже добавленного — свой ✕. Отдельную ручную
+              // отметку "Отметить прибытие" убрали совсем (Антон подтвердил —
+              // не пользуются): теперь именно ПЕРВОЕ добавление исполнителя
+              // само переводит заявку в status="onsite" (см. addCrewPerformer),
+              // чтобы не сломать то, что смотрит на этот статус ("Нужны
+              // материалы", "Категория (по осмотру)").
+              var performers = ticketPerformers(t);
+              var crewReal = performers.length>0, crewNotNeeded = !!t.crew_not_needed, crewDone = crewReal||crewNotNeeded;
               var mState = materialsState(t), materialsDone = mState==="ok", materialsWarn = mState==="warn";
               var workDone = !!t.work_manual_done;
               var actHasFile = !!t.act_file_path, actDone = !!t.act_signed;
@@ -6252,60 +6414,54 @@
                 icon: MS_ICON.crew,
                 done: crewDone,
                 clickable: false,
-                title: crewReal ? ("Бригада назначена: " + escapeHtml(t.assigned_to)) : (crewNotNeeded ? "Бригада не нужна для этой заявки" : "Бригада ещё не назначена"),
+                title: crewReal ? ("Бригада назначена: " + escapeHtml(performers.join(", "))) : (crewNotNeeded ? "Бригада не нужна для этой заявки" : "Бригада ещё не назначена"),
                 meta: h`
                   ${crewFiles ? h`<span class="milestone-meta">${crewFiles} ${ruPlural(crewFiles,["файл","файла","файлов"])}</span>` : ""}
                   ${milestoneAttachControl({cls:"ms-quick-attach", id:t.id, category:"crew", accept:"application/pdf,image/*", multiple:true, title:"Прикрепить счёт/договор (можно сразу несколько)"})}`,
                 body: h`
+                  <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;">
+                    <span class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;font-weight:600;">Бригада</span>
+                    ${crewReal ? h`<a class="btn btn-sm" href="#/workorder/${t.id}">Наряд-задание</a>` : ""}
+                  </div>
                   ${!crewReal ? h`<div class="actions-row" style="margin-bottom:8px;align-items:center;">
                     <label style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:400;margin:0;">
                       <input type="checkbox" data-action="crew-not-needed-toggle" data-id="${t.id}" data-val="${crewNotNeeded?'0':'1'}" ${crewNotNeeded?'checked':''}>
                       Бригада не нужна
                     </label>
                   </div>` : ""}
-                  ${(t.status==="new" && !crewNotNeeded) ? h`
+                  ${performers.length ? h`<div style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px;">
+                    ${performers.map(function(name){ return h`<div style="display:flex;align-items:center;gap:8px;background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:6px 6px 6px 10px;">
+                      <span style="flex:1;min-width:0;font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(name)}</span>
+                      <button type="button" class="btn btn-sm btn-ghost btn-danger" data-action="crew-performer-remove" data-id="${t.id}" data-name="${escapeHtml(name)}" title="Убрать с заявки">✕</button>
+                    </div>`; }).join("")}
+                  </div>` : ""}
+                  ${/* добавление исполнителя доступно, пока не отмечено "не нужна" —
+                       И ВСЕГДА, если уже есть хотя бы один реальный исполнитель
+                       (crewReal): иначе, если "не нужна" когда-то была отмечена
+                       напрямую в базе при уже назначенной бригаде (рассинхрон,
+                       через обычный интерфейс не возникает — addCrewPerformer
+                       всегда сбрасывает crew_not_needed при добавлении), и
+                       чекбокс, и кнопки добавления пропадали бы одновременно —
+                       без единого способа выбраться из этого состояния через
+                       интерфейс. */ (!crewNotNeeded || crewReal) ? h`
                   <div class="actions-row" style="margin-bottom:8px;">
-                    <select id="assign-select" style="max-width:240px;">
-                      <option value="">Выбрать исполнителя…</option>
+                    <select id="crew-performer-select" style="max-width:240px;">
+                      <option value="">+ добавить исполнителя из списка…</option>
                       ${specialists.length ? h`<optgroup label="Главные инженеры">${specialists.map(function(s){return h`<option value="${escapeHtml(s.name||s.email)}">${escapeHtml(s.name||s.email)}</option>`;}).join("")}</optgroup>` : ""}
                       ${state.crews.length ? h`<optgroup label="Исполнители">${state.crews.map(function(c){return h`<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`;}).join("")}</optgroup>` : ""}
                     </select>
-                    <button class="btn btn-primary btn-sm" data-action="assign" data-id="${t.id}">Назначить</button>
+                    <button class="btn btn-primary btn-sm" data-action="crew-performer-add" data-id="${t.id}">Добавить</button>
                   </div>
                   <div class="actions-row" style="margin-bottom:8px;">
-                    <input type="text" id="assign-free-input" data-id="${t.id}" placeholder="…или впишите имя вручную" style="max-width:240px;">
-                    <button class="btn btn-sm" data-action="assign-free" data-id="${t.id}">Назначить</button>
+                    <input type="text" id="crew-performer-free-input" data-id="${t.id}" placeholder="…или впишите имя вручную" style="max-width:240px;">
+                    <button class="btn btn-sm" data-action="crew-performer-add-free" data-id="${t.id}">Добавить</button>
                   </div>` : ""}
-                  ${/* 0.3.6 (по просьбе Антона, п.3): раньше блок "сменить исполнителя"
-                       показывался только пока статус заявки был "Диспетчеризована"/"На
-                       объекте" — как только все 4 пункта чек-листа выполнялись,
-                       maybeAutoComplete() сам переводил заявку в "Закрыта" (в т.ч. когда
-                       внешний статус в c-lector уже "Выполнена"), и смена бригады
-                       становилась недоступна НАВСЕГДА, даже если бригаду назначили по
-                       ошибке. reassignSpecialist() сама по себе статус не трогает (это
-                       просто assigned_to) — условие показа было единственным, что
-                       мешало; теперь оно снято: если исполнитель УЖЕ назначен (crewReal),
-                       его можно сменить в любом статусе заявки. */ crewReal ? h`
-                  <div class="actions-row" style="margin-bottom:8px;">
-                    <select id="reassign-select" style="max-width:240px;">
-                      <option value="">Сменить исполнителя…</option>
-                      ${specialists.length ? h`<optgroup label="Главные инженеры">${specialists.map(function(s){return h`<option value="${escapeHtml(s.name||s.email)}" ${t.assigned_to===(s.name||s.email)?'selected':''}>${escapeHtml(s.name||s.email)}</option>`;}).join("")}</optgroup>` : ""}
-                      ${state.crews.length ? h`<optgroup label="Исполнители">${state.crews.map(function(c){return h`<option value="${escapeHtml(c.name)}" ${(t.assigned_to===c.name || t.assigned_to===("Бригада: "+c.name))?'selected':''}>${escapeHtml(c.name)}</option>`;}).join("")}</optgroup>` : ""}
-                    </select>
-                    <button class="btn btn-sm" data-action="reassign" data-id="${t.id}">Сменить</button>
-                    ${t.status==="dispatched" ? h`<button class="btn btn-sm" data-action="arrived" data-id="${t.id}">Отметить прибытие</button>` : ""}
-                  </div>
-                  <div class="actions-row" style="margin-bottom:8px;">
-                    <input type="text" id="reassign-free-input" data-id="${t.id}" placeholder="…или впишите имя вручную" style="max-width:240px;">
-                    <button class="btn btn-sm" data-action="reassign-free" data-id="${t.id}">Сменить</button>
-                  </div>` : ""}
-                  ${t.assigned_to ? h`<div class="actions-row" style="margin-bottom:8px;"><a class="btn btn-sm" href="#/workorder/${t.id}">Наряд-задание</a></div>` : ""}
-                  ${(crewGrandTotal>0) ? h`<div style="display:flex;align-items:baseline;gap:6px;margin-bottom:10px;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);">
-                    <span style="font-size:12.5px;">Итого по работе:</span>
-                    <b style="font-size:15px;" title="${crewInvoiceIncomplete?'Не все суммы по счетам ещё посчитаны (курс/доля) — итог может увеличиться':'Счета (без НДС, с доп. налогом) + наличные'}">${fmtCashSum(crewGrandTotal)} ₸${crewInvoiceIncomplete?' (не все суммы учтены)':''}</b>
-                  </div>` : ""}
-                  ${crewCash.length ? h`<div class="helptext" style="margin-bottom:8px;">Оплачено наличными (${crewCashTravel.length ? 'Работа + Командировочные' : 'Работа'}): ${fmtCashSum(crewCashTotal)} (${crewCash.length} ${ruPlural(crewCash.length,["запись","записи","записей"])}) — подтянуто автоматически из «Наличные расходы».</div>` : ""}
-                  ${milestoneInvoiceList(t, "crew")}`
+                  ${crewCash.length ? h`<div class="helptext" style="margin-bottom:8px;">Оплачено наличными (Работа, в т.ч. командировочные): ${fmtCashSum(crewCashTotal)} (${crewCash.length} ${ruPlural(crewCash.length,["запись","записи","записей"])}) — подтянуто автоматически из «Наличные расходы».</div>` : ""}
+                  ${milestoneInvoiceList(t, "crew")}
+                  ${(crewGrandTotal>0) ? h`<div style="display:flex;align-items:baseline;justify-content:space-between;gap:6px;margin-top:10px;padding-top:10px;border-top:1px solid var(--line);">
+                    <span style="font-size:12.5px;color:var(--ink-soft);font-weight:600;">Итого по работе <span class="muted" style="font-weight:500;">(без НДС)</span></span>
+                    <b class="mono" style="font-size:15px;color:var(--accent);" title="${crewInvoiceIncomplete?'Не все суммы по счетам ещё посчитаны (курс/доля) — итог может увеличиться':'Счета (без НДС, с доп. налогом) + наличные'}">${fmtCashSum(crewGrandTotal)} ₸${crewInvoiceIncomplete?' (не все суммы учтены)':''}</b>
+                  </div>` : ""}`
               })}
               ${milestoneRow({
                 key: "materials",
@@ -6419,7 +6575,7 @@
             <div class="section-title">Карточка заявки</div>
             ${t.external_status ? h`<div class="kv"><span class="k">Статус в c-lector</span><span class="v">${externalStatusPill(t.external_status)}</span></div>` : ""}
             <div class="kv"><span class="k">Зарегистрирована</span><span class="v">${fmtDate(t.created_at).split(" ")[0]}</span></div>
-            <div class="kv"><span class="k">Исполнитель</span><span class="v">${t.assigned_to? escapeHtml(t.assigned_to):'—'}</span></div>
+            <div class="kv"><span class="k">Исполнитель</span><span class="v">${ticketPerformers(t).length? escapeHtml(ticketPerformers(t).join(", ")):'—'}</span></div>
             <div class="kv"><span class="k">Категория</span><span class="v">${t.case_type? CASE_LABEL[t.case_type]:'—'}</span></div>
             <div class="kv"><span class="k">Срок устранения</span><span class="v" style="${(!di.done && t.resolution_deadline && new Date(t.resolution_deadline).getTime()<Date.now())?'color:var(--crit);font-weight:600;':''}">${t.resolution_deadline? fmtDate(t.resolution_deadline): "не указан (нет данных c-lector)"}</span></div>
             <div class="kv"><span class="k">Наряд-задание</span><span class="v mono">${workOrderNo(t)}</span></div>
@@ -6890,29 +7046,22 @@
       if(action==="report-period-preset"){ state.reportPeriodDays = Number(actionEl.getAttribute("data-value")) || 7; render(); return; }
       if(action==="import-commit") return commitImport();
       if(action==="import-reset") return resetImport();
-      if(action==="assign"){
-        var sel=document.getElementById("assign-select"); var name=sel&&sel.value;
-        if(!name){ alert("Выберите исполнителя из списка (назначьте роль в «Команде» или добавьте в «Исполнители», если список пуст)."); return; }
-        assignSpecialist(id,name); return;
+      if(action==="crew-performer-add"){
+        var cpSel=document.getElementById("crew-performer-select"); var cpName=cpSel&&cpSel.value;
+        if(!cpName){ alert("Выберите исполнителя из списка (назначьте роль в «Команде» или добавьте в «Исполнители», если список пуст)."); return; }
+        addCrewPerformer(id,cpName); return;
       }
-      if(action==="assign-free"){
-        var afInput=document.getElementById("assign-free-input"); var afName=afInput&&afInput.value&&afInput.value.trim();
-        if(!afName){ alert("Впишите имя исполнителя."); return; }
-        ensurePerformerInDirectory(afName);
-        assignSpecialist(id,afName); if(afInput) afInput.value=""; return;
+      if(action==="crew-performer-add-free"){
+        var cpInput=document.getElementById("crew-performer-free-input"); var cpFreeName=cpInput&&cpInput.value&&cpInput.value.trim();
+        if(!cpFreeName){ alert("Впишите имя исполнителя."); return; }
+        ensurePerformerInDirectory(cpFreeName);
+        addCrewPerformer(id,cpFreeName); if(cpInput) cpInput.value=""; return;
       }
-      if(action==="reassign"){
-        var rsel=document.getElementById("reassign-select"); var rname=rsel&&rsel.value;
-        if(!rname){ alert("Выберите нового исполнителя из списка."); return; }
-        reassignSpecialist(id,rname); return;
+      if(action==="crew-performer-remove"){
+        var cpRemoveName = actionEl.getAttribute("data-name");
+        if(cpRemoveName && confirm("Убрать «"+cpRemoveName+"» с этой заявки?")) removeCrewPerformer(id, cpRemoveName);
+        return;
       }
-      if(action==="reassign-free"){
-        var rfInput=document.getElementById("reassign-free-input"); var rfName=rfInput&&rfInput.value&&rfInput.value.trim();
-        if(!rfName){ alert("Впишите имя нового исполнителя."); return; }
-        ensurePerformerInDirectory(rfName);
-        reassignSpecialist(id,rfName); if(rfInput) rfInput.value=""; return;
-      }
-      if(action==="arrived") return markArrived(id);
       if(action==="materials") return openMaterialsEtaModal(id);
       if(action==="materials-not-needed-toggle") return setMaterialsNotNeeded(id, actionEl.getAttribute("data-val")==="1");
       if(action==="materials-cash-pending-toggle") return setMaterialsCashPending(id, actionEl.getAttribute("data-val")==="1");
@@ -6969,6 +7118,24 @@
         // По умолчанию (ключа ещё нет) — развёрнуто, поэтому переключаем
         // относительно cashPersonExpanded(), а не просто "!текущее значение".
         state.cashExpandedPersons[cpKey] = !cashPersonExpanded(cpKey);
+        render();
+        return;
+      }
+      // 0.4.6, п.3: те же переключатели уровней, но для «Расходов» — там по
+      // умолчанию СВЁРНУТО (см. cashExpensePersonExpanded/cashExpenseMonthExpanded
+      // выше), поэтому просто инвертируем текущее значение карты, без сравнения
+      // с "!==false", как у cash-person-toggle.
+      if(action==="cash-expense-person-toggle"){
+        var cepKey = actionEl.getAttribute("data-key");
+        state.cashExpandedExpensePersons = state.cashExpandedExpensePersons || {};
+        state.cashExpandedExpensePersons[cepKey] = !state.cashExpandedExpensePersons[cepKey];
+        render();
+        return;
+      }
+      if(action==="cash-expense-month-toggle"){
+        var cemKey = actionEl.getAttribute("data-key");
+        state.cashExpandedExpenseMonths = state.cashExpandedExpenseMonths || {};
+        state.cashExpandedExpenseMonths[cemKey] = !state.cashExpandedExpenseMonths[cemKey];
         render();
         return;
       }
