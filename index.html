@@ -5230,7 +5230,9 @@
     if(isClientRole()) return m; // «Клиенту» компанейские накладные ни к чему
     (state.overheadExpenses||[]).forEach(function(oe){
       var mk = oe.date ? String(oe.date).slice(0,7) : null; if(!mk) return;
-      m[mk] = (m[mk]||0) + (Number(oe.amount)||0);
+      var acc = overheadAccountedKZT(oe);
+      if(acc.state!=="ok" || acc.value==null) return; // неполная запись (нет валюты/НДС или курса) — как и у счетов, молча не считаем
+      m[mk] = (m[mk]||0) + acc.value;
     });
     return m;
   }
@@ -5264,7 +5266,8 @@
     if(withOv){
       (state.overheadExpenses||[]).forEach(function(oe){
         var mk = oe.date ? String(oe.date).slice(0,7) : null;
-        if(mk===monthKey) overheadCatsInMonth[oe.category||"—"] = (overheadCatsInMonth[oe.category||"—"]||0) + (Number(oe.amount)||0);
+        var acc2 = overheadAccountedKZT(oe);
+        if(mk===monthKey && acc2.state==="ok" && acc2.value!=null) overheadCatsInMonth[oe.category||"—"] = (overheadCatsInMonth[oe.category||"—"]||0) + acc2.value;
       });
     }
     // Диаграмма: 12 месяцев, заканчивая выбранным.
@@ -6002,24 +6005,100 @@
       });
     }));
   }
-  function addOverheadExpense(data, files){
+  // 0.4.13 (по просьбе Антона): в «Накладных расходах» те же поля, что в
+  // «Реестре платежей» — Валюта / НДС / Налог (доп. налог по способу оплаты,
+  // «Свой» — % или сумма) — и «Учтено в затратах» (без НДС, с доп. налогом, в
+  // ₸ по курсу Нацбанка РК для RUB/BYN). Считается тем же кодом, что для
+  // счетов (invoiceAccountedKZT): запись превращается во временный «счёт».
+  // Старые записи (без валюты/НДС/налога — внесены до 0.4.13) считаются как
+  // раньше: сумма «как есть» в ₸.
+  function overheadAccountedKZT(oe){
+    if(oe.vat_included==null && !oe.currency && !oe.tax_basis) return { value: Number(oe.amount)||0, state:"ok", legacy:true };
+    var day = oe.date ? String(oe.date).slice(0,10) : new Date().toISOString().slice(0,10);
+    return invoiceAccountedKZT({ amount: Number(oe.amount)||0, currency: oe.currency||null, vat_included: oe.vat_included==null?null:oe.vat_included, tax_basis: oe.tax_basis||null, extra: oe.extra||{}, paid:true, paid_at: day+"T12:00:00" });
+  }
+  // Значение select «Налог» из полей записи: custom_kind различает «Свой %» и
+  // «Своя сумма ₸» (у обоих tax_basis="custom", как у счетов).
+  function overheadTaxSelectValue(oe){
+    if(oe.tax_basis==="custom") return (oe.extra && oe.extra.custom_kind==="amt") ? "custom_amt" : "custom";
+    return oe.tax_basis==="regular" ? "" : (oe.tax_basis||"");
+  }
+  function overheadTaxFields(cur, vat, tax, taxValue){
+    var out = { currency: cur||null, vat_included: vat==="with" ? true : (vat==="without" ? false : null), tax_basis: null, extra: {} };
+    if(out.vat_included===true) return out; // при «с НДС» доп. налог не применяется (как в реестре)
+    if(tax==="simplified" || tax==="cash") out.tax_basis = tax;
+    else if(tax==="custom" || tax==="custom_amt"){
+      out.tax_basis = "custom";
+      out.extra.custom_kind = tax==="custom_amt" ? "amt" : "pct";
+      var raw = parseAmountInputValue(taxValue); var num = raw==="" ? null : Number(raw);
+      if(num!=null && !isNaN(num)){ if(tax==="custom_amt") out.extra.custom_tax_amount = num; else out.extra.custom_tax_pct = num; }
+    }
+    return out;
+  }
+  function overheadAccountedLabel(oe){
+    var acc = overheadAccountedKZT(oe);
+    if(acc.state==="ok") return fmtKZT2(acc.value) + (acc.currency ? h`<div class="muted" style="font-size:10px;">${fmtKZT(acc.original)} ${acc.currency}</div>` : "");
+    if(acc.state==="pending") return h`<span class="muted">курс…</span>`;
+    if(acc.state==="error") return h`<span class="muted" title="Не удалось получить курс Нацбанка РК">${fmtKZT(acc.original)} ${acc.currency} (?)</span>`;
+    return h`<span class="muted" title="Укажите валюту и «с НДС/Без», чтобы посчитать «Учтено в затратах»">—</span>`;
+  }
+  function updateOverheadField(id, field, val){
+    if(!canEditRegistry()){ alert("Править накладные расходы может только Администратор, Руководитель или Финансист."); return; }
+    var e = (state.overheadExpenses||[]).find(function(x){ return x.id===id; });
+    if(!e) return;
+    var patch = {};
+    if(field==="amount"){
+      var raw = parseAmountInputValue(val); var num = Number(raw);
+      if(raw==="" || isNaN(num)){ render(); return; }
+      patch.amount = num;
+    } else {
+      var curV = field==="currency" ? val : (e.currency||"");
+      var vatV = field==="vat" ? val : (e.vat_included===true?"with":(e.vat_included===false?"without":""));
+      var taxV = field==="tax" ? val : overheadTaxSelectValue(e);
+      var valV = field==="tax_value" ? val : (e.extra ? (taxV==="custom_amt" ? e.extra.custom_tax_amount : e.extra.custom_tax_pct) : "");
+      var f = overheadTaxFields(curV, vatV, taxV, valV==null?"":String(valV));
+      patch.currency = f.currency; patch.vat_included = f.vat_included; patch.tax_basis = f.tax_basis; patch.extra = f.extra;
+    }
+    Object.assign(e, patch);
+    render();
+    sb.from("overhead_expenses").update(patch).eq("id", id).then(function(res){
+      if(res && res.error) alert("Не удалось сохранить: " + res.error.message);
+    });
+  }
+  function addOverheadExpense(data, files, onOk){
     if(!canEditRegistry()){ alert("Вносить накладные расходы может только Администратор, Руководитель или Финансист."); return false; }
+    if(state.overheadSaving) return false;
     var category = (data.category||"").trim();
-    var amount = Number(data.amount) || 0;
+    var rawAmt = parseAmountInputValue(data.amount);
+    var amount = Number(rawAmt);
     if(!category){ alert("Укажите статью расхода."); return false; }
+    if(rawAmt==="" || isNaN(amount) || amount<=0){ alert("Укажите сумму."); return false; }
+    var tax = overheadTaxFields(data.currency, data.vat, data.tax, data.tax_value);
+    // «Сохраняю…» — кнопка недоступна, пока идёт загрузка файлов и запись
+    // (раньше при больших файлах казалось, что ничего не происходит, и
+    // запись «добавлялась медленно»). После записи строка сразу попадает в
+    // список, не дожидаясь эха realtime.
+    state.overheadSaving = true; render();
     uploadOverheadFiles(files).then(function(uploaded){
       return sb.from("overhead_expenses").insert({
         date: data.date || new Date().toISOString().slice(0,10),
         category: category, amount: amount,
+        currency: tax.currency, vat_included: tax.vat_included, tax_basis: tax.tax_basis, extra: tax.extra,
         note: (data.note||"").trim() || null,
         files: uploaded,
         created_by: myLabelWithRole()
-      });
+      }).select();
     }).then(function(res){
       if(res && res.error){ alert("Не удалось сохранить расход: " + res.error.message); return; }
+      var row = res && res.data && res.data[0];
+      if(row && !(state.overheadExpenses||[]).some(function(r){ return r.id===row.id; })){
+        state.overheadExpenses.push(row);
+        state.overheadExpenses.sort(rtSortBy("date", false));
+      }
+      if(onOk) onOk();
     }).catch(function(err){
-      alert("Не удалось загрузить файл: " + (err&&err.message?err.message:err));
-    });
+      alert("Не удалось сохранить: " + (err&&err.message?err.message:err));
+    }).then(function(){ state.overheadSaving = false; render(); });
     return true;
   }
   function addFilesToOverhead(id, files){
@@ -6466,38 +6545,55 @@
     var rows = (state.overheadExpenses||[]).slice().sort(function(a,b){ return (b.date||"").localeCompare(a.date||""); });
     var categories = distinctOverheadCategories();
     var todayIso = new Date().toISOString().slice(0,10);
-    function fmtSum(n){ return (Number(n)||0).toLocaleString("ru-RU", {maximumFractionDigits:2}); }
-    var total = rows.reduce(function(s,e){ return s+(Number(e.amount)||0); }, 0);
+    function fmtSum(n){ return (Number(n)||0).toLocaleString("ru-RU", {minimumFractionDigits:2, maximumFractionDigits:2}); }
+    var total = 0, incomplete = 0;
     var byCategory = {};
-    rows.forEach(function(e){ byCategory[e.category] = (byCategory[e.category]||0) + (Number(e.amount)||0); });
+    rows.forEach(function(e){
+      var acc = overheadAccountedKZT(e);
+      if(acc.state==="ok" && acc.value!=null){ total += acc.value; byCategory[e.category] = (byCategory[e.category]||0) + acc.value; }
+      else { incomplete++; if(!(e.category in byCategory)) byCategory[e.category] = 0; }
+    });
     var categoryTotals = Object.keys(byCategory).sort();
+    var saving = !!state.overheadSaving;
+    function taxOptions(sel, vatOn){
+      return h`<option value="" ${sel===''?'selected':''}>—</option>${vatOn?'':h`<option value="simplified" ${sel==='simplified'?'selected':''}>Упрощ. +20%</option><option value="cash" ${sel==='cash'?'selected':''}>Нал. +30%</option><option value="custom" ${sel==='custom'?'selected':''}>Свой, %</option><option value="custom_amt" ${sel==='custom_amt'?'selected':''}>Своя сумма, ₸</option>`}`;
+    }
 
     return h`
       ${financeTabs('overhead')}
       <datalist id="overhead-categories">${categories.map(function(c){ return `<option value="${escapeHtml(c)}">`; }).join("")}</datalist>
       <div class="row-gap">
         <div class="card card-pad">
-          <div class="section-title">Итого по статьям</div>
+          <div class="section-title">Итого по статьям ${infoTip("«Учтено в затратах»: сумма без НДС, с доп. налогом по способу оплаты, в ₸ (RUB/BYN — по курсу Нацбанка РК на дату записи) — так же, как в «Реестре платежей». Записи без валюты и «с НДС/Без» (внесены раньше) считаются как есть, в ₸.")}</div>
           ${categoryTotals.length===0 ? h`<div class="muted" style="font-size:13px;">Пока нет ни одной записи.</div>` : h`
           <div class="table-wrap"><table>
-            <thead><tr><th>Статья</th><th class="num">Сумма</th></tr></thead>
+            <thead><tr><th>Статья</th><th class="num">Сумма, ₸</th></tr></thead>
             <tbody>${categoryTotals.map(function(c){
               return h`<tr><td>${escapeHtml(c)}</td><td class="num mono">${fmtSum(byCategory[c])}</td></tr>`;
             }).join("")}</tbody>
             <tfoot><tr><td><b>Итого</b></td><td class="num mono"><b>${fmtSum(total)}</b></td></tr></tfoot>
-          </table></div>`}
+          </table></div>
+          ${incomplete ? h`<div class="cost-summary-warn">⚠ ${incomplete} ${ruPlural(incomplete,["запись","записи","записей"])} без валюты/«с НДС–Без» или без курса — в итог пока не включено.</div>` : ''}`}
         </div>
 
         <div class="card card-pad">
           <div class="section-title">Записи</div>
           <div class="table-wrap"><table>
-            <thead><tr><th>Дата</th><th>Статья</th><th class="num">Сумма</th><th>Примечание</th><th>Файлы</th><th>Кто внёс</th>${editable?'<th></th>':''}</tr></thead>
-            <tbody>${rows.length===0 ? h`<tr><td colspan="${editable?7:6}"><div class="empty-state"><b>Пока нет записей</b>Внесите накладной расход ниже.</div></td></tr>` :
+            <thead><tr><th>Дата</th><th>Статья</th><th class="num">Сумма</th><th>Валюта</th><th>НДС</th><th>Налог</th><th class="num">Учтено в затратах, ₸</th><th>Примечание</th><th>Файлы</th><th>Кто внёс</th>${editable?'<th></th>':''}</tr></thead>
+            <tbody>${rows.length===0 ? h`<tr><td colspan="${editable?11:10}"><div class="empty-state"><b>Пока нет записей</b>Внесите накладной расход ниже.</div></td></tr>` :
               rows.map(function(e){
+                var vatOn = e.vat_included===true;
+                var taxSel = overheadTaxSelectValue(e);
+                var taxCustom = (taxSel==="custom"||taxSel==="custom_amt");
+                var customVal = taxSel==="custom_amt" ? (e.extra&&e.extra.custom_tax_amount) : (e.extra&&e.extra.custom_tax_pct);
                 return h`<tr>
                   <td class="mono muted" style="white-space:nowrap;">${fmtDateShort(e.date)}</td>
                   <td>${escapeHtml(e.category)}</td>
-                  <td class="num mono">${fmtSum(e.amount)}</td>
+                  <td class="num mono">${editable ? h`<input type="text" inputmode="decimal" class="registry-amount-input" data-overhead-field="amount" data-id="${e.id}" value="${formatAmountInputValue(String(e.amount))}" style="width:110px;text-align:right;">` : fmtSum(e.amount)}</td>
+                  <td>${editable ? h`<select data-overhead-field="currency" data-id="${e.id}"><option value="">—</option>${["KZT","RUB","BYN"].map(function(c){ return h`<option value="${c}" ${e.currency===c?'selected':''}>${c}</option>`; }).join("")}</select>` : escapeHtml(e.currency||'—')}</td>
+                  <td>${editable ? h`<select data-overhead-field="vat" data-id="${e.id}"><option value="">—</option><option value="with" ${vatOn?'selected':''}>С НДС</option><option value="without" ${e.vat_included===false?'selected':''}>Без</option></select>` : (vatOn?'С НДС':(e.vat_included===false?'Без':'—'))}</td>
+                  <td>${editable ? h`<div style="display:flex;flex-direction:column;gap:3px;"><select data-overhead-field="tax" data-id="${e.id}" ${vatOn?'disabled title="При «с НДС» доп. налог не применяется"':''}>${taxOptions(taxSel, vatOn)}</select>${taxCustom?h`<input type="text" inputmode="decimal" class="registry-tax-custom-input" data-overhead-field="tax_value" data-id="${e.id}" value="${customVal!=null?formatAmountInputValue(String(customVal)):''}" placeholder="${taxSel==='custom_amt'?'₸':'%'}" style="width:90px;">`:''}</div>` : escapeHtml(e.tax_basis?taxBasisLabel({tax_basis:e.tax_basis, extra:e.extra}):'—')}</td>
+                  <td class="mono" style="text-align:right;">${overheadAccountedLabel(e)}</td>
                   <td class="muted">${escapeHtml(e.note||'')}</td>
                   <td style="font-size:12px;">${(Array.isArray(e.files)?e.files:[]).map(function(f){ return h`<div style="white-space:nowrap;"><a href="#" data-action="overhead-file-open" data-path="${escapeHtml(f.path)}" title="${escapeHtml(f.name||'')}">📎 ${escapeHtml(String(f.name||'файл').length>24?String(f.name).slice(0,22)+'…':(f.name||'файл'))}</a>${editable?h` <a href="#" data-action="overhead-file-delete" data-id="${e.id}" data-path="${escapeHtml(f.path)}" style="color:var(--crit);" title="Удалить файл">✕</a>`:''}</div>`; }).join("")}${editable?h`<label class="btn btn-ghost btn-sm" style="cursor:pointer;">＋ файл<input type="file" multiple data-overhead-file-upload="${e.id}" style="display:none;"></label>`:''}</td>
                   <td class="muted" style="white-space:nowrap;">${escapeHtml(e.created_by||'')}</td>
@@ -6509,10 +6605,14 @@
           ${editable ? h`<form id="overhead-expense-form" data-keep-draft class="field-row" style="margin-top:12px;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;">
             <div class="field"><label>Дата</label><input type="date" name="date" value="${todayIso}" required></div>
             <div class="field"><label>Статья</label><input type="text" name="category" list="overhead-categories" placeholder="напр. Зарплата бэк-офиса" required></div>
-            <div class="field"><label>Сумма</label><input type="number" name="amount" min="0" step="0.01" required></div>
+            <div class="field"><label>Сумма</label><input type="text" inputmode="decimal" class="registry-amount-input" name="amount" placeholder="напр. 100 000" required></div>
+            <div class="field"><label>Валюта</label><select name="currency"><option value="KZT" selected>KZT</option><option value="RUB">RUB</option><option value="BYN">BYN</option></select></div>
+            <div class="field"><label>НДС</label><select name="vat"><option value="without" selected>Без НДС</option><option value="with">С НДС</option></select></div>
+            <div class="field"><label>Налог (при «Без НДС»)</label><select name="tax">${taxOptions('', false)}</select></div>
+            <div class="field"><label>Свой налог: % или ₸</label><input type="text" inputmode="decimal" class="registry-tax-custom-input" name="tax_value" placeholder="если выбран «Свой»"></div>
             <div class="field" style="grid-column:1/-1;"><label>Примечание (необязательно)</label><input type="text" name="note" placeholder="комментарий"></div>
             <div class="field" style="grid-column:1/-1;"><label>Файлы (необязательно — счета, акты, чеки)</label><input type="file" name="files" multiple></div>
-            <button class="btn btn-primary" type="submit">Добавить</button>
+            <button class="btn btn-primary" type="submit" ${saving?'disabled':''}>${saving?'Сохраняю…':'Добавить'}</button>
           </form>` : ''}
         </div>
       </div>`;
@@ -7726,7 +7826,13 @@
     var tag = fromEl.tagName;
     if((tag==="INPUT"||tag==="TEXTAREA"||tag==="SELECT") && fromEl.form && fromEl.form.hasAttribute("data-keep-draft")){
       if(fromEl.type==="file") return false;
-      if(fromEl.type==="checkbox"||fromEl.type==="radio") toEl.checked = fromEl.checked;
+      if(tag==="SELECT"){
+        // значение select восстанавливаем ПОСЛЕ обновления (onElUpdated ниже), а
+        // не через toEl.value: иначе morphdom переписал бы атрибут selected у
+        // <option>, и form.reset() возвращал бы уже не значение по умолчанию.
+        fromEl.__draftValue = fromEl.value;
+      }
+      else if(fromEl.type==="checkbox"||fromEl.type==="radio") toEl.checked = fromEl.checked;
       else toEl.value = fromEl.value;
     }
     return true;
@@ -7743,6 +7849,7 @@
     window.morphdom(container, "<div>" + html + "</div>", {
       childrenOnly: true,
       onBeforeElUpdated: morphdomPreserveTyping,
+      onElUpdated: function(el){ if(el.tagName==="SELECT" && el.__draftValue!=null){ el.value = el.__draftValue; el.__draftValue = null; } },
       onBeforeElChildrenUpdated: morphdomSkipChildrenFor
     });
   }
@@ -8242,6 +8349,7 @@
     if(e.target.matches("[data-tag-filter]")){ state.filters=state.filters||{}; state.filters.tagFilters=state.filters.tagFilters||{}; state.filters.tagFilters[e.target.getAttribute("data-tag-filter")]=e.target.checked; render(); return; }
     if(e.target.matches("[data-registry-filter]")){ state.registryFilters=state.registryFilters||{}; state.registryFilters[e.target.getAttribute("data-registry-filter")]=e.target.value; render(); return; }
     if(e.target.matches("[data-registry-filter-checkbox]")){ state.registryFilters=state.registryFilters||{}; state.registryFilters[e.target.getAttribute("data-registry-filter-checkbox")]=e.target.checked; render(); return; }
+    if(e.target.matches("[data-overhead-field]")){ updateOverheadField(e.target.getAttribute("data-id"), e.target.getAttribute("data-overhead-field"), e.target.value); return; }
     if(e.target.matches("[data-hotel-field]")){ updateHotelField(e.target.getAttribute("data-id"), e.target.getAttribute("data-hotel-field"), e.target.value); return; }
     if(e.target.matches("[data-invoice-amount]")){ setInvoiceAmount(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.matches("[data-invoice-currency]")){ setInvoiceCurrency(e.target.getAttribute("data-id"), e.target.value); return; }
@@ -8509,8 +8617,8 @@
     if(e.target.id==="overhead-expense-form"){
       e.preventDefault(); var fdoe=new FormData(e.target);
       var oeFiles = Array.from((e.target.elements.files && e.target.elements.files.files) || []);
-      var okOe = addOverheadExpense({date:fdoe.get("date"), category:fdoe.get("category"), amount:fdoe.get("amount"), note:fdoe.get("note")}, oeFiles);
-      if(okOe!==false) e.target.reset();
+      var oeForm = e.target;
+      addOverheadExpense({date:fdoe.get("date"), category:fdoe.get("category"), amount:fdoe.get("amount"), currency:fdoe.get("currency"), vat:fdoe.get("vat"), tax:fdoe.get("tax"), tax_value:fdoe.get("tax_value"), note:fdoe.get("note")}, oeFiles, function(){ oeForm.reset(); });
     }
   });
 
