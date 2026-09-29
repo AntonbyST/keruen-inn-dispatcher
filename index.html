@@ -445,21 +445,26 @@
   /* ---------- накладные расходы (0.4.14): карточки + окно ---------- */
   .oh-head{ display:flex; align-items:center; gap:10px; margin-bottom:12px; }
   .oh-head .section-title{ margin:0; flex:1; }
-  .oh-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(290px,1fr)); gap:12px; }
-  .oh-card{ background:var(--surface); border:1px solid var(--line); border-radius:10px; padding:12px 14px; display:flex; flex-direction:column; gap:8px; }
-  .oh-top{ display:flex; gap:10px; align-items:flex-start; justify-content:space-between; }
-  .oh-cat{ font-weight:600; font-size:14px; overflow-wrap:anywhere; }
-  .oh-meta{ font-size:11.5px; color:var(--ink-soft); }
-  .oh-sum{ text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
-  .oh-sum b{ display:block; font-size:18px; letter-spacing:-.01em; }
-  .oh-sum small{ font-size:11px; color:var(--ink-soft); }
-  .oh-chips{ display:flex; flex-wrap:wrap; gap:5px; }
-  .oh-chip{ font-size:11px; font-weight:600; padding:2px 8px; border-radius:20px; background:var(--surface-2); color:var(--ink-soft); border:1px solid var(--line); }
+  .oh-list{ display:flex; flex-direction:column; }
+  .oh-card{ display:grid; grid-template-columns:1fr auto; gap:8px 16px; padding:14px 2px; border-top:1px solid var(--line); align-items:start; }
+  .oh-card:first-child{ border-top:0; padding-top:4px; }
+  .oh-cat{ font-weight:600; font-size:15px; overflow-wrap:anywhere; }
+  .oh-meta{ font-size:12px; color:var(--ink-faint); margin-top:2px; }
+  .oh-note{ font-size:12.5px; color:var(--ink-soft); margin-top:4px; overflow-wrap:anywhere; }
+  .oh-sum{ text-align:right; font-variant-numeric:tabular-nums; }
+  .oh-sum b{ display:block; font-size:19px; font-weight:700; letter-spacing:-.01em; font-family:ui-monospace,"SF Mono",Consolas,monospace; white-space:nowrap; }
+  .oh-sum small{ display:block; font-size:12px; color:var(--ink-faint); margin-top:2px; }
+  .oh-chips{ display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+  .oh-chip{ display:inline-flex; align-items:center; gap:5px; font-size:12px; font-weight:600; padding:2px 10px; border-radius:20px; background:var(--surface-2); color:var(--ink-soft); border:1px solid var(--line); }
+  .oh-chip.accent{ background:var(--accent-soft); border-color:var(--accent-line); color:var(--accent); }
   .oh-chip.warn{ background:transparent; color:var(--crit); border-color:var(--crit); }
-  .oh-note{ font-size:12.5px; color:var(--ink-soft); overflow-wrap:anywhere; }
-  .oh-files{ display:flex; flex-direction:column; gap:2px; font-size:12px; }
-  .oh-foot{ display:flex; gap:6px; align-items:center; margin-top:auto; padding-top:6px; border-top:1px solid var(--line); }
-  .oh-foot .sp{ flex:1; }
+  .oh-chip a{ color:inherit; text-decoration:none; max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .oh-chip a:hover{ text-decoration:underline; }
+  .oh-acts{ display:flex; gap:2px; justify-content:flex-end; align-items:center; }
+  .oh-acts .btn{ color:var(--accent); font-weight:600; }
+  .oh-acts .oh-del{ color:var(--crit); }
+  .oh-search{ min-width:200px; max-width:280px; }
+  @media(max-width:560px){ .oh-card{ grid-template-columns:1fr; } .oh-sum,.oh-acts{ text-align:left; justify-content:flex-start; } }
   .oh-live{ background:var(--accent-soft); border:1px solid var(--accent-line); border-radius:8px; padding:10px 12px; margin:4px 0 12px; }
   .oh-live b{ font-size:20px; font-variant-numeric:tabular-nums; }
   .oh-live small{ display:block; color:var(--ink-soft); font-size:11.5px; margin-top:2px; }
@@ -4785,7 +4790,10 @@
       if(rf.dateTo && (!iv.added_to_registry_at || iv.added_to_registry_at > (rf.dateTo+"T23:59:59"))) return false;
       if(q){
         var hay = normalizeForMatch((tk&&tk.external_ref||"")+" "+(hotel?hotel.name:"")+" "+(iv.file_name||""));
-        if(hay.indexOf(q)===-1) return false;
+        if(hay.indexOf(q)===-1){
+          var ivAcc = invoiceAccountedKZT(iv);
+          if(!amountQueryMatch(rf.q, [iv.amount, ivAcc && ivAcc.value])) return false;
+        }
       }
       return true;
     });
@@ -4861,7 +4869,7 @@
       ${financeTabs('registry')}
       <div class="row-gap">
         <div class="filters">
-          <input type="text" data-registry-filter="q" value="${escapeHtml(rf.q||"")}" placeholder="Поиск: № заявки, отель, файл…" style="min-width:220px;">
+          <input type="text" data-registry-filter="q" value="${escapeHtml(rf.q||"")}" placeholder="Поиск: № заявки, отель, файл, сумма…" style="min-width:220px;">
           <select data-registry-filter="hotel"><option value="">Все отели</option>${state.hotels.filter(function(x){return x.in_service;}).map(function(x){return h`<option value="${x.id}" ${rf.hotel===String(x.id)?'selected':''}>№${x.id} ${x.name}</option>`;}).join("")}</select>
           <select data-registry-filter="currency"><option value="">Все валюты</option><option value="KZT" ${rf.currency==='KZT'?'selected':''}>KZT</option><option value="RUB" ${rf.currency==='RUB'?'selected':''}>RUB</option><option value="BYN" ${rf.currency==='BYN'?'selected':''}>BYN</option></select>
           <label style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ink-soft);margin:0;">с <input type="date" data-registry-filter="dateFrom" value="${rf.dateFrom||''}" style="width:auto;"></label>
@@ -5002,6 +5010,7 @@
   // раньше, группа по нескольким заявкам сворачивается/разворачивается
   // отдельно, см. clusterCashExpenseRows/cashExpenseGroupExpanded.
   function cashExpensePersonExpanded(person){
+    if(state.cashSearch) return true; // при поиске показываем найденное сразу
     return !!(state.cashExpandedExpensePersons||{})[person];
   }
   function cashExpenseMonthKey(e){
@@ -5027,6 +5036,7 @@
     return order.map(function(key){ return {key:key, rows:map[key]}; });
   }
   function cashExpenseMonthExpanded(key){
+    if(state.cashSearch) return true;
     return !!(state.cashExpandedExpenseMonths||{})[key];
   }
   // Расходы конкретной заявки (по одной, не по нескольким — см. cash_expenses.ticket_id
@@ -6038,6 +6048,17 @@
   // счетов (invoiceAccountedKZT): запись превращается во временный «счёт».
   // Старые записи (без валюты/НДС/налога — внесены до 0.4.13) считаются как
   // раньше: сумма «как есть» в ₸.
+  // 0.4.15: поиск по сумме — «101000», «101 000», «101000,5» находят суммы,
+  // содержащие эти цифры (как в документе, так и «Учтено в затратах»).
+  function amountQueryMatch(qRaw, nums){
+    var q = String(qRaw||"").replace(/[\s\u00a0]/g,"").replace(",",".");
+    if(!/^\d+(\.\d+)?$/.test(q)) return false;
+    return (nums||[]).some(function(n){
+      if(n==null || isNaN(Number(n))) return false;
+      var v = Number(n);
+      return String(Math.round(v*100)/100).indexOf(q)>-1 || String(Math.round(v)).indexOf(q)>-1;
+    });
+  }
   function overheadAccountedKZT(oe){
     if(oe.vat_included==null && !oe.currency && !oe.tax_basis) return { value: Number(oe.amount)||0, state:"ok", legacy:true };
     var day = oe.date ? String(oe.date).slice(0,10) : new Date().toISOString().slice(0,10);
@@ -6383,13 +6404,22 @@
     var editable = canEditCashExpenses();
     var advances = (state.cashAdvances||[]).slice().sort(function(a,b){ return (b.date||"").localeCompare(a.date||""); });
     var expenses = (state.cashExpenses||[]).slice().sort(function(a,b){ return (b.date||"").localeCompare(a.date||""); });
+    // 0.4.15: поиск по расходам — описание, прораб, отель, № заявки, сумма
+    var cq = normalizeForMatch(state.cashSearch||"");
+    var expensesAll = expenses;
+    if(cq) expenses = expenses.filter(function(e){
+      var hotel = e.hotel_id ? hotelById(e.hotel_id) : null;
+      var tk = e.ticket_id ? state.tickets.find(function(x){return x.id===e.ticket_id;}) : null;
+      var hay = normalizeForMatch((e.description||"")+" "+(e.person||"")+" "+(hotel?hotel.name:"")+" "+(tk&&tk.external_ref||""));
+      return hay.indexOf(cq)>-1 || amountQueryMatch(state.cashSearch, [e.amount, e.unit_cost]);
+    });
     var persons = distinctCashPersons();
     var todayIso = new Date().toISOString().slice(0,10);
     function fmtSum(n){ return (Number(n)||0).toLocaleString("ru-RU", {maximumFractionDigits:2}); }
     var byPerson = {};
     persons.forEach(function(p){ byPerson[p] = {given:0, spent:0}; });
     advances.forEach(function(a){ if(byPerson[a.person]) byPerson[a.person].given += Number(a.amount)||0; });
-    expenses.forEach(function(e){ if(byPerson[e.person]) byPerson[e.person].spent += Number(e.amount)||0; });
+    expensesAll.forEach(function(e){ if(byPerson[e.person]) byPerson[e.person].spent += Number(e.amount)||0; });
     var hotelOptions = state.hotels.filter(function(x){return x.in_service;}).map(function(x){ return h`<option value="${x.id}">№${x.id} ${escapeHtml(x.name)}</option>`; }).join("");
     var advanceGroups = groupCashByPerson(advances);
     var expenseGroups = groupCashByPerson(expenses);
@@ -6469,7 +6499,7 @@
           </div>
 
           <div class="card card-pad">
-            <div class="section-title">Расходы</div>
+            <div class="oh-head"><div class="section-title">Расходы</div><input type="text" class="oh-search" data-cash-search value="${escapeHtml(state.cashSearch||'')}" placeholder="Поиск: описание, сумма, заявка…"></div>
             <div class="table-wrap"><table>
               <thead><tr><th>Дата</th><th>Наименование</th><th class="num">Кол-во</th><th class="num">Цена</th><th class="num">Сумма</th><th>Мотель</th><th>Заявка</th><th>Категория</th><th>Прораб</th>${editable?'<th></th>':''}</tr></thead>
               <tbody>${expenses.length===0 ? h`<tr><td colspan="${editable?10:9}"><div class="empty-state"><b>Пока нет расходов</b>Внесите отчёт прораба ниже — вручную или вставкой таблицы.</div></td></tr>` :
@@ -6525,7 +6555,7 @@
                       // выделена (см. .registry-group-row в <style>) — раньше
                       // сливалась с обычными строками расходов, когда была
                       // развёрнута.
-                      var gexpanded = !!state.cashExpenseGroupExpanded[cl.key];
+                      var gexpanded = !!state.cashExpenseGroupExpanded[cl.key] || !!state.cashSearch;
                       var first = cl.rows[0];
                       var sumAmt = cl.rows.reduce(function(s,e){ return s+(Number(e.amount)||0); }, 0);
                       var header2 = h`<tr class="registry-group-row">
@@ -6673,6 +6703,13 @@
     });
     var categoryTotals = Object.keys(byCategory).sort();
     var saving = !!state.overheadSaving;
+    var oq = normalizeForMatch(state.overheadSearch||"");
+    var shown = !oq ? rows : rows.filter(function(e){
+      var hay = normalizeForMatch((e.category||"")+" "+(e.note||"")+" "+(e.created_by||"")+" "+(Array.isArray(e.files)?e.files:[]).map(function(f){ return f.name||""; }).join(" "));
+      if(hay.indexOf(oq)>-1) return true;
+      var acc = overheadAccountedKZT(e);
+      return amountQueryMatch(state.overheadSearch, [e.amount, acc.state==="ok"?acc.value:null]);
+    });
     function taxOptions(sel, vatOn){
       return h`<option value="" ${sel===''?'selected':''}>—</option>${vatOn?'':h`<option value="simplified" ${sel==='simplified'?'selected':''}>Упрощ. +20%</option><option value="cash" ${sel==='cash'?'selected':''}>Нал. +30%</option><option value="custom" ${sel==='custom'?'selected':''}>Свой, %</option><option value="custom_amt" ${sel==='custom_amt'?'selected':''}>Своя сумма, ₸</option>`}`;
     }
@@ -6695,30 +6732,32 @@
         </div>
 
         <div class="card card-pad">
-          <div class="oh-head"><div class="section-title">Записи</div>${editable ? h`<button type="button" class="btn btn-primary" data-action="overhead-add-open"${saving?' disabled':''}>＋ Добавить расход</button>` : ''}</div>
-          ${rows.length===0 ? h`<div class="empty-state"><b>Пока нет записей</b>${editable?'Нажмите «＋ Добавить расход».':''}</div>` : h`<div class="oh-grid">${rows.map(function(e){
+          <div class="oh-head"><div class="section-title">Записи</div><input type="text" class="oh-search" data-overhead-search value="${escapeHtml(state.overheadSearch||'')}" placeholder="Поиск: статья, сумма, файл…">${editable ? h`<button type="button" class="btn btn-primary" data-action="overhead-add-open"${saving?' disabled':''}>＋ Добавить расход</button>` : ''}</div>
+          ${rows.length===0 ? h`<div class="empty-state"><b>Пока нет записей</b>${editable?'Нажмите «＋ Добавить расход».':''}</div>` : shown.length===0 ? h`<div class="empty-state"><b>Ничего не найдено</b>Проверьте статью, сумму или примечание в поиске.</div>` : h`<div class="oh-list">${shown.map(function(e){
             var acc = overheadAccountedKZT(e);
-            var vatChip = e.vat_included===true ? 'С НДС' : (e.vat_included===false ? 'Без НДС' : '');
-            var taxChip = e.tax_basis ? taxBasisLabel({tax_basis:e.tax_basis, extra:e.extra}) : '';
-            var sumHtml = acc.state==="ok" ? h`<b>${fmtKZT2(acc.value)} ₸</b>${acc.currency ? h`<small>${fmtKZT(acc.original)} ${acc.currency}</small>` : ''}`
+            var vatTxt = e.vat_included===true ? 'с НДС' : (e.vat_included===false ? 'без НДС' : '');
+            var taxTxt = e.tax_basis ? taxBasisLabel({tax_basis:e.tax_basis, extra:e.extra}) : '';
+            var subParts = [];
+            if(e.currency) subParts.push(fmtKZT(e.amount)+' '+e.currency);
+            if(vatTxt) subParts.push(vatTxt);
+            var sumHtml = acc.state==="ok" ? h`<b>${fmtKZT2(acc.value)} ₸</b>`
               : acc.state==="pending" ? h`<b class="muted">курс…</b>`
-              : acc.state==="error" ? h`<b class="muted" title="Не удалось получить курс Нацбанка РК">—</b><small>${fmtKZT(acc.original)} ${acc.currency} (?)</small>`
-              : h`<b class="muted">—</b><small>${fmtSum(e.amount)}</small>`;
+              : h`<b class="muted" title="${acc.state==='error'?'Не удалось получить курс Нацбанка РК':'Укажите валюту и НДС'}">—</b>`;
+            if(acc.state==="missing" || acc.state==="error") subParts = [fmtSum(e.amount)+(e.currency?' '+e.currency:'')];
             var incompleteChip = (acc.state==="missing") ? h`<span class="oh-chip warn" title="Укажите валюту и «с НДС/без», чтобы посчитать «Учтено в затратах»">нужны валюта и НДС</span>` : '';
             return h`<div class="oh-card" data-oh-id="${e.id}">
-              <div class="oh-top">
-                <div><div class="oh-cat">${escapeHtml(e.category)}</div><div class="oh-meta">${fmtDateShort(e.date)}${e.created_by?' · '+escapeHtml(e.created_by):''}</div></div>
-                <div class="oh-sum">${sumHtml}</div>
+              <div>
+                <div class="oh-cat">${escapeHtml(e.category)}</div>
+                <div class="oh-meta">${fmtDateShort(e.date)}${e.created_by?' · '+escapeHtml(e.created_by):''}</div>
+                ${e.note ? h`<div class="oh-note">${escapeHtml(e.note)}</div>` : ''}
               </div>
-              <div class="oh-chips">${e.currency?h`<span class="oh-chip">${escapeHtml(e.currency)}</span>`:''}${vatChip?h`<span class="oh-chip">${vatChip}</span>`:''}${taxChip?h`<span class="oh-chip">${escapeHtml(taxChip)}</span>`:''}${incompleteChip}</div>
-              ${e.note ? h`<div class="oh-note">${escapeHtml(e.note)}</div>` : ''}
-              ${(Array.isArray(e.files)&&e.files.length) ? h`<div class="oh-files">${e.files.map(function(f){ return h`<div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"><a href="#" data-action="overhead-file-open" data-path="${escapeHtml(f.path)}" title="${escapeHtml(f.name||'')}">📎 ${escapeHtml(String(f.name||'файл'))}</a>${editable?h` <a href="#" data-action="overhead-file-delete" data-id="${e.id}" data-path="${escapeHtml(f.path)}" style="color:var(--crit);" title="Удалить файл">✕</a>`:''}</div>`; }).join("")}</div>` : ''}
-              ${editable ? h`<div class="oh-foot">
+              <div class="oh-sum">${sumHtml}<small>${escapeHtml(subParts.join(' · '))}</small></div>
+              <div class="oh-chips">${e.currency?h`<span class="oh-chip accent">${escapeHtml(e.currency)}</span>`:''}${vatTxt?h`<span class="oh-chip">${vatTxt==='с НДС'?'С НДС':'Без НДС'}</span>`:''}${taxTxt?h`<span class="oh-chip">${escapeHtml(taxTxt)}</span>`:''}${incompleteChip}${(Array.isArray(e.files)?e.files:[]).map(function(f){ return h`<span class="oh-chip">📎 <a href="#" data-action="overhead-file-open" data-path="${escapeHtml(f.path)}" title="${escapeHtml(f.name||'')}">${escapeHtml(String(f.name||'файл'))}</a>${editable?h`<a href="#" data-action="overhead-file-delete" data-id="${e.id}" data-path="${escapeHtml(f.path)}" style="color:var(--crit);" title="Удалить файл">✕</a>`:''}</span>`; }).join("")}</div>
+              ${editable ? h`<div class="oh-acts">
                 <button type="button" class="btn btn-ghost btn-sm" data-action="overhead-edit-open" data-id="${e.id}">Изменить</button>
                 <label class="btn btn-ghost btn-sm" style="cursor:pointer;margin:0;">＋ файл<input type="file" multiple data-overhead-file-upload="${e.id}" style="display:none;"></label>
-                <span class="sp"></span>
-                <a href="#" data-action="overhead-expense-delete" data-id="${e.id}" style="color:var(--crit);" title="Удалить запись">Удалить</a>
-              </div>` : ''}
+                <button type="button" class="btn btn-ghost btn-sm oh-del" data-action="overhead-expense-delete" data-id="${e.id}">Удалить</button>
+              </div>` : '<div></div>'}
             </div>`;
           }).join("")}</div>`}
         </div>
@@ -8738,7 +8777,11 @@
     }
   });
   // 0.4.14: живой расчёт «Учтено в затратах» в окне накладных и подпись выбранных файлов
-  document.addEventListener("input", function(e){ if(e.target.form && e.target.form.id==="overhead-expense-form") overheadLiveUpdate(); });
+  document.addEventListener("input", function(e){
+    if(e.target.form && e.target.form.id==="overhead-expense-form") overheadLiveUpdate();
+    if(e.target.matches && e.target.matches("[data-overhead-search]")){ state.overheadSearch = e.target.value; render(); }
+    if(e.target.matches && e.target.matches("[data-cash-search]")){ state.cashSearch = e.target.value; render(); }
+  });
   document.addEventListener("change", function(e){
     if(!(e.target.form && e.target.form.id==="overhead-expense-form")) return;
     overheadLiveUpdate();
