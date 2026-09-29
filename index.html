@@ -2913,8 +2913,15 @@
     var t = state.tickets.find(function(x){ return x.id===id; });
     if(!t) return;
     var list = ticketPerformers(t).filter(function(n){ return n!==name; });
-    patchTicketLocal(id, {crew_names:list});
-    sb.from("tickets").update({crew_names:list}).eq("id",id).then(function(res){
+    // 0.4.9: раньше писали только crew_names — а когда список становился
+    // пустым, ticketPerformers() откатывался на легаси t.assigned_to и
+    // «удалённый» исполнитель тут же появлялся снова (не удалялся). Теперь
+    // при снятии заодно обнуляем легаси-поле, если оно совпадает с именем
+    // (или это был последний исполнитель).
+    var patch = {crew_names:list};
+    if(t.assigned_to && (list.length===0 || String(t.assigned_to).replace(/^Бригада:\s*/, "")===name)) patch.assigned_to = null;
+    patchTicketLocal(id, patch);
+    sb.from("tickets").update(patch).eq("id",id).then(function(res){
       if(res && res.error){ alert("Не удалось убрать исполнителя: " + res.error.message); return; }
       addNote(id, "Исполнитель "+name+" убран с заявки.");
     });
@@ -5146,106 +5153,275 @@
   // 0.4.8, п.3 (по просьбе Антона: "доработай сам как правильно") — «Отчёты» в
   // «Финансах»: сколько за месяц потрачено по каждому объекту (материалы +
   // работа, счета + наличные — тем же способом, что и "Затраты по заявке"
-  // выше, чтобы цифры между разделами не расходились), плюс отдельно
-  // накладные расходы компании (они, в отличие от счетов/наличных, не привязаны
-  // ни к отелю, ни к заявке — см. overhead_expenses в supabase_schema.sql — так
-  // что делить их между объектами можно только предположительно/поровну,
-  // отсюда отдельный, явно подписанный итог, а не молчаливая "размазка" по
-  // объектам). monthKey — "YYYY-MM" (см. paidMonthKey/cashExpenseMonthKey).
-  // Счета учитываются по дате ОПЛАТЫ (iv.paid_at) и только оплаченные — так же,
-  // как в ticketCostTotal, — неоплаченный счёт ещё не реальный расход месяца.
-  function buildFinanceReport(monthKey){
-    var hotels = visibleHotelsForMe();
-    var byHotel = {}; // hotelId -> {materials, labor}
-    hotels.forEach(function(h){ byHotel[h.id] = {materials:0, labor:0}; });
-    function bucket(hotelId){
-      if(!byHotel[hotelId]) byHotel[hotelId] = {materials:0, labor:0};
-      return byHotel[hotelId];
+  // выше, чтобы цифры между разделами не расходились), плюс накладные расходы
+  // компании. Счета учитываются по дате ОПЛАТЫ (iv.paid_at) и только
+  // оплаченные — так же, как в ticketCostTotal, — неоплаченный счёт ещё не
+  // реальный расход месяца.
+  //
+  // 0.4.9 (по просьбе Антона): накладные теперь РАСПРЕДЕЛЯЮТСЯ — процентом от
+  // прямых расходов месяца (накладные ÷ прямые расходы): у каждой заявки/
+  // объекта к её прямым затратам добавляется тот же процент. Диаграмма по
+  // месяцам (последние 12, стеком: работа / материалы / накладные), валюты
+  // счетов (сумма в исходной валюте + эквивалент в ₸), переключатель «без НДС /
+  // с НДС», число выполненных заявок по объекту.
+  //
+  // vatMode: "net" — «Учтено в затратах» (без НДС, с доп. налогом по способу
+  // оплаты — как везде в приложении); "gross" — сумма по документам С НДС (без
+  // доп. налога). У наличных расходов НДС нет — в обоих режимах одинаково.
+  var REPORT_CUR_SYMBOL = { KZT:"₸", RUB:"₽", BYN:"Br" };
+  function reportInvoiceContrib(iv, vatMode){
+    var acc = invoiceAccountedKZTForTicket(iv);
+    if(acc.state!=="ok" || acc.value==null) return null; // неполные счета молча не считаем — как и в ticketCostTotal, а не тихим нулём выдаём неверную сумму
+    var prim = invoiceGroupPrimary(iv);
+    var cur = (prim && prim.currency) || "KZT";
+    var orig = acc.original!=null ? acc.original * (acc.shared && acc.percent!=null ? acc.percent/100 : 1) : acc.value;
+    var factor = 1;
+    if(vatMode==="gross" && prim){
+      var accounted = invoiceCostAccounted(prim);
+      var vr = CURRENCY_VAT_RATE[prim.currency];
+      if(accounted && vr!=null && prim.amount!=null){
+        var noVat = prim.vat_included ? prim.amount/(1+vr) : prim.amount;
+        factor = noVat*(1+vr)/accounted;
+      }
     }
+    return { kzt: acc.value*factor, orig: orig*factor, cur: cur };
+  }
+  function shiftReportMonth(key, delta){
+    var parts = key.split("-"); var d = new Date(Number(parts[0]), Number(parts[1])-1+delta, 1);
+    return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0");
+  }
+  function buildFinanceReport(monthKey, vatMode){
+    vatMode = vatMode==="gross" ? "gross" : "net";
+    var ticketMap = {};
+    (state.tickets||[]).forEach(function(t){ ticketMap[t.id] = t; });
+    // Плоский список прямых расходов всех месяцев: одним проходом, потом из него
+    // же строятся и выбранный месяц, и диаграмма по 12 месяцам.
+    var direct = [];
     (state.invoices||[]).forEach(function(iv){
-      if(paidMonthKey(iv)!==monthKey) return;
-      var t = (state.tickets||[]).find(function(x){ return x.id===iv.ticket_id; });
+      var mk = paidMonthKey(iv); if(!mk) return;
+      var t = ticketMap[iv.ticket_id];
       if(!t || !hotelAllowedForMe(t.hotel_id)) return;
-      var acc = invoiceAccountedKZTForTicket(iv);
-      if(acc.state!=="ok" || acc.value==null) return; // как и в ticketCostTotal — неполные счета молча не считаем, а не тихим нулём выдаём неверную сумму
-      var b = bucket(t.hotel_id);
-      if(iv.category==="crew") b.labor += acc.value; else b.materials += acc.value;
+      var c = reportInvoiceContrib(iv, vatMode); if(!c) return;
+      direct.push({ month:mk, hotelId:t.hotel_id, ticketId:t.id, cat:(iv.category==="crew"?"labor":"materials"), kzt:c.kzt, cur:c.cur, orig:c.orig });
     });
     (state.cashExpenses||[]).forEach(function(ce){
-      if(cashExpenseMonthKey(ce)!==monthKey) return;
-      var hotelId = ce.hotel_id;
-      if(!hotelId && ce.ticket_id){
-        var t = (state.tickets||[]).find(function(x){ return x.id===ce.ticket_id; });
-        if(t) hotelId = t.hotel_id;
-      }
+      var mk = cashExpenseMonthKey(ce); if(!mk) return;
+      var t = ce.ticket_id ? ticketMap[ce.ticket_id] : null;
+      var hotelId = ce.hotel_id || (t && t.hotel_id);
       if(!hotelId || !hotelAllowedForMe(hotelId)) return; // ни к отелю, ни к заявке не привязан — отнести не к чему
-      var b = bucket(hotelId);
       var amt = cashExpenseAccounted(ce);
-      if(ce.category==="crew") b.labor += amt; else b.materials += amt;
+      direct.push({ month:mk, hotelId:hotelId, ticketId:(t?t.id:null), cat:(ce.category==="crew"?"labor":"materials"), kzt:amt, cur:"KZT", orig:amt });
     });
-    var rows = Object.keys(byHotel).map(function(hid){
-      var hotel = hotelById(Number(hid));
-      var b = byHotel[hid];
-      return { hotel: hotel, materials: b.materials, labor: b.labor, total: b.materials+b.labor };
-    }).filter(function(r){ return r.hotel; }).sort(function(a,b){ return b.total-a.total; });
-    var objectsTotal = rows.reduce(function(s,r){ return s+r.total; }, 0);
-    // Накладные — только для внутренних ролей (не привязаны к объектам, «Клиенту»
-    // показывать компанейские накладные расходы ни к чему).
-    var overheadTotal = 0, overheadByCategory = {};
+    // Накладные — только для внутренних ролей («Клиенту» компанейские накладные
+    // ни к чему).
+    var overheadByMonth = {}, overheadCatsInMonth = {};
     if(!isClientRole()){
       (state.overheadExpenses||[]).forEach(function(oe){
-        if((oe.date?String(oe.date).slice(0,7):null)!==monthKey) return;
+        var mk = oe.date ? String(oe.date).slice(0,7) : null; if(!mk) return;
         var amt = Number(oe.amount)||0;
-        overheadTotal += amt;
-        overheadByCategory[oe.category||"—"] = (overheadByCategory[oe.category||"—"]||0) + amt;
+        overheadByMonth[mk] = (overheadByMonth[mk]||0) + amt;
+        if(mk===monthKey) overheadCatsInMonth[oe.category||"—"] = (overheadCatsInMonth[oe.category||"—"]||0) + amt;
       });
     }
-    return { rows: rows, objectsTotal: objectsTotal, overheadTotal: overheadTotal, overheadByCategory: overheadByCategory, grandTotal: objectsTotal+overheadTotal };
+    // Диаграмма: 12 месяцев, заканчивая выбранным.
+    var months = [];
+    for(var i=-11;i<=0;i++){
+      var key = shiftReportMonth(monthKey, i);
+      months.push({ key:key, materials:0, labor:0, overhead:(overheadByMonth[key]||0) });
+    }
+    var monthIdx = {}; months.forEach(function(m,ix){ monthIdx[m.key]=ix; });
+    direct.forEach(function(e){
+      var ix = monthIdx[e.month]; if(ix==null) return;
+      if(e.cat==="labor") months[ix].labor += e.kzt; else months[ix].materials += e.kzt;
+    });
+    months.forEach(function(m){ m.directTotal = m.materials+m.labor; m.total = m.directTotal+m.overhead; });
+    var cur = months[months.length-1], prev = months[months.length-2];
+
+    // Выбранный месяц.
+    var monthEntries = direct.filter(function(e){ return e.month===monthKey; });
+    var overheadTotal = cur.overhead;
+    var directTotal = cur.directTotal;
+    // % накладных = накладные ÷ прямые расходы месяца. Если прямых расходов нет,
+    // а накладные есть — процент не определён (делить не на что), накладные
+    // остаются «нераспределёнными».
+    var overheadPct = directTotal>0 ? overheadTotal/directTotal*100 : null;
+    var k = directTotal>0 ? overheadTotal/directTotal : 0;
+
+    var byHotel = {};
+    visibleHotelsForMe().forEach(function(hh){ byHotel[hh.id] = { materials:0, labor:0, tickets:{}, doneTickets:{} }; });
+    var byTicket = {};
+    var currencies = {};
+    monthEntries.forEach(function(e){
+      var b = byHotel[e.hotelId] || (byHotel[e.hotelId] = { materials:0, labor:0, tickets:{}, doneTickets:{} });
+      if(e.cat==="labor") b.labor += e.kzt; else b.materials += e.kzt;
+      if(e.ticketId){
+        b.tickets[e.ticketId] = true;
+        byTicket[e.ticketId] = (byTicket[e.ticketId]||0) + e.kzt;
+      }
+      var cc = currencies[e.cur] || (currencies[e.cur] = { orig:0, kzt:0, count:0 });
+      cc.orig += e.orig; cc.kzt += e.kzt; cc.count++;
+    });
+    // «Выполненные заявки» объекта за месяц: выполнена (isTicketDone) И либо в
+    // этом месяце по ней были расходы, либо она закрыта (closed_at) в этом
+    // месяце. У заявок из c-lector нет даты выполнения — поэтому по ним
+    // опорой служит месяц расходов.
+    (state.tickets||[]).forEach(function(t){
+      if(!hotelAllowedForMe(t.hotel_id) || !byHotel[t.hotel_id]) return;
+      if(t.status==="rejected" || !isTicketDone(t)) return;
+      var closedThisMonth = t.closed_at && String(t.closed_at).slice(0,7)===monthKey;
+      if(closedThisMonth || byHotel[t.hotel_id].tickets[t.id]) byHotel[t.hotel_id].doneTickets[t.id] = true;
+    });
+    var rows = Object.keys(byHotel).map(function(hid){
+      var hotel = hotelById(Number(hid)); var b = byHotel[hid];
+      var total = b.materials+b.labor;
+      var doneCount = Object.keys(b.doneTickets).length;
+      var ov = total*k;
+      return { hotel:hotel, materials:b.materials, labor:b.labor, total:total, overhead:ov, grand:total+ov,
+               ticketCount:Object.keys(b.tickets).length, doneCount:doneCount,
+               perDone: doneCount>0 ? (total+ov)/doneCount : null };
+    }).filter(function(r){ return r.hotel && (r.total>0 || r.doneCount>0); }) // объекты без расходов и без выполненных заявок за месяц не показываем — строки из одних нулей только шумят
+      .sort(function(a,b){ return b.grand-a.grand; });
+    var ticketRows = Object.keys(byTicket).map(function(tid){
+      var t = ticketMap[tid]; var d = byTicket[tid];
+      return { ticket:t, hotel:t?hotelById(t.hotel_id):null, direct:d, overhead:d*k, total:d*(1+k), done:t?isTicketDone(t):false };
+    }).filter(function(r){ return r.ticket; }).sort(function(a,b){ return b.total-a.total; });
+    var doneTotal = rows.reduce(function(s,r){ return s+r.doneCount; }, 0);
+    return {
+      vatMode: vatMode, months: months, cur: cur, prev: prev,
+      rows: rows, ticketRows: ticketRows, currencies: currencies,
+      directTotal: directTotal, overheadTotal: overheadTotal, overheadPct: overheadPct,
+      overheadByCategory: overheadCatsInMonth, grandTotal: directTotal+overheadTotal, doneTotal: doneTotal
+    };
+  }
+  // Диаграмма «Расходы на сервис по месяцам» — стек: работа / материалы /
+  // накладные. Клик по столбцу открывает месяц. Цвета — только токены темы.
+  function reportChartSvg(months, selectedKey){
+    var W = 720, H = 250, padL = 8, padR = 8, padT = 22, padB = 38;
+    var innerW = W-padL-padR, innerH = H-padT-padB;
+    var maxV = 0; months.forEach(function(m){ if(m.total>maxV) maxV = m.total; });
+    function shortNum(n){
+      if(n>=1e6) return (Math.round(n/1e5)/10).toLocaleString("ru-RU")+" млн";
+      if(n>=1e3) return Math.round(n/1e3).toLocaleString("ru-RU")+" тыс";
+      return String(Math.round(n));
+    }
+    var slot = innerW/months.length, barW = Math.min(38, slot*0.62);
+    var svg = '<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Расходы на сервис по месяцам, ₸" style="width:100%;height:auto;max-height:290px;display:block;">';
+    // тонкая базовая линия
+    svg += '<line x1="'+padL+'" y1="'+(padT+innerH)+'" x2="'+(W-padR)+'" y2="'+(padT+innerH)+'" stroke="var(--line)" stroke-width="1"/>';
+    months.forEach(function(m, i){
+      var cx = padL + slot*i + slot/2, x = cx-barW/2;
+      var isSel = m.key===selectedKey;
+      var hLabor = maxV>0 ? m.labor/maxV*innerH : 0;
+      var hMat = maxV>0 ? m.materials/maxV*innerH : 0;
+      var hOv = maxV>0 ? m.overhead/maxV*innerH : 0;
+      var yBase = padT+innerH;
+      var mm = m.key.slice(5), yy = m.key.slice(2,4);
+      var shortM = ["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"][Number(mm)-1];
+      svg += '<g data-action="reports-month" data-value="'+m.key+'" style="cursor:pointer;">';
+      svg += '<title>'+escapeHtml(monthLabelRu(m.key))+': всего '+escapeHtml(fmtKZT(m.total))+' ₸ (работа '+escapeHtml(fmtKZT(m.labor))+', материалы '+escapeHtml(fmtKZT(m.materials))+', накладные '+escapeHtml(fmtKZT(m.overhead))+')</title>';
+      if(isSel) svg += '<rect x="'+(cx-slot/2+1)+'" y="'+(padT-16)+'" width="'+(slot-2)+'" height="'+(innerH+16+padB-2)+'" rx="6" fill="var(--accent-soft)"/>';
+      else svg += '<rect x="'+(cx-slot/2)+'" y="'+(padT-16)+'" width="'+slot+'" height="'+(innerH+16+padB-2)+'" fill="transparent"/>';
+      if(hLabor>0){ yBase -= hLabor; svg += '<rect x="'+x+'" y="'+yBase+'" width="'+barW+'" height="'+hLabor+'" fill="var(--accent)"/>'; }
+      if(hMat>0){ yBase -= hMat; svg += '<rect x="'+x+'" y="'+yBase+'" width="'+barW+'" height="'+hMat+'" fill="var(--ok)"/>'; }
+      if(hOv>0){ yBase -= hOv; svg += '<rect x="'+x+'" y="'+yBase+'" width="'+barW+'" height="'+hOv+'" fill="var(--warn)"/>'; }
+      if(m.total>0) svg += '<text x="'+cx+'" y="'+(yBase-5)+'" text-anchor="middle" font-size="10.5" font-weight="'+(isSel?700:500)+'" fill="var(--ink-soft)">'+shortNum(m.total)+'</text>';
+      svg += '<text x="'+cx+'" y="'+(H-20)+'" text-anchor="middle" font-size="11" font-weight="'+(isSel?700:500)+'" fill="var(--ink-soft)">'+shortM+'</text>';
+      svg += '<text x="'+cx+'" y="'+(H-7)+'" text-anchor="middle" font-size="10" fill="var(--ink-faint)">'+yy+'</text>';
+      svg += '</g>';
+    });
+    return svg+'</svg>';
   }
   function viewReports(){
     var monthKey = state.reportsMonth || new Date().toISOString().slice(0,7);
-    var report = buildFinanceReport(monthKey);
-    function fmt(n){ return (Number(n)||0).toLocaleString("ru-RU", {maximumFractionDigits:2}); }
-    // простая навигация месяц назад/вперёд той же строкой "YYYY-MM"
-    function shiftMonth(key, delta){
-      var parts = key.split("-"); var d = new Date(Number(parts[0]), Number(parts[1])-1+delta, 1);
-      return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0");
-    }
+    var vatMode = state.reportsVat==="gross" ? "gross" : "net";
+    var report = buildFinanceReport(monthKey, vatMode);
+    function fmt(n){ return (Number(n)||0).toLocaleString("ru-RU", {maximumFractionDigits:0}); }
+    function fmtPct(n){ return (Math.round(n*10)/10).toLocaleString("ru-RU")+"%"; }
     var overheadCats = Object.keys(report.overheadByCategory).sort();
+    var curKeys = Object.keys(report.currencies).sort(function(a,b){ return a==="KZT"?-1:b==="KZT"?1:a.localeCompare(b); });
+    var vatLabel = vatMode==="gross" ? "с НДС" : "без НДС";
+    var prev = report.prev, cur = report.cur;
+    var deltaTxt = "";
+    if(prev && prev.total>0){
+      var dl = (cur.total-prev.total)/prev.total*100;
+      deltaTxt = (dl>=0?"+":"−")+fmtPct(Math.abs(dl))+" к пред. месяцу";
+    }
+    var showOv = !isClientRole();
     return h`
       ${financeTabs('reports')}
       <div class="row-gap">
         <div class="card card-pad">
-          <div class="section-title">Отчёты — расходы по объектам ${infoTip("Материалы и работа — оплаченные счета (без НДС, с доп. налогом, как в «Затратах по заявке») плюс наличные расходы, привязанные к объекту или к заявке этого объекта, за выбранный месяц. Накладные расходы компании (аренда, зарплата бэк-офиса и т.д.) не привязаны к конкретному объекту, поэтому показаны отдельным итогом, а не размазаны по строкам.")}</div>
+          <div class="section-title">Отчёты — расходы на сервис ${infoTip("Материалы и работа — оплаченные счета (по дате оплаты) плюс наличные расходы, привязанные к объекту или к заявке этого объекта. «Без НДС» — как в «Затратах по заявке» (НДС снят, доп. налог по способу оплаты учтён); «С НДС» — суммы по документам, без доп. налога. Наличные расходы в обоих режимах одинаковы. Счета в RUB/BYN пересчитаны в ₸ по курсу Нацбанка РК на дату оплаты. Накладные расходы компании не привязаны к объектам — они распределяются процентом от прямых расходов месяца (накладные ÷ прямые), одинаковым для каждой заявки и объекта.")}</div>
           <div class="report-period-row">
-            <button class="btn btn-sm" data-action="reports-month" data-value="${shiftMonth(monthKey,-1)}">← ${monthLabelRu(shiftMonth(monthKey,-1))}</button>
+            <button class="btn btn-sm" data-action="reports-month" data-value="${shiftReportMonth(monthKey,-1)}">← ${monthLabelRu(shiftReportMonth(monthKey,-1))}</button>
             <span style="font-weight:600;">${monthLabelRu(monthKey)}</span>
-            <button class="btn btn-sm" data-action="reports-month" data-value="${shiftMonth(monthKey,1)}">${monthLabelRu(shiftMonth(monthKey,1))} →</button>
+            <button class="btn btn-sm" data-action="reports-month" data-value="${shiftReportMonth(monthKey,1)}">${monthLabelRu(shiftReportMonth(monthKey,1))} →</button>
+            <span style="flex:1;"></span>
+            <span class="muted" style="font-size:12px;">Суммы:</span>
+            <button class="btn btn-sm ${vatMode==='net'?'btn-primary':''}" data-action="reports-vat" data-value="net" title="НДС снят, доп. налог по способу оплаты учтён — как в «Затратах по заявке»">без НДС</button>
+            <button class="btn btn-sm ${vatMode==='gross'?'btn-primary':''}" data-action="reports-vat" data-value="gross" title="Суммы по документам с НДС, без доп. налога">с НДС</button>
           </div>
         </div>
         <div class="grid-kpi">
-          <div class="card kpi"><div class="kpi-label">По объектам за месяц</div><div class="kpi-value accent">${fmt(report.objectsTotal)}</div><div class="kpi-sub">материалы + работа, ₸</div></div>
-          ${!isClientRole() ? h`<div class="card kpi"><div class="kpi-label">Накладные расходы</div><div class="kpi-value">${fmt(report.overheadTotal)}</div><div class="kpi-sub">не привязаны к объекту, ₸</div></div>
-          <div class="card kpi"><div class="kpi-label">Итого за месяц</div><div class="kpi-value">${fmt(report.grandTotal)}</div><div class="kpi-sub">объекты + накладные, ₸</div></div>` : ''}
+          <div class="card kpi"><div class="kpi-label">Итого на сервис</div><div class="kpi-value accent" data-kpi="total">${fmt(showOv?report.grandTotal:report.directTotal)}</div><div class="kpi-sub">₸, ${vatLabel}${deltaTxt?', '+deltaTxt:''}</div></div>
+          <div class="card kpi"><div class="kpi-label">Прямые расходы</div><div class="kpi-value" data-kpi="direct">${fmt(report.directTotal)}</div><div class="kpi-sub">работа + материалы, ₸</div></div>
+          ${showOv ? h`<div class="card kpi"><div class="kpi-label">Накладные расходы</div><div class="kpi-value" data-kpi="overhead">${fmt(report.overheadTotal)}</div><div class="kpi-sub">${report.overheadPct!=null?('+'+fmtPct(report.overheadPct)+' к каждой заявке'):(report.overheadTotal>0?'не распределены: нет прямых расходов':'за месяц не внесены')}</div></div>` : ''}
+          <div class="card kpi"><div class="kpi-label">Выполнено заявок</div><div class="kpi-value" data-kpi="done">${fmt(report.doneTotal)}</div><div class="kpi-sub">по всем объектам за месяц</div></div>
         </div>
         <div class="card card-pad">
-          <div class="section-title">По объектам</div>
+          <div class="section-title">Расходы по месяцам ${infoTip("Последние 12 месяцев до выбранного включительно, ₸ "+vatLabel+". Столбец — все расходы на сервис за месяц: работа, материалы и накладные. Нажмите на столбец, чтобы открыть месяц.")}</div>
+          ${reportChartSvg(report.months, monthKey)}
+          <div class="muted" style="font-size:12px;display:flex;gap:16px;flex-wrap:wrap;margin-top:6px;">
+            <span><span style="display:inline-block;width:10px;height:10px;background:var(--accent);border-radius:2px;margin-right:5px;"></span>Работа</span>
+            <span><span style="display:inline-block;width:10px;height:10px;background:var(--ok);border-radius:2px;margin-right:5px;"></span>Материалы</span>
+            ${showOv ? h`<span><span style="display:inline-block;width:10px;height:10px;background:var(--warn);border-radius:2px;margin-right:5px;"></span>Накладные</span>` : ''}
+          </div>
+        </div>
+        <div class="card card-pad">
+          <div class="section-title">По объектам — ${monthLabelRu(monthKey)}, ${vatLabel} ${infoTip("«Выполнено» — заявки объекта в статусе выполнена/закрыта, по которым в этом месяце были расходы либо которые закрыты в этом месяце. «Итого» = прямые + накладные"+(showOv?" (процент месяца)":"")+". «₸ на заявку» — итого ÷ выполнено.")}</div>
           ${report.rows.length===0 ? h`<div class="empty-state"><b>Нет расходов за этот месяц</b></div>` : h`
           <div class="table-wrap"><table>
-            <thead><tr><th>Отель</th><th class="num">Материалы</th><th class="num">Работа</th><th class="num">Итого</th></tr></thead>
+            <thead><tr><th>Отель</th><th class="num">Работа</th><th class="num">Материалы</th><th class="num">Прямые</th>${showOv?h`<th class="num">Накладные</th>`:''}<th class="num">Итого</th><th class="num">Выполнено</th><th class="num">₸ на заявку</th></tr></thead>
             <tbody>${report.rows.map(function(r){
               return h`<tr>
                 <td><span class="ttl">№${r.hotel.id} ${escapeHtml(r.hotel.name)}</span></td>
-                <td class="num mono">${fmt(r.materials)}</td>
                 <td class="num mono">${fmt(r.labor)}</td>
-                <td class="num mono"><b>${fmt(r.total)}</b></td>
+                <td class="num mono">${fmt(r.materials)}</td>
+                <td class="num mono">${fmt(r.total)}</td>
+                ${showOv?h`<td class="num mono">${fmt(r.overhead)}</td>`:''}
+                <td class="num mono"><b>${fmt(showOv?r.grand:r.total)}</b></td>
+                <td class="num mono">${r.doneCount}</td>
+                <td class="num mono">${r.perDone!=null?fmt(showOv?r.perDone:r.total/r.doneCount):'—'}</td>
               </tr>`;
             }).join("")}</tbody>
-            <tfoot><tr><td><b>Итого</b></td><td class="num mono"><b>${fmt(report.rows.reduce(function(s,r){return s+r.materials;},0))}</b></td><td class="num mono"><b>${fmt(report.rows.reduce(function(s,r){return s+r.labor;},0))}</b></td><td class="num mono"><b>${fmt(report.objectsTotal)}</b></td></tr></tfoot>
+            <tfoot><tr><td><b>Итого</b></td><td class="num mono"><b>${fmt(report.rows.reduce(function(s,r){return s+r.labor;},0))}</b></td><td class="num mono"><b>${fmt(report.rows.reduce(function(s,r){return s+r.materials;},0))}</b></td><td class="num mono"><b>${fmt(report.directTotal)}</b></td>${showOv?h`<td class="num mono"><b>${fmt(report.rows.reduce(function(s,r){return s+r.overhead;},0))}</b></td>`:''}<td class="num mono"><b>${fmt(showOv?report.rows.reduce(function(s,r){return s+r.grand;},0):report.directTotal)}</b></td><td class="num mono"><b>${report.doneTotal}</b></td><td></td></tr></tfoot>
           </table></div>`}
         </div>
-        ${(!isClientRole() && overheadCats.length) ? h`<div class="card card-pad">
-          <div class="section-title">Накладные расходы по статьям</div>
+        ${curKeys.length ? h`<div class="card card-pad">
+          <div class="section-title">По валютам счетов — ${monthLabelRu(monthKey)}, ${vatLabel} ${infoTip("Сумма в валюте платежа и её эквивалент в ₸ (для RUB/BYN — по курсу Нацбанка РК на дату оплаты). Наличные расходы — в ₸.")}</div>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Валюта</th><th class="num">В валюте платежа</th><th class="num">Эквивалент, ₸</th><th class="num">Записей</th></tr></thead>
+            <tbody>${curKeys.map(function(c){ var x = report.currencies[c]; return h`<tr><td>${escapeHtml(c)}</td><td class="num mono">${fmt(x.orig)} ${REPORT_CUR_SYMBOL[c]||escapeHtml(c)}</td><td class="num mono">${fmt(x.kzt)}</td><td class="num mono">${x.count}</td></tr>`; }).join("")}</tbody>
+          </table></div>
+        </div>` : ''}
+        ${report.ticketRows.length ? h`<div class="card card-pad">
+          <div class="section-title">По заявкам — ${monthLabelRu(monthKey)}, ${vatLabel} ${infoTip("Расходы месяца, привязанные к конкретной заявке."+(showOv?" К прямым расходам добавлен процент накладных этого месяца"+(report.overheadPct!=null?" (+"+fmtPct(report.overheadPct)+")":"")+".":""))}</div>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Заявка</th><th>Отель</th><th class="num">Прямые</th>${showOv?h`<th class="num">Накладные</th>`:''}<th class="num">Итого</th></tr></thead>
+            <tbody>${report.ticketRows.slice(0,100).map(function(r){
+              return h`<tr>
+                <td><a href="#/tickets/${r.ticket.id}"><b>№${escapeHtml(String(r.ticket.external_ref||String(r.ticket.id).slice(0,8)))}</b></a>${r.done?' <span class="muted" title="Заявка выполнена">✓</span>':''}</td>
+                <td>${r.hotel?('№'+r.hotel.id+' '+escapeHtml(r.hotel.name)):'—'}</td>
+                <td class="num mono">${fmt(r.direct)}</td>
+                ${showOv?h`<td class="num mono">${fmt(r.overhead)}</td>`:''}
+                <td class="num mono"><b>${fmt(showOv?r.total:r.direct)}</b></td>
+              </tr>`;
+            }).join("")}</tbody>
+          </table></div>
+          ${report.ticketRows.length>100 ? h`<div class="muted" style="font-size:12px;margin-top:6px;">Показаны 100 заявок с наибольшими расходами из ${report.ticketRows.length}.</div>` : ''}
+        </div>` : ''}
+        ${(showOv && overheadCats.length) ? h`<div class="card card-pad">
+          <div class="section-title">Накладные расходы по статьям — ${monthLabelRu(monthKey)}</div>
           <div class="table-wrap"><table>
             <thead><tr><th>Статья</th><th class="num">Сумма</th></tr></thead>
             <tbody>${overheadCats.map(function(c){ return h`<tr><td>${escapeHtml(c)}</td><td class="num mono">${fmt(report.overheadByCategory[c])}</td></tr>`; }).join("")}</tbody>
@@ -5529,24 +5705,73 @@
     (state.overheadExpenses||[]).forEach(function(e){ if(e.category) set[e.category]=true; });
     return Object.keys(set).sort();
   }
-  function addOverheadExpense(data){
+  // 0.4.10: к записи можно приложить файлы (счета/акты/чеки) — Storage-бакет
+  // "invoices", папка overhead/, список [{path,name}] в overhead_expenses.files.
+  function uploadOverheadFiles(files){
+    return Promise.all((files||[]).map(function(file, i){
+      var path = "overhead/" + Date.now() + "_" + i + "_" + file.name.replace(/[^\w.\-]+/g,"_");
+      return readFileAsBuffer(file).then(function(buf){
+        return sb.storage.from("invoices").upload(path, buf, {contentType: file.type || "application/octet-stream"});
+      }).then(function(res){
+        if(res.error) throw res.error;
+        return {path:path, name:file.name};
+      });
+    }));
+  }
+  function addOverheadExpense(data, files){
     if(!canEditRegistry()){ alert("Вносить накладные расходы может только Администратор, Руководитель или Финансист."); return false; }
     var category = (data.category||"").trim();
     var amount = Number(data.amount) || 0;
     if(!category){ alert("Укажите статью расхода."); return false; }
-    sb.from("overhead_expenses").insert({
-      date: data.date || new Date().toISOString().slice(0,10),
-      category: category, amount: amount,
-      note: (data.note||"").trim() || null,
-      created_by: myLabelWithRole()
+    uploadOverheadFiles(files).then(function(uploaded){
+      return sb.from("overhead_expenses").insert({
+        date: data.date || new Date().toISOString().slice(0,10),
+        category: category, amount: amount,
+        note: (data.note||"").trim() || null,
+        files: uploaded,
+        created_by: myLabelWithRole()
+      });
     }).then(function(res){
       if(res && res.error){ alert("Не удалось сохранить расход: " + res.error.message); return; }
+    }).catch(function(err){
+      alert("Не удалось загрузить файл: " + (err&&err.message?err.message:err));
     });
     return true;
+  }
+  function addFilesToOverhead(id, files){
+    if(!canEditRegistry()) return;
+    var e = (state.overheadExpenses||[]).find(function(x){ return x.id===id; });
+    if(!e) return;
+    uploadOverheadFiles(files).then(function(uploaded){
+      var list = (Array.isArray(e.files)?e.files:[]).concat(uploaded);
+      return sb.from("overhead_expenses").update({files:list}).eq("id", id).then(function(res){
+        if(res && res.error) throw res.error;
+        e.files = list; render();
+      });
+    }).catch(function(err){ alert("Не удалось прикрепить файл: " + (err&&err.message?err.message:err)); });
+  }
+  function openOverheadFile(path){
+    sb.storage.from("invoices").createSignedUrl(path, 3600).then(function(res){
+      if(res.data && res.data.signedUrl) window.open(res.data.signedUrl, "_blank");
+      else alert("Не удалось открыть файл.");
+    });
+  }
+  function deleteOverheadFile(id, path){
+    if(!canEditRegistry()) return;
+    if(!confirm("Удалить прикреплённый файл?")) return;
+    var e = (state.overheadExpenses||[]).find(function(x){ return x.id===id; });
+    if(!e) return;
+    var list = (Array.isArray(e.files)?e.files:[]).filter(function(f){ return f.path!==path; });
+    sb.storage.from("invoices").remove([path]).then(function(){
+      return sb.from("overhead_expenses").update({files:list}).eq("id", id);
+    }).then(function(){ e.files = list; render(); });
   }
   function deleteOverheadExpense(id){
     if(!canEditRegistry()) return;
     if(!confirm("Удалить эту запись о накладном расходе?")) return;
+    var oe = (state.overheadExpenses||[]).find(function(x){ return x.id===id; });
+    var paths = oe && Array.isArray(oe.files) ? oe.files.map(function(f){ return f.path; }) : [];
+    if(paths.length) sb.storage.from("invoices").remove(paths).then(function(){});
     sb.from("overhead_expenses").delete().eq("id", id).then(function(){});
   }
   // Вставка таблицы для "Расходов" — тот же принцип, что и импорт из c-lector
@@ -5844,7 +6069,7 @@
                 }).join("")}
               </tbody>
             </table></div>
-            ${editable ? h`<form id="cash-advance-form" class="field-row" style="margin-top:12px;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;">
+            ${editable ? h`<form id="cash-advance-form" data-keep-draft class="field-row" style="margin-top:12px;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;">
               <div class="field"><label>Дата</label><input type="date" name="date" value="${todayIso}" required></div>
               <div class="field"><label>Кому</label><input type="text" name="person" list="cash-persons" placeholder="Имя прораба" required></div>
               <div class="field"><label>Сумма</label><input type="text" inputmode="decimal" class="registry-amount-input" name="amount" placeholder="напр. 100 000" required></div>
@@ -5930,7 +6155,7 @@
                 }).join("")}
               </tbody>
             </table></div>
-            ${editable ? h`<form id="cash-expense-form" class="field-row" style="margin-top:12px;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px;">
+            ${editable ? h`<form id="cash-expense-form" data-keep-draft class="field-row" style="margin-top:12px;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px;">
               <div class="field"><label>Дата</label><input type="date" name="date" value="${todayIso}" required></div>
               <div class="field" style="grid-column:span 2;"><label>Наименование</label><input type="text" name="description" placeholder="напр. Саморезы" required></div>
               <div class="field"><label>Кол-во</label><input type="text" inputmode="decimal" class="registry-amount-input" name="qty" value="1" required></div>
@@ -5982,25 +6207,27 @@
         <div class="card card-pad">
           <div class="section-title">Записи</div>
           <div class="table-wrap"><table>
-            <thead><tr><th>Дата</th><th>Статья</th><th class="num">Сумма</th><th>Примечание</th><th>Кто внёс</th>${editable?'<th></th>':''}</tr></thead>
-            <tbody>${rows.length===0 ? h`<tr><td colspan="${editable?6:5}"><div class="empty-state"><b>Пока нет записей</b>Внесите накладной расход ниже.</div></td></tr>` :
+            <thead><tr><th>Дата</th><th>Статья</th><th class="num">Сумма</th><th>Примечание</th><th>Файлы</th><th>Кто внёс</th>${editable?'<th></th>':''}</tr></thead>
+            <tbody>${rows.length===0 ? h`<tr><td colspan="${editable?7:6}"><div class="empty-state"><b>Пока нет записей</b>Внесите накладной расход ниже.</div></td></tr>` :
               rows.map(function(e){
                 return h`<tr>
                   <td class="mono muted" style="white-space:nowrap;">${fmtDateShort(e.date)}</td>
                   <td>${escapeHtml(e.category)}</td>
                   <td class="num mono">${fmtSum(e.amount)}</td>
                   <td class="muted">${escapeHtml(e.note||'')}</td>
+                  <td style="font-size:12px;">${(Array.isArray(e.files)?e.files:[]).map(function(f){ return h`<div style="white-space:nowrap;"><a href="#" data-action="overhead-file-open" data-path="${escapeHtml(f.path)}" title="${escapeHtml(f.name||'')}">📎 ${escapeHtml(String(f.name||'файл').length>24?String(f.name).slice(0,22)+'…':(f.name||'файл'))}</a>${editable?h` <a href="#" data-action="overhead-file-delete" data-id="${e.id}" data-path="${escapeHtml(f.path)}" style="color:var(--crit);" title="Удалить файл">✕</a>`:''}</div>`; }).join("")}${editable?h`<label class="btn btn-ghost btn-sm" style="cursor:pointer;">＋ файл<input type="file" multiple data-overhead-file-upload="${e.id}" style="display:none;"></label>`:''}</td>
                   <td class="muted" style="white-space:nowrap;">${escapeHtml(e.created_by||'')}</td>
                   ${editable?h`<td><a href="#" data-action="overhead-expense-delete" data-id="${e.id}" style="color:var(--crit);">✕</a></td>`:''}
                 </tr>`;
               }).join("")}
             </tbody>
           </table></div>
-          ${editable ? h`<form id="overhead-expense-form" class="field-row" style="margin-top:12px;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;">
+          ${editable ? h`<form id="overhead-expense-form" data-keep-draft class="field-row" style="margin-top:12px;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;">
             <div class="field"><label>Дата</label><input type="date" name="date" value="${todayIso}" required></div>
             <div class="field"><label>Статья</label><input type="text" name="category" list="overhead-categories" placeholder="напр. Зарплата бэк-офиса" required></div>
             <div class="field"><label>Сумма</label><input type="number" name="amount" min="0" step="0.01" required></div>
             <div class="field" style="grid-column:1/-1;"><label>Примечание (необязательно)</label><input type="text" name="note" placeholder="комментарий"></div>
+            <div class="field" style="grid-column:1/-1;"><label>Файлы (необязательно — счета, акты, чеки)</label><input type="file" name="files" multiple></div>
             <button class="btn btn-primary" type="submit">Добавить</button>
           </form>` : ''}
         </div>
@@ -7196,6 +7423,18 @@
     if(fromEl === document.activeElement && isActiveTypingField(fromEl)){
       toEl.value = fromEl.value;
     }
+    // 0.4.10: незаконченная форма внесения (data-keep-draft) — раньше
+    // сохранялось значение только у поля с фокусом, поэтому после перехода
+    // в следующее поле любая перерисовка (realtime, таймер) стирала уже
+    // введённое в предыдущих. Теперь значения ВСЕХ полей такой формы
+    // переживают перерисовку; после form.reset() значения — уже по умолчанию,
+    // и они же копируются, так что сброс формы работает как обычно.
+    var tag = fromEl.tagName;
+    if((tag==="INPUT"||tag==="TEXTAREA"||tag==="SELECT") && fromEl.form && fromEl.form.hasAttribute("data-keep-draft")){
+      if(fromEl.type==="file") return false;
+      if(fromEl.type==="checkbox"||fromEl.type==="radio") toEl.checked = fromEl.checked;
+      else toEl.value = fromEl.value;
+    }
     return true;
   }
   // #map-canvas (см. ensureMap() ниже) — Google Maps сама вставляет туда
@@ -7456,6 +7695,7 @@
       // остаётся рядом для нестандартного периода.
       if(action==="report-period-preset"){ state.reportPeriodDays = Number(actionEl.getAttribute("data-value")) || 7; render(); return; }
       if(action==="reports-month"){ state.reportsMonth = actionEl.getAttribute("data-value"); render(); return; }
+      if(action==="reports-vat"){ state.reportsVat = actionEl.getAttribute("data-value")==="gross" ? "gross" : "net"; render(); return; }
       if(action==="import-commit") return commitImport();
       if(action==="import-reset") return resetImport();
       if(action==="crew-performer-add"){
@@ -7681,6 +7921,8 @@
       if(action==="hotel-toggle-active"){ toggleHotelActive(id, actionEl.getAttribute("data-val")==="1"); return; }
       if(action==="cash-advance-delete"){ e.preventDefault(); deleteCashAdvance(id); return; }
       if(action==="cash-expense-delete"){ e.preventDefault(); deleteCashExpense(id); return; }
+      if(action==="overhead-file-open"){ e.preventDefault(); openOverheadFile(actionEl.getAttribute("data-path")); return; }
+      if(action==="overhead-file-delete"){ e.preventDefault(); deleteOverheadFile(id, actionEl.getAttribute("data-path")); return; }
       if(action==="overhead-expense-delete"){ e.preventDefault(); deleteOverheadExpense(id); return; }
       if(action==="cash-advance-confirm-toggle"){ setCashAdvanceConfirmed(id, actionEl.getAttribute("data-val")==="1"); return; }
       if(action==="cash-receipt-open"){ e.preventDefault(); openCashReceiptFile(actionEl.getAttribute("data-path")); return; }
@@ -7719,6 +7961,7 @@
     if(e.target.matches("[data-cash-expense-category]")){ setCashExpenseCategory(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.id==="import-file"){ var f=e.target.files&&e.target.files[0]; if(f) loadImportFile(f); return; }
     if(e.target.id==="cash-import-file"){ var cf=e.target.files&&e.target.files[0]; if(cf) loadCashImportFile(cf); return; }
+    if(e.target.matches("[data-overhead-file-upload]")){ var ohf=Array.from(e.target.files||[]); if(ohf.length) addFilesToOverhead(e.target.getAttribute("data-overhead-file-upload"), ohf); return; }
     if(e.target.matches("[data-cash-receipt-upload]")){ var crf=e.target.files&&e.target.files[0]; if(crf) uploadCashReceipt(e.target.getAttribute("data-cash-receipt-upload"), crf); return; }
     if(e.target.matches("[data-import-map]")){ state.importMapping[e.target.getAttribute("data-import-map")]=e.target.value; render(); return; }
     if(e.target.matches("[data-cash-import-map]")){ state.cashImportMapping[e.target.getAttribute("data-cash-import-map")]=e.target.value; render(); return; }
@@ -7970,7 +8213,8 @@
     }
     if(e.target.id==="overhead-expense-form"){
       e.preventDefault(); var fdoe=new FormData(e.target);
-      var okOe = addOverheadExpense({date:fdoe.get("date"), category:fdoe.get("category"), amount:fdoe.get("amount"), note:fdoe.get("note")});
+      var oeFiles = Array.from((e.target.elements.files && e.target.elements.files.files) || []);
+      var okOe = addOverheadExpense({date:fdoe.get("date"), category:fdoe.get("category"), amount:fdoe.get("amount"), note:fdoe.get("note")}, oeFiles);
       if(okOe!==false) e.target.reset();
     }
   });
