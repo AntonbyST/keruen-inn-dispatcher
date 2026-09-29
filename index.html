@@ -5190,12 +5190,11 @@
     var parts = key.split("-"); var d = new Date(Number(parts[0]), Number(parts[1])-1+delta, 1);
     return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0");
   }
-  function buildFinanceReport(monthKey, vatMode){
-    vatMode = vatMode==="gross" ? "gross" : "net";
+  // 0.4.11: плоский список ПРЯМЫХ расходов (оплаченные счета + наличные) всех
+  // месяцев — общий для отчёта и для строки «Накладные» в карточке заявки.
+  function collectReportDirect(vatMode){
     var ticketMap = {};
     (state.tickets||[]).forEach(function(t){ ticketMap[t.id] = t; });
-    // Плоский список прямых расходов всех месяцев: одним проходом, потом из него
-    // же строятся и выбранный месяц, и диаграмма по 12 месяцам.
     var direct = [];
     (state.invoices||[]).forEach(function(iv){
       var mk = paidMonthKey(iv); if(!mk) return;
@@ -5212,15 +5211,48 @@
       var amt = cashExpenseAccounted(ce);
       direct.push({ month:mk, hotelId:hotelId, ticketId:(t?t.id:null), cat:(ce.category==="crew"?"labor":"materials"), kzt:amt, cur:"KZT", orig:amt });
     });
-    // Накладные — только для внутренних ролей («Клиенту» компанейские накладные
-    // ни к чему).
-    var overheadByMonth = {}, overheadCatsInMonth = {};
-    if(!isClientRole()){
+    return direct;
+  }
+  function reportOverheadByMonth(){
+    var m = {};
+    if(isClientRole()) return m; // «Клиенту» компанейские накладные ни к чему
+    (state.overheadExpenses||[]).forEach(function(oe){
+      var mk = oe.date ? String(oe.date).slice(0,7) : null; if(!mk) return;
+      m[mk] = (m[mk]||0) + (Number(oe.amount)||0);
+    });
+    return m;
+  }
+  // Процент накладных по месяцам: накладные ÷ прямые расходы месяца.
+  function reportOverheadRates(direct, overheadByMonth){
+    var dm = {};
+    direct.forEach(function(e){ dm[e.month] = (dm[e.month]||0) + e.kzt; });
+    var rates = {};
+    Object.keys(overheadByMonth).forEach(function(k){ rates[k] = dm[k]>0 ? overheadByMonth[k]/dm[k] : 0; });
+    return rates;
+  }
+  // 0.4.11: накладные, приходящиеся на конкретную заявку за всё время (для
+  // карточки заявки): каждый её расход × процент накладных ЕГО месяца.
+  // Возвращает {share, direct} (в ₸, без НДС/«как в Затратах по заявке»).
+  function ticketOverheadShare(t){
+    if(isClientRole()) return { share:0 };
+    var direct = collectReportDirect("net");
+    var rates = reportOverheadRates(direct, reportOverheadByMonth());
+    var share = 0;
+    direct.forEach(function(e){ if(e.ticketId===t.id) share += e.kzt*(rates[e.month]||0); });
+    return { share: share };
+  }
+  function buildFinanceReport(monthKey, vatMode){
+    vatMode = vatMode==="gross" ? "gross" : "net";
+    var withOv = !isClientRole();
+    var ticketMap = {};
+    (state.tickets||[]).forEach(function(t){ ticketMap[t.id] = t; });
+    var direct = collectReportDirect(vatMode);
+    var overheadByMonth = reportOverheadByMonth();
+    var overheadCatsInMonth = {};
+    if(withOv){
       (state.overheadExpenses||[]).forEach(function(oe){
-        var mk = oe.date ? String(oe.date).slice(0,7) : null; if(!mk) return;
-        var amt = Number(oe.amount)||0;
-        overheadByMonth[mk] = (overheadByMonth[mk]||0) + amt;
-        if(mk===monthKey) overheadCatsInMonth[oe.category||"—"] = (overheadCatsInMonth[oe.category||"—"]||0) + amt;
+        var mk = oe.date ? String(oe.date).slice(0,7) : null;
+        if(mk===monthKey) overheadCatsInMonth[oe.category||"—"] = (overheadCatsInMonth[oe.category||"—"]||0) + (Number(oe.amount)||0);
       });
     }
     // Диаграмма: 12 месяцев, заканчивая выбранным.
@@ -5237,13 +5269,24 @@
     months.forEach(function(m){ m.directTotal = m.materials+m.labor; m.total = m.directTotal+m.overhead; });
     var cur = months[months.length-1], prev = months[months.length-2];
 
+    // Итоги любого месяца (для сравнения год к году и «с начала года»).
+    var dmAll = {}; direct.forEach(function(e){ dmAll[e.month] = (dmAll[e.month]||0) + e.kzt; });
+    function monthTotal(key){ return (dmAll[key]||0) + (overheadByMonth[key]||0); }
+    var year = monthKey.slice(0,4), mnum = Number(monthKey.slice(5));
+    var ytd = 0, ytdPrev = 0;
+    for(var mi=1; mi<=mnum; mi++){
+      var mm2 = String(mi).padStart(2,"0");
+      ytd += monthTotal(year+"-"+mm2);
+      ytdPrev += monthTotal((Number(year)-1)+"-"+mm2);
+    }
+    var compare = { cur: cur.total, prev: prev.total, prevYear: monthTotal(shiftReportMonth(monthKey,-12)), prevKey: prev.key, prevYearKey: shiftReportMonth(monthKey,-12), ytd: ytd, ytdPrev: ytdPrev };
+
     // Выбранный месяц.
     var monthEntries = direct.filter(function(e){ return e.month===monthKey; });
     var overheadTotal = cur.overhead;
     var directTotal = cur.directTotal;
     // % накладных = накладные ÷ прямые расходы месяца. Если прямых расходов нет,
-    // а накладные есть — процент не определён (делить не на что), накладные
-    // остаются «нераспределёнными».
+    // а накладные есть — процент не определён (делить не на что).
     var overheadPct = directTotal>0 ? overheadTotal/directTotal*100 : null;
     var k = directTotal>0 ? overheadTotal/directTotal : 0;
 
@@ -5263,35 +5306,147 @@
     });
     // «Выполненные заявки» объекта за месяц: выполнена (isTicketDone) И либо в
     // этом месяце по ней были расходы, либо она закрыта (closed_at) в этом
-    // месяце. У заявок из c-lector нет даты выполнения — поэтому по ним
-    // опорой служит месяц расходов.
+    // месяце. У заявок из c-lector нет даты выполнения — опорой служит месяц
+    // расходов.
     (state.tickets||[]).forEach(function(t){
       if(!hotelAllowedForMe(t.hotel_id) || !byHotel[t.hotel_id]) return;
       if(t.status==="rejected" || !isTicketDone(t)) return;
       var closedThisMonth = t.closed_at && String(t.closed_at).slice(0,7)===monthKey;
       if(closedThisMonth || byHotel[t.hotel_id].tickets[t.id]) byHotel[t.hotel_id].doneTickets[t.id] = true;
     });
+
+    // 12 месяцев по объектам: среднее в месяц / за год / на номер / на м², и
+    // резкий рост (текущий месяц против среднего за 3 предыдущих).
+    var hm = {};
+    direct.forEach(function(e){
+      var ix = monthIdx[e.month]; if(ix==null) return;
+      var arr = hm[e.hotelId] || (hm[e.hotelId] = [0,0,0,0,0,0,0,0,0,0,0,0]);
+      arr[ix] += e.kzt;
+    });
+    var monthRates = months.map(function(m){ return m.directTotal>0 ? m.overhead/m.directTotal : 0; });
+    function hotelYear(hid){
+      var arr = hm[hid]; if(!arr) return { sum12:0, avg:null, n:0 };
+      var sum12 = 0, first = -1;
+      arr.forEach(function(v, ix){ sum12 += v*(1+monthRates[ix]); if(first<0 && v>0) first = ix; });
+      var n = first<0 ? 0 : 12-first;
+      return { sum12:sum12, avg: n? sum12/n : null, n:n };
+    }
+    var growth = [];
+    Object.keys(hm).forEach(function(hid){
+      var arr = hm[hid]; var base = (arr[8]+arr[9]+arr[10])/3; var now = arr[11];
+      if(base>0 && now>base*1.5 && now-base>=50000){
+        growth.push({ hotel:hotelById(Number(hid)), now:now, base:base, ratio:now/base });
+      }
+    });
+    growth = growth.filter(function(g){ return g.hotel; }).sort(function(a,b){ return b.ratio-a.ratio; });
+
     var rows = Object.keys(byHotel).map(function(hid){
       var hotel = hotelById(Number(hid)); var b = byHotel[hid];
       var total = b.materials+b.labor;
       var doneCount = Object.keys(b.doneTickets).length;
       var ov = total*k;
+      var yr = hotelYear(hid);
       return { hotel:hotel, materials:b.materials, labor:b.labor, total:total, overhead:ov, grand:total+ov,
                ticketCount:Object.keys(b.tickets).length, doneCount:doneCount,
-               perDone: doneCount>0 ? (total+ov)/doneCount : null };
-    }).filter(function(r){ return r.hotel && (r.total>0 || r.doneCount>0); }) // объекты без расходов и без выполненных заявок за месяц не показываем — строки из одних нулей только шумят
+               perDone: doneCount>0 ? (total+ov)/doneCount : null,
+               sum12: yr.sum12, avg: yr.avg, monthsN: yr.n,
+               rooms: hotel&&hotel.rooms>0 ? Number(hotel.rooms) : null, area: hotel&&hotel.area_m2>0 ? Number(hotel.area_m2) : null };
+    }).filter(function(r){ return r.hotel && (r.total>0 || r.doneCount>0 || r.sum12>0); })
       .sort(function(a,b){ return b.grand-a.grand; });
+    rows.forEach(function(r){
+      r.perRoom = (r.avg!=null && r.rooms) ? r.avg/r.rooms : null;
+      r.perM2 = (r.avg!=null && r.area) ? r.avg/r.area : null;
+    });
     var ticketRows = Object.keys(byTicket).map(function(tid){
       var t = ticketMap[tid]; var d = byTicket[tid];
       return { ticket:t, hotel:t?hotelById(t.hotel_id):null, direct:d, overhead:d*k, total:d*(1+k), done:t?isTicketDone(t):false };
     }).filter(function(r){ return r.ticket; }).sort(function(a,b){ return b.total-a.total; });
+
+    // Разбивка расходов по заявкам месяца: по категории заявки и по
+    // исполнителям (сумма заявки делится между её исполнителями поровну).
+    var byCase = {}, byPerf = {};
+    ticketRows.forEach(function(r){
+      var amt = withOv ? r.total : r.direct;
+      var ck = r.ticket.case_type || "none";
+      byCase[ck] = (byCase[ck]||0) + amt;
+      var perf = ticketPerformers(r.ticket);
+      if(!perf.length) perf = ["Без исполнителя"];
+      perf.forEach(function(n){ byPerf[n] = (byPerf[n]||0) + amt/perf.length; });
+    });
+    var caseRows = Object.keys(byCase).map(function(ck){ return { label: ck==="none" ? "Категория не указана" : (CASE_LABEL[ck]||ck), amount: byCase[ck] }; }).sort(function(a,b){ return b.amount-a.amount; });
+    var perfRows = Object.keys(byPerf).map(function(n){ return { name:n, amount:byPerf[n] }; }).sort(function(a,b){ return b.amount-a.amount; });
+
+    // Обязательства: счета, которые ещё НЕ оплачены (в расходы месяца не входят).
+    var oblig = { total:0, count:0, missing:0, noRate:0, byHotel:{} };
+    (state.invoices||[]).forEach(function(iv){
+      if(iv.paid) return;
+      var t = ticketMap[iv.ticket_id];
+      if(!t || !hotelAllowedForMe(t.hotel_id)) return;
+      var acc = invoiceAccountedKZTForTicket(iv);
+      if(acc.state==="missing"){ oblig.missing++; return; }
+      if(acc.state!=="ok" || acc.value==null){ oblig.noRate++; return; }
+      var c = reportInvoiceContrib(iv, vatMode); if(!c) return;
+      oblig.total += c.kzt; oblig.count++;
+      var bh = oblig.byHotel[t.hotel_id] || (oblig.byHotel[t.hotel_id] = { sum:0, count:0 });
+      bh.sum += c.kzt; bh.count++;
+    });
+    oblig.rows = Object.keys(oblig.byHotel).map(function(hid){ return { hotel:hotelById(Number(hid)), sum:oblig.byHotel[hid].sum, count:oblig.byHotel[hid].count }; }).filter(function(r){ return r.hotel; }).sort(function(a,b){ return b.sum-a.sum; });
+
     var doneTotal = rows.reduce(function(s,r){ return s+r.doneCount; }, 0);
     return {
-      vatMode: vatMode, months: months, cur: cur, prev: prev,
-      rows: rows, ticketRows: ticketRows, currencies: currencies,
+      vatMode: vatMode, months: months, cur: cur, prev: prev, compare: compare, growth: growth,
+      rows: rows, ticketRows: ticketRows, currencies: currencies, caseRows: caseRows, perfRows: perfRows, oblig: oblig,
       directTotal: directTotal, overheadTotal: overheadTotal, overheadPct: overheadPct,
       overheadByCategory: overheadCatsInMonth, grandTotal: directTotal+overheadTotal, doneTotal: doneTotal
     };
+  }
+  // 0.4.11: экспорт отчёта в CSV для Excel/бухгалтера — разделитель «;»,
+  // десятичная запятая, UTF-8 с BOM (Excel сам определяет кодировку).
+  function reportToCsv(report, monthKey){
+    var withOv = !isClientRole();
+    var vatLabel = report.vatMode==="gross" ? "с НДС" : "без НДС";
+    function n(v){ return String(Math.round((Number(v)||0)*100)/100).replace(".", ","); }
+    function q(v){ v = String(v==null?"":v); return /[;"\n]/.test(v) ? '"'+v.replace(/"/g,'""')+'"' : v; }
+    var out = [];
+    function line(arr){ out.push(arr.map(q).join(";")); }
+    line(["Отчёт по расходам на сервис", monthLabelRu(monthKey), vatLabel + ", ₸"]);
+    line([]);
+    line(["Итого на сервис", n(withOv ? report.grandTotal : report.directTotal)]);
+    line(["Прямые расходы", n(report.directTotal)]);
+    if(withOv){ line(["Накладные расходы", n(report.overheadTotal)]); line(["Процент накладных", report.overheadPct!=null ? n(report.overheadPct)+"%" : "—"]); }
+    line(["К оплате (не оплачено)", n(report.oblig.total)]);
+    line([]);
+    line(["По объектам"]);
+    line(["Отель","Работа","Материалы","Прямые"].concat(withOv?["Накладные"]:[]).concat(["Итого","Выполнено заявок","₸ на заявку","За 12 мес","Среднее в месяц","₸ на номер в мес","₸ на м² в мес"]));
+    report.rows.forEach(function(r){
+      line(["№"+r.hotel.id+" "+r.hotel.name, n(r.labor), n(r.materials), n(r.total)].concat(withOv?[n(r.overhead)]:[]).concat([n(withOv?r.grand:r.total), r.doneCount, r.perDone!=null?n(withOv?r.perDone:r.total/r.doneCount):"", n(r.sum12), r.avg!=null?n(r.avg):"", r.perRoom!=null?n(r.perRoom):"", r.perM2!=null?n(r.perM2):""]));
+    });
+    line([]);
+    line(["По заявкам"]);
+    line(["Заявка","Отель","Категория","Исполнители","Прямые"].concat(withOv?["Накладные"]:[]).concat(["Итого"]));
+    report.ticketRows.forEach(function(r){
+      line(["№"+(r.ticket.external_ref||String(r.ticket.id).slice(0,8)), r.hotel?("№"+r.hotel.id+" "+r.hotel.name):"", r.ticket.case_type?(CASE_LABEL[r.ticket.case_type]||r.ticket.case_type):"", ticketPerformers(r.ticket).join(", "), n(r.direct)].concat(withOv?[n(r.overhead)]:[]).concat([n(withOv?r.total:r.direct)]));
+    });
+    line([]);
+    line(["По валютам счетов"]);
+    line(["Валюта","В валюте платежа","Эквивалент, ₸","Записей"]);
+    Object.keys(report.currencies).forEach(function(c){ var x = report.currencies[c]; line([c, n(x.orig), n(x.kzt), x.count]); });
+    line([]);
+    line(["По месяцам (12)"]);
+    line(["Месяц","Работа","Материалы"].concat(withOv?["Накладные"]:[]).concat(["Итого"]));
+    report.months.forEach(function(m){ line([monthLabelRu(m.key), n(m.labor), n(m.materials)].concat(withOv?[n(m.overhead)]:[]).concat([n(withOv?m.total:m.directTotal)])); });
+    return "﻿" + out.join("\r\n");
+  }
+  function downloadReportCsv(){
+    var monthKey = state.reportsMonth || new Date().toISOString().slice(0,7);
+    var vatMode = state.reportsVat==="gross" ? "gross" : "net";
+    var csv = reportToCsv(buildFinanceReport(monthKey, vatMode), monthKey);
+    var blob = new Blob([csv], {type:"text/csv;charset=utf-8"});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url; a.download = "otchet-" + monthKey + (vatMode==="gross"?"-s-nds":"-bez-nds") + ".csv";
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 2000);
   }
   // Диаграмма «Расходы на сервис по месяцам» — стек: работа / материалы /
   // накладные. Клик по столбцу открывает месяц. Цвета — только токены темы.
@@ -5357,16 +5512,39 @@
             <span style="font-weight:600;">${monthLabelRu(monthKey)}</span>
             <button class="btn btn-sm" data-action="reports-month" data-value="${shiftReportMonth(monthKey,1)}">${monthLabelRu(shiftReportMonth(monthKey,1))} →</button>
             <span style="flex:1;"></span>
+            <button class="btn btn-sm btn-ghost" data-action="reports-export" title="Скачать отчёт за выбранный месяц в CSV (открывается в Excel)">⬇ CSV</button>
             <span class="muted" style="font-size:12px;">Суммы:</span>
             <button class="btn btn-sm ${vatMode==='net'?'btn-primary':''}" data-action="reports-vat" data-value="net" title="НДС снят, доп. налог по способу оплаты учтён — как в «Затратах по заявке»">без НДС</button>
             <button class="btn btn-sm ${vatMode==='gross'?'btn-primary':''}" data-action="reports-vat" data-value="gross" title="Суммы по документам с НДС, без доп. налога">с НДС</button>
           </div>
         </div>
+        ${report.growth.length ? h`<div class="card card-pad" data-report="growth" style="border-color:var(--warn);background:var(--warn-soft);">
+          <div class="section-title" style="color:var(--warn);">⚠ Резкий рост расходов</div>
+          ${report.growth.map(function(g){ return h`<div style="font-size:13px;margin-top:4px;"><b>№${g.hotel.id} ${escapeHtml(g.hotel.name)}</b>: ${fmt(g.now)} ₸ за месяц — в ${(Math.round(g.ratio*10)/10).toLocaleString("ru-RU")}× выше среднего за 3 предыдущих месяца (${fmt(g.base)} ₸)</div>`; }).join("")}
+        </div>` : ''}
         <div class="grid-kpi">
           <div class="card kpi"><div class="kpi-label">Итого на сервис</div><div class="kpi-value accent" data-kpi="total">${fmt(showOv?report.grandTotal:report.directTotal)}</div><div class="kpi-sub">₸, ${vatLabel}${deltaTxt?', '+deltaTxt:''}</div></div>
           <div class="card kpi"><div class="kpi-label">Прямые расходы</div><div class="kpi-value" data-kpi="direct">${fmt(report.directTotal)}</div><div class="kpi-sub">работа + материалы, ₸</div></div>
           ${showOv ? h`<div class="card kpi"><div class="kpi-label">Накладные расходы</div><div class="kpi-value" data-kpi="overhead">${fmt(report.overheadTotal)}</div><div class="kpi-sub">${report.overheadPct!=null?('+'+fmtPct(report.overheadPct)+' к каждой заявке'):(report.overheadTotal>0?'не распределены: нет прямых расходов':'за месяц не внесены')}</div></div>` : ''}
           <div class="card kpi"><div class="kpi-label">Выполнено заявок</div><div class="kpi-value" data-kpi="done">${fmt(report.doneTotal)}</div><div class="kpi-sub">по всем объектам за месяц</div></div>
+          <div class="card kpi"><div class="kpi-label">К оплате</div><div class="kpi-value" data-kpi="oblig">${fmt(report.oblig.total)}</div><div class="kpi-sub">не оплачено: ${report.oblig.count} ${ruPlural(report.oblig.count,["счёт","счёта","счетов"])}${(report.oblig.missing||report.oblig.noRate)?(', ещё '+(report.oblig.missing+report.oblig.noRate)+' без суммы/курса'):''}</div></div>
+        </div>
+        <div class="card card-pad">
+          <div class="section-title">Сравнение ${infoTip("Итого на сервис (прямые + накладные, "+vatLabel+"). «С начала года» — сумма за месяцы с января по выбранный включительно, против тех же месяцев прошлого года.")}</div>
+          <div class="table-wrap"><table data-report="compare">
+            <thead><tr><th>Период</th><th class="num">Итого, ₸</th><th class="num">Изменение</th></tr></thead>
+            <tbody>
+              ${(function(){
+                var c = report.compare;
+                function dl(a,b){ if(!(b>0)) return '—'; var d=(a-b)/b*100; return (d>=0?'+':'−')+fmtPct(Math.abs(d)); }
+                return h`<tr><td>${monthLabelRu(monthKey)}</td><td class="num mono"><b>${fmt(c.cur)}</b></td><td class="num mono muted">—</td></tr>
+                <tr><td>${monthLabelRu(c.prevKey)} (пред. месяц)</td><td class="num mono">${fmt(c.prev)}</td><td class="num mono">${dl(c.cur,c.prev)}</td></tr>
+                <tr><td>${monthLabelRu(c.prevYearKey)} (год назад)</td><td class="num mono">${fmt(c.prevYear)}</td><td class="num mono">${dl(c.cur,c.prevYear)}</td></tr>
+                <tr><td>С начала года (янв–${monthLabelRu(monthKey).split(" ")[0].slice(0,3).toLowerCase()})</td><td class="num mono"><b>${fmt(c.ytd)}</b></td><td class="num mono muted">—</td></tr>
+                <tr><td>Те же месяцы прошлого года</td><td class="num mono">${fmt(c.ytdPrev)}</td><td class="num mono">${dl(c.ytd,c.ytdPrev)}</td></tr>`;
+              })()}
+            </tbody>
+          </table></div>
         </div>
         <div class="card card-pad">
           <div class="section-title">Расходы по месяцам ${infoTip("Последние 12 месяцев до выбранного включительно, ₸ "+vatLabel+". Столбец — все расходы на сервис за месяц: работа, материалы и накладные. Нажмите на столбец, чтобы открыть месяц.")}</div>
@@ -5397,6 +5575,43 @@
             <tfoot><tr><td><b>Итого</b></td><td class="num mono"><b>${fmt(report.rows.reduce(function(s,r){return s+r.labor;},0))}</b></td><td class="num mono"><b>${fmt(report.rows.reduce(function(s,r){return s+r.materials;},0))}</b></td><td class="num mono"><b>${fmt(report.directTotal)}</b></td>${showOv?h`<td class="num mono"><b>${fmt(report.rows.reduce(function(s,r){return s+r.overhead;},0))}</b></td>`:''}<td class="num mono"><b>${fmt(showOv?report.rows.reduce(function(s,r){return s+r.grand;},0):report.directTotal)}</b></td><td class="num mono"><b>${report.doneTotal}</b></td><td></td></tr></tfoot>
           </table></div>`}
         </div>
+        ${report.rows.some(function(r){ return r.sum12>0; }) ? h`<div class="card card-pad">
+          <div class="section-title">Стоимость обслуживания объекта — 12 месяцев ${infoTip("За последние 12 месяцев до выбранного включительно, "+vatLabel+(showOv?", с накладными (процент каждого месяца)":"")+". Среднее в месяц считается с первого месяца, когда по объекту были расходы. «На номер» и «на м²» — среднее в месяц ÷ число номеров / площадь: их вносят в «Отелях» (колонка «Номера / м²»).")}</div>
+          <div class="table-wrap"><table data-report="year">
+            <thead><tr><th>Отель</th><th class="num">За 12 мес</th><th class="num">В среднем в месяц</th><th class="num">₸ на номер в мес</th><th class="num">₸ на м² в мес</th></tr></thead>
+            <tbody>${report.rows.filter(function(r){ return r.sum12>0; }).sort(function(a,b){ return b.sum12-a.sum12; }).map(function(r){
+              return h`<tr><td><span class="ttl">№${r.hotel.id} ${escapeHtml(r.hotel.name)}</span></td><td class="num mono">${fmt(r.sum12)}</td><td class="num mono">${r.avg!=null?fmt(r.avg):'—'}</td><td class="num mono">${r.perRoom!=null?fmt(r.perRoom):'<span class="muted" title="Внесите число номеров в «Отелях»">—</span>'}</td><td class="num mono">${r.perM2!=null?fmt(r.perM2):'<span class="muted" title="Внесите площадь в «Отелях»">—</span>'}</td></tr>`;
+            }).join("")}</tbody>
+          </table></div>
+        </div>` : ''}
+        ${report.ticketRows.length ? h`<div class="row-gap" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px;">
+          <div class="card card-pad" data-report="top-tickets">
+            <div class="section-title">Топ-5 заявок по затратам</div>
+            <div class="table-wrap"><table><tbody>${report.ticketRows.slice(0,5).map(function(r){ return h`<tr><td><a href="#/tickets/${r.ticket.id}"><b>№${escapeHtml(String(r.ticket.external_ref||String(r.ticket.id).slice(0,8)))}</b></a> <span class="muted">${r.hotel?escapeHtml(r.hotel.name):''}</span></td><td class="num mono"><b>${fmt(showOv?r.total:r.direct)}</b></td></tr>`; }).join("")}</tbody></table></div>
+          </div>
+          <div class="card card-pad" data-report="top-hotels">
+            <div class="section-title">Топ-5 объектов по затратам</div>
+            <div class="table-wrap"><table><tbody>${report.rows.filter(function(r){ return r.total>0; }).slice(0,5).map(function(r){ return h`<tr><td><b>№${r.hotel.id}</b> ${escapeHtml(r.hotel.name)}</td><td class="num mono"><b>${fmt(showOv?r.grand:r.total)}</b></td></tr>`; }).join("")}</tbody></table></div>
+          </div>
+        </div>
+        <div class="row-gap" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px;">
+          <div class="card card-pad" data-report="by-case">
+            <div class="section-title">По категории заявки ${infoTip("Расходы месяца, привязанные к заявкам, по категории заявки (гарантийный / негарантийный / необоснованная)"+(showOv?", с накладными":"")+". Наличные без привязки к заявке сюда не входят.")}</div>
+            <div class="table-wrap"><table><tbody>${report.caseRows.map(function(r){ return h`<tr><td>${escapeHtml(r.label)}</td><td class="num mono">${fmt(r.amount)}</td></tr>`; }).join("")}</tbody></table></div>
+          </div>
+          <div class="card card-pad" data-report="by-performer">
+            <div class="section-title">По исполнителям ${infoTip("Сумма каждой заявки делится поровну между её исполнителями («Бригада» в карточке заявки). Заявки без исполнителя — отдельной строкой.")}</div>
+            <div class="table-wrap"><table><tbody>${report.perfRows.map(function(r){ return h`<tr><td>${escapeHtml(r.name)}</td><td class="num mono">${fmt(r.amount)}</td></tr>`; }).join("")}</tbody></table></div>
+          </div>
+        </div>` : ''}
+        ${report.oblig.rows.length ? h`<div class="card card-pad" data-report="oblig">
+          <div class="section-title">Обязательства — неоплаченные счета ${infoTip("Счета, которые загружены, но ещё не отмечены оплаченными (не зависят от выбранного месяца, "+vatLabel+"). В расходы месяца попадают только после оплаты. Счета без суммы или без курса Нацбанка сюда не входят — они посчитаны отдельно в карточке «К оплате».")}</div>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Отель</th><th class="num">Счетов</th><th class="num">Сумма, ₸</th></tr></thead>
+            <tbody>${report.oblig.rows.map(function(r){ return h`<tr><td>№${r.hotel.id} ${escapeHtml(r.hotel.name)}</td><td class="num mono">${r.count}</td><td class="num mono">${fmt(r.sum)}</td></tr>`; }).join("")}</tbody>
+            <tfoot><tr><td><b>Итого</b></td><td class="num mono"><b>${report.oblig.count}</b></td><td class="num mono"><b>${fmt(report.oblig.total)}</b></td></tr></tfoot>
+          </table></div>
+        </div>` : ''}
         ${curKeys.length ? h`<div class="card card-pad">
           <div class="section-title">По валютам счетов — ${monthLabelRu(monthKey)}, ${vatLabel} ${infoTip("Сумма в валюте платежа и её эквивалент в ₸ (для RUB/BYN — по курсу Нацбанка РК на дату оплаты). Наличные расходы — в ₸.")}</div>
           <div class="table-wrap"><table>
@@ -6505,7 +6720,7 @@
   function updateHotelField(id, field, val){
     var patch = {};
     if(field==="zone") patch.zone = val===""? null : Number(val);
-    else if(field==="lat" || field==="lng") patch[field] = val===""? null : Number(val);
+    else if(field==="lat" || field==="lng" || field==="rooms" || field==="area_m2") patch[field] = val===""? null : Number(val);
     else patch[field] = val;
     sb.from("hotels").update(patch).eq("id", id).then(function(){});
   }
@@ -6592,8 +6807,8 @@
       <div class="row-gap">
         <div class="card">
           <div class="table-wrap"><table>
-            <thead><tr><th>№</th><th>Название</th><th>Зона</th><th>Срок реагирования</th><th>Координаты (для карты)</th><th>Лицо от Заказчика</th><th>В эксплуатации</th><th></th></tr></thead>
-            <tbody>${list.length===0 ? h`<tr><td colspan="8"><div class="empty-state"><b>Отелей нет</b>Добавьте первый отель ниже.</div></td></tr>` :
+            <thead><tr><th>№</th><th>Название</th><th>Зона</th><th>Срок реагирования</th><th>Координаты (для карты)</th><th>Номера / м²</th><th>Лицо от Заказчика</th><th>В эксплуатации</th><th></th></tr></thead>
+            <tbody>${list.length===0 ? h`<tr><td colspan="9"><div class="empty-state"><b>Отелей нет</b>Добавьте первый отель ниже.</div></td></tr>` :
               list.map(function(x){
                 return h`<tr>
                   <td class="mono muted">№${x.id}</td>
@@ -6601,6 +6816,7 @@
                   <td>${hotelZoneCell(x)}</td>
                   <td class="mono muted">${x.zone && ZONE_HOURS[x.zone] ? (ZONE_HOURS[x.zone]+" ч") : "—"}</td>
                   <td>${hotelCoordsCell(x)}</td>
+                  <td><div style="display:flex;gap:4px;"><input type="number" min="0" step="1" data-hotel-field="rooms" data-id="${x.id}" value="${x.rooms!=null?x.rooms:''}" placeholder="номеров" style="width:82px;"><input type="number" min="0" step="0.1" data-hotel-field="area_m2" data-id="${x.id}" value="${x.area_m2!=null?x.area_m2:''}" placeholder="м²" style="width:82px;"></div></td>
                   <td style="min-width:180px;">${hotelContactCell(x)}</td>
                   <td><button class="btn btn-sm ${x.in_service===false?'':'btn-ghost'}" data-action="hotel-toggle-active" data-id="${x.id}" data-val="${x.in_service===false?1:0}">${x.in_service===false?'Включить':'В эксплуатации'}</button></td>
                   <td><button class="btn btn-sm btn-ghost btn-danger" data-action="hotel-delete" data-id="${x.id}">Удалить</button></td>
@@ -7125,6 +7341,15 @@
                   ${cost.invoiceCount ? h`<div class="cost-summary-item"><span class="cost-summary-item-label">из них по счетам</span><span class="cost-summary-item-value">${fmt(cost.invoiceSum)} ₸ <span class="count">(${cost.invoiceCount})</span></span></div>` : ""}
                   ${cost.cashCount ? h`<div class="cost-summary-item"><span class="cost-summary-item-label">из них наличными</span><span class="cost-summary-item-value">${fmt(cost.cashSum)} ₸ <span class="count">(${cost.cashCount})</span></span></div>` : ""}
                 </div>` : ""}
+                ${(function(){
+                  if(isClientRole()) return "";
+                  var ov = ticketOverheadShare(t).share;
+                  if(!(ov>0)) return "";
+                  return h`<div class="cost-summary-breakdown" data-cost="overhead">
+                    <div class="cost-summary-item"><span class="cost-summary-item-label">накладные (распределённые) ${infoTip("Доля накладных расходов компании, приходящаяся на эту заявку: каждый её расход × процент накладных того месяца (накладные ÷ прямые расходы месяца), см. «Финансы → Отчёты».")}</span><span class="cost-summary-item-value">${fmt(ov)} ₸</span></div>
+                    <div class="cost-summary-item"><span class="cost-summary-item-label">полная стоимость</span><span class="cost-summary-item-value"><b>${fmt(cost.total+ov)} ₸</b></span></div>
+                  </div>`;
+                })()}
                 ${cost.missingAmountCount ? h`<div class="cost-summary-warn">⚠ ${cost.missingAmountCount===1?'По одному отмеченному «оплачено» счёту':'По '+cost.missingAmountCount+' отмеченным «оплачено» счетам'} ещё не указана сумма (или доля этой заявки) в «Реестре платежей» — сюда пока не включено.</div>` : ""}
               </div>
             </div>`;
@@ -7695,6 +7920,7 @@
       // остаётся рядом для нестандартного периода.
       if(action==="report-period-preset"){ state.reportPeriodDays = Number(actionEl.getAttribute("data-value")) || 7; render(); return; }
       if(action==="reports-month"){ state.reportsMonth = actionEl.getAttribute("data-value"); render(); return; }
+      if(action==="reports-export"){ downloadReportCsv(); return; }
       if(action==="reports-vat"){ state.reportsVat = actionEl.getAttribute("data-value")==="gross" ? "gross" : "net"; render(); return; }
       if(action==="import-commit") return commitImport();
       if(action==="import-reset") return resetImport();
