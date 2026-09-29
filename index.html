@@ -634,7 +634,13 @@
   // «Активен/Отключён» (уже существовал для сотрудников) для «Заказчика»
   // реально закрывает вход на сайт, а не просто убирает из списков — см.
   // проверку "role===\"customer\" && active===false" в render() ниже.
-  var ROLE_LABEL = {dispatcher:"Администратор", specialist:"Гл. инженер", head:"Руководитель", warehouse:"Снабжение", finance:"Финансист", operator:"Диспетчер", customer:"Заказчик", pending:"Ожидает назначения роли"};
+  // 0.4.8 (по просьбе Антона): роль "customer" в интерфейсе теперь называется
+  // «Клиент» (раньше «Заказчик») — само значение роли в базе (role="customer")
+  // не меняется, меняется только подпись, которую видит владелец в «Команде»/
+  // «Правах» и т.д. См. isClientRole()/hotelAllowedForMe() ниже — область
+  // видимости этой роли теперь и правда ограничена «своими» объектами, а не
+  // только раньше это подразумевалось названием.
+  var ROLE_LABEL = {dispatcher:"Администратор", specialist:"Гл. инженер", head:"Руководитель", warehouse:"Снабжение", finance:"Финансист", operator:"Диспетчер", customer:"Клиент", pending:"Ожидает назначения роли"};
   // 0.4.4 (по просьбе Антона): «Администратор может быть только один — это
   // Антон, и он устанавливает права для всех». До этой версии права были
   // ролевой моделью (ROLE_NAV) + необязательными персональными добавками
@@ -664,6 +670,12 @@
     ["team","Команда"], ["parts","Склад ЗИП"], ["import","Импорт из c-lector"],
     ["registry","Реестр платежей"], ["cashexpenses","Наличные расходы"],
     ["overhead","Накладные расходы"],
+    // 0.4.8 (по просьбе Антона, п.3): «Отчёты» — четвёртая вкладка «Финансов»,
+    // сколько потрачено в месяц по каждому объекту (см. viewReports/
+    // buildFinanceReport). У «Клиента» этого пункта нет по умолчанию (см.
+    // ROLE_NAV.customer выше) — владелец включает его лично через «Права»,
+    // как и просил Антон ("администратор выставит права").
+    ["reports","Отчёты"],
     ["crews","Исполнители"], ["systemdefects","Системный брак"],
     // 0.3.7, п.4: «Активность» раньше проверялась отдельным хардкодом
     // (role==="dispatcher"), в обход extra_views — с 0.4.4 это обычный пункт
@@ -693,18 +705,22 @@
     // никогда не открывалась (отдельная явная проверка в старом navAllowed) —
     // сохраняем это же поведение по умолчанию явным ALL_VIEWS минус "activity".
     head: ALL_VIEWS.filter(function(v){ return v!=="activity"; }),
-    // «Заказчик» (0.2.8, расширено в 0.2.9) — внешний человек со стороны
-    // отеля/клиента, видит «Дашборд», «Заявки», «Карту» и «Отели» (по просьбе
-    // Антона) и намеренно НЕ видит «Команду»: ни к чему показывать внешнему
-    // человеку список сотрудников и их роли, да и раз "Команда" — единственное
-    // место назначения ролей, лишний повод не пускать туда роль, которую сам
-    // себе никто, кроме владельца, назначить не может. Доступ к «Заявкам»
-    // теперь настоящий (открытие карточки больше не блокируется, см. клик по
-    // "openTicket" и render() ниже) — раз этот пункт меню показывается, он
-    // должен реально работать.
+    // «Клиент» (0.2.8, расширено в 0.2.9; переименован из «Заказчик» в 0.4.8) —
+    // внешний человек со стороны отеля/клиента, видит «Дашборд», «Заявки», «Карту»
+    // и «Отели» (по просьбе Антона) и намеренно НЕ видит «Команду»: ни к чему
+    // показывать внешнему человеку список сотрудников и их роли, да и раз "Команда" —
+    // единственное место назначения ролей, лишний повод не пускать туда роль,
+    // которую сам себе никто, кроме владельца, назначить не может. Доступ к
+    // «Заявкам» теперь настоящий (открытие карточки больше не блокируется, см.
+    // клик по "openTicket" и render() ниже) — раз этот пункт меню показывается,
+    // он должен реально работать.
     // 0.3.6: «Карта» убрана отсюда — она больше не отдельный пункт меню,
-    // а часть «Дашборда» (см. viewDashboard), который у «Заказчика» и так уже
+    // а часть «Дашборда» (см. viewDashboard), который у «Клиента» и так уже
     // есть в списке ниже.
+    // 0.4.8 (по просьбе Антона): «Отчёты» НЕ добавлены сюда по умолчанию —
+    // «Клиент» видит их, только если владелец лично включит этот пункт в
+    // «Правах» для конкретного человека (см. PERMISSION_VIEWS ниже,
+    // "администратор выставит права").
     customer: ["dashboard","tickets","hotels"],
     // «Ожидает назначения роли» (0.2.9) — роль по умолчанию для только что
     // вошедшего человека (см. supabase_schema.sql), пока Администратор
@@ -731,7 +747,9 @@
     // СЕРВИСу теперь встроен прямо в «Дашборд» (см. viewDashboard), который
     // доступен всем ролям, так что видимость отчёта больше не завязана на роль
     // Финансиста отдельно.
-    finance: ["dashboard","registry","cashexpenses","overhead","team"],
+    // 0.4.8: "reports" добавлен сюда же — Финансисту нужен отчёт о тратах по
+    // объектам за месяц не меньше, чем сам реестр/наличные/накладные.
+    finance: ["dashboard","registry","cashexpenses","overhead","reports","team"],
     // «Диспетчер» (0.2.10) — новая роль без своего готового набора разделов:
     // по просьбе Антона она пустая по умолчанию, а какие разделы видит
     // конкретный диспетчер, владелец расставляет персонально через «Права» в
@@ -797,6 +815,37 @@
     }
     return "dashboard";
   }
+  // 0.4.8 (по просьбе Антона, п.2): «Клиент» видит заявки/отчёты/отели только
+  // по «своим» объектам, а не по всем сразу, как раньше. «Свои» объекты —
+  // список id отелей в profiles.client_hotel_ids (int[], см.
+  // add-0.4.8-client-role.sql), который владелец заполняет в «Команде»
+  // (см. openClientHotelsModal ниже). Пусто = ни одного объекта ещё не
+  // назначено — «Клиент» пока не видит вообще ничего (честный пустой экран,
+  // а не молчаливый доступ ко всему).
+  function isClientRole(){ return !!(state.me && state.me.role==="customer"); }
+  function myClientHotelIds(){
+    var ids = state.me && state.me.client_hotel_ids;
+    return Array.isArray(ids) ? ids.map(Number) : [];
+  }
+  // Единая проверка "виден ли этому человеку данный отель" — true для всех
+  // ролей, кроме «Клиента» (для него — только если id входит в его список).
+  // Используется и для списка заявок, и для «Отелей», и для карты, и для
+  // «Отчётов» (см. getFilteredTicketsList/viewHotels/ensureMap/buildFinanceReport).
+  function hotelAllowedForMe(hotelId){
+    if(!isClientRole()) return true;
+    return myClientHotelIds().indexOf(Number(hotelId)) > -1;
+  }
+  function visibleHotelsForMe(){
+    return isClientRole() ? state.hotels.filter(function(h){ return hotelAllowedForMe(h.id); }) : state.hotels;
+  }
+  function visibleTicketsForMe(){
+    return isClientRole() ? state.tickets.filter(function(t){ return hotelAllowedForMe(t.hotel_id); }) : state.tickets;
+  }
+  // «Клиент» — единственная роль, которая подаёт заявки сама, а не получает их
+  // из c-lector/импорта (см. openNewTicketModal ниже). Отдельной галочки в
+  // «Правах» на это нет по решению Антона — это прямая часть роли «Клиент»,
+  // а не то, что владелец включает/выключает по отдельности.
+  function canSubmitTicket(){ return isClientRole(); }
   // Право редактировать «Реестр платежей» (галочка «Оплачено», сумма, валюта,
   // НДС, способ оплаты — версия 0.2.2, п.3) и «Накладные расходы» (0.4.3, п.1
   // — см. решение Антона в 0.4.5: ближе к бухгалтерскому реестру компании).
@@ -3364,7 +3413,7 @@
     // "overhead" теперь можно выдать/не выдать отдельной галочкой в «Правах»
     // (см. PERMISSION_VIEWS), роль может иметь доступ к «Финансам», но не к
     // этой конкретной вкладке.
-    var tabs = [["registry","Реестр платежей"], ["cashexpenses","Наличные расходы"], ["overhead","Накладные расходы"]]
+    var tabs = [["registry","Реестр платежей"], ["cashexpenses","Наличные расходы"], ["overhead","Накладные расходы"], ["reports","Отчёты"]]
       .filter(function(t){ return navAllowed(t[0]); });
     return h`<div class="finance-tabs">${tabs.map(function(t){
       return h`<a href="#/${t[0]}" class="finance-tab ${active===t[0]?'active':''}">${t[1]}</a>`;
@@ -3826,7 +3875,60 @@
   // отчёт тоже виден всем, а не только Финансисту — это осознанное следствие
   // переноса, а не отдельное решение по ролям. Менее важные виджеты (зоны,
   // ручной снимок портфеля c-lector.ru) отодвинуты вниз, под эти два блока.
+  // 0.4.8, п.2 (по просьбе Антона): у «Клиента» свой, более простой дашборд —
+  // никакого внутреннего «Портфеля по c-lector.ru» и «Отчёта по СЕРВИСу
+  // заказчику» (это внутренние инструменты диспетчерской, само название
+  // второго — то, что диспетчер копирует и шлёт клиенту в Telegram, а не то,
+  // что клиент должен видеть здесь как есть), только «свои» объекты: счётчики,
+  // карта, «Требуют внимания», последние заявки и кнопка «Подать заявку».
+  function viewDashboardClient(){
+    var myTickets = visibleTicketsForMe();
+    var active = myTickets.filter(isActive);
+    var overdue = active.filter(function(t){ return deadlineInfo(t).overdue; });
+    var attention = active.filter(function(t){ return !!t.attention_flag; }).sort(function(a,b){
+      var da=deadlineInfo(a), dbi=deadlineInfo(b); var ma=da.ms==null?Infinity:da.ms, mb=dbi.ms==null?Infinity:dbi.ms; return ma-mb;
+    });
+    var recent = myTickets.slice().sort(function(a,b){ return (b.created_at||"").localeCompare(a.created_at||""); }).slice(0,10);
+    return h`
+      <div class="row-gap">
+        <div class="grid-kpi">
+          <div class="card kpi"><div class="kpi-label">Активных заявок</div><div class="kpi-value accent">${active.length}</div><div class="kpi-sub">по вашим объектам</div></div>
+          <div class="card kpi"><div class="kpi-label">Просрочено</div><div class="kpi-value ${overdue.length?'crit':''}">${overdue.length}</div><div class="kpi-sub">нарушен срок устранения</div></div>
+          <div class="card kpi" style="justify-content:center;"><button class="btn btn-primary btn-block" data-action="new-ticket">+ Подать заявку</button></div>
+        </div>
+        ${myTickets.length===0 ? h`<div class="card card-pad"><div class="empty-state"><b>Пока нет ни одного назначенного объекта</b>Обратитесь к диспетчеру — доступ к объектам назначается в «Команде».</div></div>` : viewMap()}
+        <div class="card card-pad">
+          <div class="section-title">Требуют внимания</div>
+          ${attention.length===0 ? h`<div class="empty-state"><b>Нет заявок с пометкой «особое внимание»</b></div>` : h`
+          <div class="table-wrap"><table><thead><tr><th>№ c-lector</th><th>Отель</th><th>Описание</th><th>Статус</th><th>Срок</th></tr></thead><tbody>
+            ${attention.map(function(t){ var hotel=hotelById(t.hotel_id); var di=deadlineInfo(t);
+              return h`<tr data-open-ticket="${t.id}" ${t.attention_flag?'class="attn-row"':''}>
+                <td class="mono">${attentionBadge(t)}${t.external_ref? escapeHtml(t.external_ref) : '<span class="muted">—</span>'}</td>
+                <td><span class="ttl">№${hotel.id} ${hotel.name}</span></td>
+                <td>${escapeHtml(displayShort(t)).slice(0,54)}${displayShort(t).length>54?"…":""}</td>
+                <td>${t.external_status? externalStatusPill(t.external_status): statusPill(t.status)}</td>
+                <td style="${di.overdue?'color:var(--crit);font-weight:600;':(di.soon?'color:var(--warn);font-weight:600;':'')}" title="${escapeHtml(di.label)}">${di.dateLabel}</td>
+              </tr>`; }).join("")}
+          </tbody></table></div>`}
+        </div>
+        <div class="card card-pad">
+          <div class="section-title">Последние заявки</div>
+          ${recent.length===0 ? h`<div class="empty-state"><b>Заявок пока нет</b>Нажмите «Подать заявку» выше, чтобы отправить первую.</div>` : h`
+          <div class="table-wrap"><table><thead><tr><th>№ c-lector</th><th>Отель</th><th>Описание</th><th>Статус</th><th>Срок</th></tr></thead><tbody>
+            ${recent.map(function(t){ var hotel=hotelById(t.hotel_id); var di=deadlineInfo(t);
+              return h`<tr data-open-ticket="${t.id}">
+                <td class="mono">${t.external_ref? escapeHtml(t.external_ref) : '<span class="muted">—</span>'}</td>
+                <td><span class="ttl">№${hotel.id} ${hotel.name}</span></td>
+                <td>${escapeHtml(displayShort(t)).slice(0,54)}${displayShort(t).length>54?"…":""}</td>
+                <td>${t.external_status? externalStatusPill(t.external_status): statusPill(t.status)}</td>
+                <td style="${di.overdue?'color:var(--crit);font-weight:600;':(di.soon?'color:var(--warn);font-weight:600;':'')}" title="${escapeHtml(di.label)}">${di.dateLabel}</td>
+              </tr>`; }).join("")}
+          </tbody></table></div>`}
+        </div>
+      </div>`;
+  }
   function viewDashboard(){
+    if(isClientRole()) return viewDashboardClient();
     var active = state.tickets.filter(isActive);
     var overdue = active.filter(function(t){ return deadlineInfo(t).overdue; });
     var closedWeek = closedSinceLastWeek();
@@ -3950,7 +4052,10 @@
     // булевыми чекбоксами, поэтому здесь фильтруем по любому "истинному" значению.
     var activeTagKeys = Object.keys(f.tagFilters).filter(function(k){ return !!f.tagFilters[k]; });
     var q = normalizeForMatch(f.q||"");
-    var baseFiltered = state.tickets.filter(function(t){
+    // 0.4.8, п.2: «Клиент» видит только заявки по «своим» объектам (см.
+    // visibleTicketsForMe/hotelAllowedForMe) — для всех остальных ролей это
+    // просто state.tickets без изменений.
+    var baseFiltered = visibleTicketsForMe().filter(function(t){
       if(f.attentionOnly && !t.attention_flag) return false;
       if(f.statusList.length && f.statusList.indexOf(ticketStatusLabel(t))===-1) return false;
       if(f.zone && String(t.zone)!==f.zone) return false;
@@ -4097,11 +4202,12 @@
           ${f.caseTypeList.length ? h`<a href="#" data-action="clear-case-filter" style="font-size:12px;">сбросить</a>` : ""}
         </div>
         <select data-filter="zone"><option value="">Все зоны</option>${[1,2,3].map(function(z){return h`<option value="${z}" ${f.zone===String(z)?'selected':''}>Зона ${z}</option>`;}).join("")}</select>
-        <select data-filter="hotel"><option value="">Все отели</option>${state.hotels.filter(function(x){return x.in_service;}).map(function(x){return h`<option value="${x.id}" ${f.hotel===String(x.id)?'selected':''}>№${x.id} ${x.name}</option>`;}).join("")}</select>
+        <select data-filter="hotel"><option value="">Все отели</option>${visibleHotelsForMe().filter(function(x){return x.in_service;}).map(function(x){return h`<option value="${x.id}" ${f.hotel===String(x.id)?'selected':''}>№${x.id} ${x.name}</option>`;}).join("")}</select>
         <input type="text" data-filter="q" value="${escapeHtml(f.q||"")}" placeholder="Поиск по описанию или № заявки…" style="min-width:220px;">
         <div class="chip-toggle"><label><input type="checkbox" data-filter-checkbox="showClosed" ${f.showClosed?'checked':''}> Показывать закрытые/отклонённые/удалённые из c-lector</label></div>
         <div class="chip-toggle"><label><input type="checkbox" data-filter-checkbox="attentionOnly" ${f.attentionOnly?'checked':''}> Только с пометкой «особое внимание»</label></div>
         <div class="chip-toggle"><label><input type="checkbox" data-filter-checkbox="systemDefectOnly" ${f.systemDefectOnly?'checked':''}> Только системный брак</label></div>
+        ${canSubmitTicket() ? h`<button class="btn btn-sm btn-primary" data-action="new-ticket">+ Подать заявку</button>` : ""}
         <button class="btn btn-sm" data-action="tickets-export" ${list.length===0?'disabled':''}>Экспорт в Excel</button>
         <span class="muted" style="margin-left:auto;">${list.length} заявок${(!f.showClosed && hiddenClosedCount>0) ? h` <span title="Закрытые, отклонённые и удалённые из c-lector скрыты по умолчанию">(скрыто: ${hiddenClosedCount})</span>` : ""}</span>
       </div>
@@ -4265,6 +4371,7 @@
                 </td>
                 ${owner ? h`<td style="white-space:nowrap;">
                   <button class="btn btn-sm btn-ghost" data-action="edit-permissions" data-id="${m.id}" title="Полный список разделов и прав этого человека — можно свободно включать и выключать что угодно, даже то, что обычно даёт роль">Права</button>
+                  ${m.role==="customer" ? h`<button class="btn btn-sm btn-ghost" data-action="edit-client-hotels" data-id="${m.id}" title="Какие объекты видит этот «Клиент» — заявки, отели, карта и отчёты ограничены только выбранными">Объекты${(m.client_hotel_ids&&m.client_hotel_ids.length)?(' ('+m.client_hotel_ids.length+')'):' (0)'}</button>` : ''}
                   ${isSelf?'':h`<button class="btn btn-sm btn-ghost btn-danger" data-action="profile-delete" data-id="${m.id}" data-label="${escapeHtml(m.name||m.email)}">Удалить</button>`}
                 </td>` : ''}
               </tr>`;
@@ -5006,19 +5113,26 @@
   // сумма привязанных к заявке наличных расходов (тоже любая категория).
   // Неоплаченные счета не считаются — это ещё не потраченные, а только
   // предстоящие деньги.
+  // 0.4.8 (по просьбе Антона): счета здесь считаются БЕЗ НДС (и с доп. налогом
+  // по способу оплаты, в KZT) — тем же invoiceAccountedKZTForTicket, что и
+  // «Итого по работе»/«Итого по материалам» в «Ходе работ» той же карточки.
+  // Раньше брали сырую сумму «как в документе» (invoiceRawAmountForTicket, с
+  // НДС), из-за чего «Затраты по заявке» расходились с итогами пунктов выше.
   function ticketCostTotal(t){
     var paidInvoices = (state.invoices||[]).filter(function(iv){ return iv.ticket_id===t.id && iv.paid; });
     // missingAmountCount — сколько из этих оплаченных счетов реально не
-    // добавили ничего к сумме (Сумма счёта и/или доля этой заявки ещё не
+    // добавили ничего к сумме (Сумма/НДС счёта и/или доля этой заявки ещё не
     // заполнены в «Реестре платежей») — чтобы не показывать в карточке
     // тихий, необъяснимый "0" вместо честного предупреждения (см. вывод
-    // ниже, у "Затраты по заявке").
-    var missingAmountCount = 0;
-    var invoiceSum = paidInvoices.reduce(function(s,iv){
-      var v = invoiceRawAmountForTicket(iv);
-      if(!v) missingAmountCount++;
-      return s + v;
-    }, 0);
+    // ниже, у "Затраты по заявке"). incomplete — курс НБ РК для счёта в
+    // иностранной валюте ещё грузится/не получен: сумма пока занижена.
+    var missingAmountCount = 0, incomplete = false, invoiceSum = 0;
+    paidInvoices.forEach(function(iv){
+      var acc = invoiceAccountedKZTForTicket(iv);
+      if(acc.state==="ok" && acc.value!=null) invoiceSum += acc.value;
+      else if(acc.state==="missing") missingAmountCount++;
+      else incomplete = true;
+    });
     var cashRows = cashExpensesFor(t);
     // 0.4.2 (по просьбе Антона, п.5): в затраты по заявке наличные расходы
     // заносятся не "как потрачено", а с учётом ставки доп.налога того же
@@ -5027,7 +5141,118 @@
     // есть, без наценки, так что для тех, у кого «Учтено в затратах» не
     // включалось (item 4), поведение не меняется.
     var cashSum = cashRows.reduce(function(s,ce){ return s + cashExpenseAccounted(ce); }, 0);
-    return { invoiceSum: invoiceSum, cashSum: cashSum, total: invoiceSum + cashSum, invoiceCount: paidInvoices.length, cashCount: cashRows.length, missingAmountCount: missingAmountCount };
+    return { invoiceSum: invoiceSum, cashSum: cashSum, total: invoiceSum + cashSum, invoiceCount: paidInvoices.length, cashCount: cashRows.length, missingAmountCount: missingAmountCount, incomplete: incomplete };
+  }
+  // 0.4.8, п.3 (по просьбе Антона: "доработай сам как правильно") — «Отчёты» в
+  // «Финансах»: сколько за месяц потрачено по каждому объекту (материалы +
+  // работа, счета + наличные — тем же способом, что и "Затраты по заявке"
+  // выше, чтобы цифры между разделами не расходились), плюс отдельно
+  // накладные расходы компании (они, в отличие от счетов/наличных, не привязаны
+  // ни к отелю, ни к заявке — см. overhead_expenses в supabase_schema.sql — так
+  // что делить их между объектами можно только предположительно/поровну,
+  // отсюда отдельный, явно подписанный итог, а не молчаливая "размазка" по
+  // объектам). monthKey — "YYYY-MM" (см. paidMonthKey/cashExpenseMonthKey).
+  // Счета учитываются по дате ОПЛАТЫ (iv.paid_at) и только оплаченные — так же,
+  // как в ticketCostTotal, — неоплаченный счёт ещё не реальный расход месяца.
+  function buildFinanceReport(monthKey){
+    var hotels = visibleHotelsForMe();
+    var byHotel = {}; // hotelId -> {materials, labor}
+    hotels.forEach(function(h){ byHotel[h.id] = {materials:0, labor:0}; });
+    function bucket(hotelId){
+      if(!byHotel[hotelId]) byHotel[hotelId] = {materials:0, labor:0};
+      return byHotel[hotelId];
+    }
+    (state.invoices||[]).forEach(function(iv){
+      if(paidMonthKey(iv)!==monthKey) return;
+      var t = (state.tickets||[]).find(function(x){ return x.id===iv.ticket_id; });
+      if(!t || !hotelAllowedForMe(t.hotel_id)) return;
+      var acc = invoiceAccountedKZTForTicket(iv);
+      if(acc.state!=="ok" || acc.value==null) return; // как и в ticketCostTotal — неполные счета молча не считаем, а не тихим нулём выдаём неверную сумму
+      var b = bucket(t.hotel_id);
+      if(iv.category==="crew") b.labor += acc.value; else b.materials += acc.value;
+    });
+    (state.cashExpenses||[]).forEach(function(ce){
+      if(cashExpenseMonthKey(ce)!==monthKey) return;
+      var hotelId = ce.hotel_id;
+      if(!hotelId && ce.ticket_id){
+        var t = (state.tickets||[]).find(function(x){ return x.id===ce.ticket_id; });
+        if(t) hotelId = t.hotel_id;
+      }
+      if(!hotelId || !hotelAllowedForMe(hotelId)) return; // ни к отелю, ни к заявке не привязан — отнести не к чему
+      var b = bucket(hotelId);
+      var amt = cashExpenseAccounted(ce);
+      if(ce.category==="crew") b.labor += amt; else b.materials += amt;
+    });
+    var rows = Object.keys(byHotel).map(function(hid){
+      var hotel = hotelById(Number(hid));
+      var b = byHotel[hid];
+      return { hotel: hotel, materials: b.materials, labor: b.labor, total: b.materials+b.labor };
+    }).filter(function(r){ return r.hotel; }).sort(function(a,b){ return b.total-a.total; });
+    var objectsTotal = rows.reduce(function(s,r){ return s+r.total; }, 0);
+    // Накладные — только для внутренних ролей (не привязаны к объектам, «Клиенту»
+    // показывать компанейские накладные расходы ни к чему).
+    var overheadTotal = 0, overheadByCategory = {};
+    if(!isClientRole()){
+      (state.overheadExpenses||[]).forEach(function(oe){
+        if((oe.date?String(oe.date).slice(0,7):null)!==monthKey) return;
+        var amt = Number(oe.amount)||0;
+        overheadTotal += amt;
+        overheadByCategory[oe.category||"—"] = (overheadByCategory[oe.category||"—"]||0) + amt;
+      });
+    }
+    return { rows: rows, objectsTotal: objectsTotal, overheadTotal: overheadTotal, overheadByCategory: overheadByCategory, grandTotal: objectsTotal+overheadTotal };
+  }
+  function viewReports(){
+    var monthKey = state.reportsMonth || new Date().toISOString().slice(0,7);
+    var report = buildFinanceReport(monthKey);
+    function fmt(n){ return (Number(n)||0).toLocaleString("ru-RU", {maximumFractionDigits:2}); }
+    // простая навигация месяц назад/вперёд той же строкой "YYYY-MM"
+    function shiftMonth(key, delta){
+      var parts = key.split("-"); var d = new Date(Number(parts[0]), Number(parts[1])-1+delta, 1);
+      return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0");
+    }
+    var overheadCats = Object.keys(report.overheadByCategory).sort();
+    return h`
+      ${financeTabs('reports')}
+      <div class="row-gap">
+        <div class="card card-pad">
+          <div class="section-title">Отчёты — расходы по объектам ${infoTip("Материалы и работа — оплаченные счета (без НДС, с доп. налогом, как в «Затратах по заявке») плюс наличные расходы, привязанные к объекту или к заявке этого объекта, за выбранный месяц. Накладные расходы компании (аренда, зарплата бэк-офиса и т.д.) не привязаны к конкретному объекту, поэтому показаны отдельным итогом, а не размазаны по строкам.")}</div>
+          <div class="report-period-row">
+            <button class="btn btn-sm" data-action="reports-month" data-value="${shiftMonth(monthKey,-1)}">← ${monthLabelRu(shiftMonth(monthKey,-1))}</button>
+            <span style="font-weight:600;">${monthLabelRu(monthKey)}</span>
+            <button class="btn btn-sm" data-action="reports-month" data-value="${shiftMonth(monthKey,1)}">${monthLabelRu(shiftMonth(monthKey,1))} →</button>
+          </div>
+        </div>
+        <div class="grid-kpi">
+          <div class="card kpi"><div class="kpi-label">По объектам за месяц</div><div class="kpi-value accent">${fmt(report.objectsTotal)}</div><div class="kpi-sub">материалы + работа, ₸</div></div>
+          ${!isClientRole() ? h`<div class="card kpi"><div class="kpi-label">Накладные расходы</div><div class="kpi-value">${fmt(report.overheadTotal)}</div><div class="kpi-sub">не привязаны к объекту, ₸</div></div>
+          <div class="card kpi"><div class="kpi-label">Итого за месяц</div><div class="kpi-value">${fmt(report.grandTotal)}</div><div class="kpi-sub">объекты + накладные, ₸</div></div>` : ''}
+        </div>
+        <div class="card card-pad">
+          <div class="section-title">По объектам</div>
+          ${report.rows.length===0 ? h`<div class="empty-state"><b>Нет расходов за этот месяц</b></div>` : h`
+          <div class="table-wrap"><table>
+            <thead><tr><th>Отель</th><th class="num">Материалы</th><th class="num">Работа</th><th class="num">Итого</th></tr></thead>
+            <tbody>${report.rows.map(function(r){
+              return h`<tr>
+                <td><span class="ttl">№${r.hotel.id} ${escapeHtml(r.hotel.name)}</span></td>
+                <td class="num mono">${fmt(r.materials)}</td>
+                <td class="num mono">${fmt(r.labor)}</td>
+                <td class="num mono"><b>${fmt(r.total)}</b></td>
+              </tr>`;
+            }).join("")}</tbody>
+            <tfoot><tr><td><b>Итого</b></td><td class="num mono"><b>${fmt(report.rows.reduce(function(s,r){return s+r.materials;},0))}</b></td><td class="num mono"><b>${fmt(report.rows.reduce(function(s,r){return s+r.labor;},0))}</b></td><td class="num mono"><b>${fmt(report.objectsTotal)}</b></td></tr></tfoot>
+          </table></div>`}
+        </div>
+        ${(!isClientRole() && overheadCats.length) ? h`<div class="card card-pad">
+          <div class="section-title">Накладные расходы по статьям</div>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Статья</th><th class="num">Сумма</th></tr></thead>
+            <tbody>${overheadCats.map(function(c){ return h`<tr><td>${escapeHtml(c)}</td><td class="num mono">${fmt(report.overheadByCategory[c])}</td></tr>`; }).join("")}</tbody>
+            <tfoot><tr><td><b>Итого</b></td><td class="num mono"><b>${fmt(report.overheadTotal)}</b></td></tr></tfoot>
+          </table></div>
+        </div>` : ''}
+      </div>`;
   }
   function addCashAdvance(data){
     if(!canEditCashExpenses()){ alert("Фиксировать выдачу наличных может только тот, кому выдано право «Наличные расходы»."); return false; }
@@ -5948,7 +6173,8 @@
     }
     mapMarkers.forEach(function(m){ mapInstance.removeLayer(m); });
     mapMarkers = [];
-    state.hotels.forEach(function(hotel){
+    // 0.4.8, п.2: «Клиент» видит на карте только свои объекты.
+    visibleHotelsForMe().forEach(function(hotel){
       if(hotel.lat==null || hotel.lng==null) return;
       var count = counts[hotel.id]||0;
       var marker = L.marker([hotel.lat, hotel.lng], { icon: mapMarkerIcon(count, hotel.name) }).addTo(mapInstance);
@@ -6111,7 +6337,29 @@
       ${x.client_contact_phone ? h`<a href="tel:${escapeHtml(x.client_contact_phone.replace(/[^\d+]/g,''))}" style="font-size:11px;">Позвонить</a>` : ""}
     </div>`;
   }
+  // 0.4.8, п.2: у «Клиента» «Отели» — только просмотр своих объектов, без
+  // возможности переименовать/удалить/включить-выключить чужой (или свой)
+  // отель и без карточки «Добавить отель». Остальным ролям поведение не
+  // меняется вообще (список/редактирование как раньше).
+  function viewHotelsClient(){
+    var list = visibleHotelsForMe().slice().sort(function(a,b){ return a.id-b.id; });
+    return h`<div class="card">
+      <div class="table-wrap"><table>
+        <thead><tr><th>№</th><th>Название</th><th>Зона</th><th>Срок реагирования</th></tr></thead>
+        <tbody>${list.length===0 ? h`<tr><td colspan="4"><div class="empty-state"><b>Пока нет ни одного назначенного объекта</b>Обратитесь к диспетчеру — доступ к объектам назначается в «Команде».</div></td></tr>` :
+          list.map(function(x){
+            return h`<tr>
+              <td class="mono muted">№${x.id}</td>
+              <td class="ttl">${escapeHtml(x.name)}</td>
+              <td>${x.zone?ZONE_LABEL[x.zone]:'—'}</td>
+              <td class="mono muted">${x.zone && ZONE_HOURS[x.zone] ? (ZONE_HOURS[x.zone]+" ч") : "—"}</td>
+            </tr>`;
+          }).join("")}
+        </tbody></table></div>
+    </div>`;
+  }
   function viewHotels(){
+    if(isClientRole()) return viewHotelsClient();
     var list = state.hotels.slice().sort(function(a,b){ return a.id-b.id; });
     return h`
       <div class="row-gap">
@@ -6640,11 +6888,11 @@
             if(!cost.invoiceCount && !cost.cashCount) return "";
             var fmt = function(n){ return (Number(n)||0).toLocaleString("ru-RU", {maximumFractionDigits:2}); };
             return h`<div>
-              <div class="section-title">Затраты по заявке ${infoTip("Сумма оплаченных счетов (Бригада + Материал) и наличных расходов, привязанных к этой заявке. Неоплаченные счета сюда не входят — деньги ещё не потрачены. Если прорабу, оплатившему расход, в «Финансы → Наличные расходы → Выдачи» указан способ учёта («Учтено в затратах»), сумма расхода досчитывается с наценкой по его ставке (напр. нал. 30%: 1000 ₸ расхода войдёт сюда как 1429 ₸) — раздел «Наличные расходы» при этом продолжает показывать сумму как есть, реально оплаченную.")}</div>
+              <div class="section-title">Затраты по заявке ${infoTip("Сумма оплаченных счетов (Бригада + Материал, без НДС, с доп. налогом по способу оплаты — как в «Итого по работе»/«Итого по материалам» выше) и наличных расходов, привязанных к этой заявке. Неоплаченные счета сюда не входят — деньги ещё не потрачены. Если прорабу, оплатившему расход, в «Финансы → Наличные расходы → Выдачи» указан способ учёта («Учтено в затратах»), сумма расхода досчитывается с наценкой по его ставке (напр. нал. 30%: 1000 ₸ расхода войдёт сюда как 1429 ₸) — раздел «Наличные расходы» при этом продолжает показывать сумму как есть, реально оплаченную.")}</div>
               <div class="cost-summary">
                 <div class="cost-summary-total">
                   <span class="cost-summary-total-label">Итого потрачено</span>
-                  <span class="cost-summary-total-value">${fmt(cost.total)} ₸</span>
+                  <span class="cost-summary-total-value">${fmt(cost.total)} ₸${cost.incomplete?' <span style="font-size:11px;font-weight:600;color:var(--warn);white-space:normal;">(не все суммы учтены)</span>':''}</span>
                 </div>
                 ${(cost.invoiceCount || cost.cashCount) ? h`<div class="cost-summary-breakdown">
                   ${cost.invoiceCount ? h`<div class="cost-summary-item"><span class="cost-summary-item-label">из них по счетам</span><span class="cost-summary-item-value">${fmt(cost.invoiceSum)} ₸ <span class="count">(${cost.invoiceCount})</span></span></div>` : ""}
@@ -6763,6 +7011,108 @@
       var newExtra = PERMISSION_VIEWS.filter(function(v){ return fd.get("view_"+v[0]); }).map(function(v){ return v[0]; });
       updateProfile(userId, {extra_views:newExtra, can_edit_registry: !!fd.get("editRegistry"), can_edit_cash_expenses: !!fd.get("editCashExpenses"), can_delete_ticket: !!fd.get("deleteTicket")});
       closeModal();
+    });
+  }
+
+  // 0.4.8, п.2 (по просьбе Антона): какие объекты видит конкретный «Клиент» —
+  // заявки/отели/карта/отчёты этого человека ограничены только отмеченными
+  // здесь отелями (см. hotelAllowedForMe/client_hotel_ids). Пусто = ни одного
+  // объекта пока не назначено — «Клиент» видит честный пустой экран, а не
+  // все объекты по умолчанию.
+  function openClientHotelsModal(userId){
+    var m = state.profiles.find(function(p){ return p.id===userId; });
+    if(!m) return;
+    var current = (m.client_hotel_ids||[]).map(Number);
+    var hotels = state.hotels.slice().sort(function(a,b){ return a.id-b.id; });
+    openModal(h`
+      <div class="modal" data-stop style="width:460px;">
+        <div class="modal-head"><h2>Объекты — ${escapeHtml(m.name||m.email)}</h2><button class="btn btn-ghost" data-close-modal>✕</button></div>
+        <form id="client-hotels-form">
+          <div class="modal-body">
+            <div class="helptext" style="margin-bottom:12px;">«Клиент» видит заявки, отели, карту и (если включено в «Правах») отчёты только по отмеченным ниже объектам.</div>
+            ${hotels.length===0 ? h`<div class="muted" style="font-size:13px;">Отелей пока нет.</div>` : h`<div class="chip-toggle" style="gap:8px;flex-direction:column;align-items:flex-start;">
+              ${hotels.map(function(x){
+                return h`<label><input type="checkbox" name="hotel_${x.id}" ${current.indexOf(x.id)>-1?'checked':''}> №${x.id} ${escapeHtml(x.name)}</label>`;
+              }).join("")}
+            </div>`}
+          </div>
+          <div class="modal-foot"><button type="button" class="btn" data-close-modal>Отмена</button><button type="submit" class="btn btn-primary">Сохранить</button></div>
+        </form>
+      </div>`);
+    document.getElementById("client-hotels-form").addEventListener("submit", function(e){
+      e.preventDefault();
+      var fd = new FormData(e.target);
+      var newIds = hotels.filter(function(x){ return fd.get("hotel_"+x.id); }).map(function(x){ return x.id; });
+      updateProfile(userId, {client_hotel_ids:newIds});
+      closeModal();
+    });
+  }
+
+  // 0.4.8, п.2 (по просьбе Антона): первая в приложении форма, через которую
+  // заявку заводит не диспетчер (импорт/вставка из c-lector), а сам «Клиент» —
+  // минимальный набор полей (отель, локация, описание, фото), как решил
+  // Антон. Зона (срок реагирования) и группа критичности не спрашиваются у
+  // клиента — заводятся автоматически (зона — от выбранного отеля, группа —
+  // «средняя», дальше при необходимости меняются диспетчером). source:"customer"
+  // — чтобы такие заявки было видно отдельно от c-lector/ручного импорта
+  // (см. displayShort/statusPill и т.п. — там это отдельно не подсвечивается,
+  // но поле в базе сохраняется на случай, если понадобится фильтр/отчёт).
+  function openNewTicketModal(){
+    var hotels = visibleHotelsForMe().filter(function(h){ return h.in_service; });
+    openModal(h`
+      <div class="modal" data-stop style="width:480px;">
+        <div class="modal-head"><h2>Подать заявку</h2><button class="btn btn-ghost" data-close-modal>✕</button></div>
+        <form id="new-ticket-form">
+          <div class="modal-body">
+            ${hotels.length===0 ? h`<div class="banner">Вам пока не назначен ни один объект — обратитесь к диспетчеру.</div>` : h`
+            <div class="field"><label>Отель</label>
+              <select name="hotel_id" required>
+                <option value="">— выберите —</option>
+                ${hotels.map(function(x){ return h`<option value="${x.id}">№${x.id} ${escapeHtml(x.name)}</option>`; }).join("")}
+              </select>
+            </div>
+            <div class="field"><label>Локация (комната/этаж, необязательно)</label><input type="text" name="location" placeholder="напр. номер 214"></div>
+            <div class="field"><label>Описание проблемы</label><textarea name="description" rows="4" required placeholder="Опишите, что случилось"></textarea></div>
+            <div class="field"><label>Фото (необязательно)</label><input type="file" name="photos" accept="image/*" multiple></div>
+            `}
+          </div>
+          <div class="modal-foot"><button type="button" class="btn" data-close-modal>Отмена</button>${hotels.length? h`<button type="submit" class="btn btn-primary">Отправить</button>` : ''}</div>
+        </form>
+      </div>`);
+    if(hotels.length===0) return;
+    document.getElementById("new-ticket-form").addEventListener("submit", function(e){
+      e.preventDefault();
+      var form = e.target;
+      var fd = new FormData(form);
+      var hotelId = Number(fd.get("hotel_id"));
+      var hotel = hotelById(hotelId);
+      var description = (fd.get("description")||"").trim();
+      if(!hotel || !hotelAllowedForMe(hotelId)){ alert("Выберите отель из списка."); return; }
+      if(!description){ alert("Опишите проблему."); return; }
+      // ВАЖНО: не называть эту переменную "location" — иначе она затенит
+      // глобальный window.location, который нужен ниже для перехода на
+      // карточку новой заявки (уже наступали на эти грабли в других местах).
+      var locationText = (fd.get("location")||"").trim();
+      var files = Array.from((form.elements.photos && form.elements.photos.files) || []);
+      var submitBtn = form.querySelector('button[type="submit"]'); if(submitBtn) submitBtn.disabled = true;
+      sb.from("tickets").insert({
+        hotel_id: hotelId, zone: hotel.zone||null, ticket_group: 2,
+        description: description, location: locationText||null,
+        status: "new", source: "customer", created_by: myLabel()
+      }).select().then(function(res){
+        if(res.error) throw res.error;
+        var ticket = res.data && res.data[0];
+        if(ticket && files.length){
+          return Promise.all(files.map(function(f){ return uploadPhoto(ticket.id, f); })).then(function(){ return ticket; });
+        }
+        return ticket;
+      }).then(function(ticket){
+        closeModal();
+        if(ticket) window.location.hash = "#/tickets/"+ticket.id;
+      }).catch(function(err){
+        if(submitBtn) submitBtn.disabled = false;
+        alert("Не удалось отправить заявку: " + (err&&err.message?err.message:err));
+      });
     });
   }
 
@@ -6939,7 +7289,7 @@
     }
     if(!navAllowed(state.route.view)){ state.route = {view: firstAllowedView(), id:null}; }
     var titleMap = {dashboard:"Дашборд", tickets:"Заявки", team:"Команда", parts:"Склад ЗИП", "import":"Заявки · Импорт из c-lector", registry:"Финансы · Реестр платежей", cashexpenses:"Финансы · Наличные расходы", overhead:"Финансы · Накладные расходы", crews:"Исполнители", hotels:"Отели", systemdefects:"Системный брак", activity:"Активность"};
-    var body = state.route.view==="tickets"?viewTickets(): state.route.view==="team"?viewTeam(): state.route.view==="parts"?viewParts(): state.route.view==="import"?viewImport(): state.route.view==="registry"?viewRegistry(): state.route.view==="cashexpenses"?viewCashExpenses(): state.route.view==="overhead"?viewOverhead(): state.route.view==="crews"?viewCrews(): state.route.view==="hotels"?viewHotels(): state.route.view==="systemdefects"?viewSystemDefects(): state.route.view==="activity"?viewActivity(): viewDashboard();
+    var body = state.route.view==="tickets"?viewTickets(): state.route.view==="team"?viewTeam(): state.route.view==="parts"?viewParts(): state.route.view==="import"?viewImport(): state.route.view==="registry"?viewRegistry(): state.route.view==="cashexpenses"?viewCashExpenses(): state.route.view==="overhead"?viewOverhead(): state.route.view==="reports"?viewReports(): state.route.view==="crews"?viewCrews(): state.route.view==="hotels"?viewHotels(): state.route.view==="systemdefects"?viewSystemDefects(): state.route.view==="activity"?viewActivity(): viewDashboard();
 
     // 0.2.17: «Импорт из c-lector» больше не отдельный пункт меню — он почти
     // всё подтягивает автоматически, отдельного раздела для него не нужно.
@@ -7105,6 +7455,7 @@
       // вместо ручного ввода числа каждый раз; ручной ввод (#report-period-days)
       // остаётся рядом для нестандартного периода.
       if(action==="report-period-preset"){ state.reportPeriodDays = Number(actionEl.getAttribute("data-value")) || 7; render(); return; }
+      if(action==="reports-month"){ state.reportsMonth = actionEl.getAttribute("data-value"); render(); return; }
       if(action==="import-commit") return commitImport();
       if(action==="import-reset") return resetImport();
       if(action==="crew-performer-add"){
@@ -7306,6 +7657,8 @@
       if(action==="profile-toggle-active"){ if(!isOwner()) return; updateProfile(id, {active: actionEl.getAttribute("data-val")==="1"}); return; }
       if(action==="profile-delete"){ if(!isOwner()) return; deleteProfile(id, actionEl.getAttribute("data-label")||"—"); return; }
       if(action==="edit-permissions"){ if(!isOwner()) return; openPermissionsModal(id); return; }
+      if(action==="edit-client-hotels"){ if(!isOwner()) return; openClientHotelsModal(id); return; }
+      if(action==="new-ticket"){ if(!canSubmitTicket()) return; openNewTicketModal(); return; }
       if(action==="attention-toggle"){
         var turnOn = actionEl.getAttribute("data-val")==="1";
         var note = turnOn ? (prompt("Комментарий (необязательно) — например, кто обратил внимание:")||"") : "";
