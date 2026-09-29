@@ -5190,6 +5190,18 @@
     var parts = key.split("-"); var d = new Date(Number(parts[0]), Number(parts[1])-1+delta, 1);
     return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0");
   }
+  // Дата закрытия заявки для динамики: closed_at (закрыта у нас) либо момент
+  // перехода в «Выполнена» из истории статусов c-lector (у таких заявок
+  // closed_at нет). Отклонённые и заявки без даты закрытия не считаются.
+  function ticketClosedDate(t){
+    if(t.status==="rejected" || /отклон|отказ/i.test(t.external_status||"")) return null;
+    if(t.closed_at) return t.closed_at;
+    var hist = t.clector_raw && t.clector_raw.status_history;
+    if(Array.isArray(hist)){
+      for(var i=hist.length-1;i>=0;i--){ if(hist[i].to_status==="finished" && hist[i].changed_at) return hist[i].changed_at; }
+    }
+    return null;
+  }
   // 0.4.11: плоский список ПРЯМЫХ расходов (оплаченные счета + наличные) всех
   // месяцев — общий для отчёта и для строки «Накладные» в карточке заявки.
   function collectReportDirect(vatMode){
@@ -5357,9 +5369,17 @@
       r.perRoom = (r.avg!=null && r.rooms) ? r.avg/r.rooms : null;
       r.perM2 = (r.avg!=null && r.area) ? r.avg/r.area : null;
     });
+    // «Всего по заявке» — за ВСЁ время (как «Итого потрачено»/«Полная
+    // стоимость» в карточке заявки), в отличие от колонок отчёта, которые —
+    // только за выбранный месяц. Без этого «Топ-5 за месяц» выглядел как
+    // ошибка: сумма в топе меньше суммы в карточке, если часть расходов
+    // заявки пришлась на другой месяц.
+    var allRates = reportOverheadRates(direct, overheadByMonth);
+    var lifeByTicket = {};
+    direct.forEach(function(e){ if(e.ticketId) lifeByTicket[e.ticketId] = (lifeByTicket[e.ticketId]||0) + e.kzt*(1+(allRates[e.month]||0)); });
     var ticketRows = Object.keys(byTicket).map(function(tid){
       var t = ticketMap[tid]; var d = byTicket[tid];
-      return { ticket:t, hotel:t?hotelById(t.hotel_id):null, direct:d, overhead:d*k, total:d*(1+k), done:t?isTicketDone(t):false };
+      return { ticket:t, hotel:t?hotelById(t.hotel_id):null, direct:d, overhead:d*k, total:d*(1+k), life:lifeByTicket[tid]||0, done:t?isTicketDone(t):false };
     }).filter(function(r){ return r.ticket; }).sort(function(a,b){ return b.total-a.total; });
 
     // Разбивка расходов по заявкам месяца: по категории заявки и по
@@ -5392,9 +5412,18 @@
     });
     oblig.rows = Object.keys(oblig.byHotel).map(function(hid){ return { hotel:hotelById(Number(hid)), sum:oblig.byHotel[hid].sum, count:oblig.byHotel[hid].count }; }).filter(function(r){ return r.hotel; }).sort(function(a,b){ return b.sum-a.sum; });
 
+    // Динамика заявок: сколько ПОДАНО (created_at) и сколько ЗАКРЫТО за месяц.
+    var dynIdx = {}; var dynamics = months.map(function(m, ix){ dynIdx[m.key] = ix; return { key:m.key, created:0, closed:0 }; });
+    visibleTicketsForMe().forEach(function(t){
+      var ck = t.created_at ? String(t.created_at).slice(0,7) : null;
+      if(ck && dynIdx[ck]!=null) dynamics[dynIdx[ck]].created++;
+      var dd = ticketClosedDate(t);
+      var dk = dd ? String(dd).slice(0,7) : null;
+      if(dk && dynIdx[dk]!=null) dynamics[dynIdx[dk]].closed++;
+    });
     var doneTotal = rows.reduce(function(s,r){ return s+r.doneCount; }, 0);
     return {
-      vatMode: vatMode, months: months, cur: cur, prev: prev, compare: compare, growth: growth,
+      dynamics: dynamics, vatMode: vatMode, months: months, cur: cur, prev: prev, compare: compare, growth: growth,
       rows: rows, ticketRows: ticketRows, currencies: currencies, caseRows: caseRows, perfRows: perfRows, oblig: oblig,
       directTotal: directTotal, overheadTotal: overheadTotal, overheadPct: overheadPct,
       overheadByCategory: overheadCatsInMonth, grandTotal: directTotal+overheadTotal, doneTotal: doneTotal
@@ -5423,10 +5452,14 @@
     });
     line([]);
     line(["По заявкам"]);
-    line(["Заявка","Отель","Категория","Исполнители","Прямые"].concat(withOv?["Накладные"]:[]).concat(["Итого"]));
+    line(["Заявка","Отель","Категория","Исполнители","Прямые"].concat(withOv?["Накладные"]:[]).concat(["Итого за месяц","Всего по заявке"]));
     report.ticketRows.forEach(function(r){
-      line(["№"+(r.ticket.external_ref||String(r.ticket.id).slice(0,8)), r.hotel?("№"+r.hotel.id+" "+r.hotel.name):"", r.ticket.case_type?(CASE_LABEL[r.ticket.case_type]||r.ticket.case_type):"", ticketPerformers(r.ticket).join(", "), n(r.direct)].concat(withOv?[n(r.overhead)]:[]).concat([n(withOv?r.total:r.direct)]));
+      line(["№"+(r.ticket.external_ref||String(r.ticket.id).slice(0,8)), r.hotel?("№"+r.hotel.id+" "+r.hotel.name):"", r.ticket.case_type?(CASE_LABEL[r.ticket.case_type]||r.ticket.case_type):"", ticketPerformers(r.ticket).join(", "), n(r.direct)].concat(withOv?[n(r.overhead)]:[]).concat([n(withOv?r.total:r.direct), n(r.life)]));
     });
+    line([]);
+    line(["Динамика заявок (12 месяцев)"]);
+    line(["Месяц","Подано","Закрыто"]);
+    report.dynamics.forEach(function(d){ line([monthLabelRu(d.key), d.created, d.closed]); });
     line([]);
     line(["По валютам счетов"]);
     line(["Валюта","В валюте платежа","Эквивалент, ₸","Записей"]);
@@ -5482,6 +5515,33 @@
       if(m.total>0) svg += '<text x="'+cx+'" y="'+(yBase-5)+'" text-anchor="middle" font-size="10.5" font-weight="'+(isSel?700:500)+'" fill="var(--ink-soft)">'+shortNum(m.total)+'</text>';
       svg += '<text x="'+cx+'" y="'+(H-20)+'" text-anchor="middle" font-size="11" font-weight="'+(isSel?700:500)+'" fill="var(--ink-soft)">'+shortM+'</text>';
       svg += '<text x="'+cx+'" y="'+(H-7)+'" text-anchor="middle" font-size="10" fill="var(--ink-faint)">'+yy+'</text>';
+      svg += '</g>';
+    });
+    return svg+'</svg>';
+  }
+  // Динамика заявок: по каждому из 12 месяцев два столбца — подано / закрыто.
+  function reportTicketsChartSvg(dyn, selectedKey){
+    var W = 720, H = 220, padL = 8, padR = 8, padT = 22, padB = 38;
+    var innerW = W-padL-padR, innerH = H-padT-padB;
+    var maxV = 0; dyn.forEach(function(d){ maxV = Math.max(maxV, d.created, d.closed); });
+    var slot = innerW/dyn.length, bw = Math.min(16, slot*0.34);
+    var names = ["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"];
+    var svg = '<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Динамика заявок по месяцам: подано и закрыто" style="width:100%;height:auto;max-height:260px;display:block;">';
+    svg += '<line x1="'+padL+'" y1="'+(padT+innerH)+'" x2="'+(W-padR)+'" y2="'+(padT+innerH)+'" stroke="var(--line)" stroke-width="1"/>';
+    dyn.forEach(function(d, i){
+      var cx = padL + slot*i + slot/2;
+      var isSel = d.key===selectedKey;
+      var hc = maxV>0 ? d.created/maxV*innerH : 0, hd = maxV>0 ? d.closed/maxV*innerH : 0;
+      var yb = padT+innerH;
+      svg += '<g data-action="reports-month" data-value="'+d.key+'" style="cursor:pointer;">';
+      svg += '<title>'+escapeHtml(monthLabelRu(d.key))+': подано '+d.created+', закрыто '+d.closed+'</title>';
+      svg += isSel ? '<rect x="'+(cx-slot/2+1)+'" y="'+(padT-16)+'" width="'+(slot-2)+'" height="'+(innerH+16+padB-2)+'" rx="6" fill="var(--accent-soft)"/>' : '<rect x="'+(cx-slot/2)+'" y="'+(padT-16)+'" width="'+slot+'" height="'+(innerH+16+padB-2)+'" fill="transparent"/>';
+      if(hc>0) svg += '<rect x="'+(cx-bw-1)+'" y="'+(yb-hc)+'" width="'+bw+'" height="'+hc+'" fill="var(--accent)"/>';
+      if(hd>0) svg += '<rect x="'+(cx+1)+'" y="'+(yb-hd)+'" width="'+bw+'" height="'+hd+'" fill="var(--ok)"/>';
+      if(d.created>0) svg += '<text x="'+(cx-bw/2-1)+'" y="'+(yb-hc-4)+'" text-anchor="middle" font-size="10" fill="var(--ink-soft)">'+d.created+'</text>';
+      if(d.closed>0) svg += '<text x="'+(cx+bw/2+1)+'" y="'+(yb-hd-4)+'" text-anchor="middle" font-size="10" fill="var(--ink-soft)">'+d.closed+'</text>';
+      svg += '<text x="'+cx+'" y="'+(H-20)+'" text-anchor="middle" font-size="11" font-weight="'+(isSel?700:500)+'" fill="var(--ink-soft)">'+names[Number(d.key.slice(5))-1]+'</text>';
+      svg += '<text x="'+cx+'" y="'+(H-7)+'" text-anchor="middle" font-size="10" fill="var(--ink-faint)">'+d.key.slice(2,4)+'</text>';
       svg += '</g>';
     });
     return svg+'</svg>';
@@ -5555,6 +5615,14 @@
             ${showOv ? h`<span><span style="display:inline-block;width:10px;height:10px;background:var(--warn);border-radius:2px;margin-right:5px;"></span>Накладные</span>` : ''}
           </div>
         </div>
+        <div class="card card-pad" data-report="dynamics">
+          <div class="section-title">Динамика заявок по месяцам ${infoTip("Сколько заявок подано (дата регистрации) и сколько закрыто (дата закрытия у нас или перехода в «Выполнена» в c-lector) за каждый из 12 месяцев. Отклонённые и заявки без даты закрытия не считаются закрытыми. Нажмите на столбец, чтобы открыть месяц.")}</div>
+          ${reportTicketsChartSvg(report.dynamics, monthKey)}
+          <div class="muted" style="font-size:12px;display:flex;gap:16px;flex-wrap:wrap;margin-top:6px;">
+            <span><span style="display:inline-block;width:10px;height:10px;background:var(--accent);border-radius:2px;margin-right:5px;"></span>Подано (за 12 мес: <b data-dyn="created">${report.dynamics.reduce(function(s,d){return s+d.created;},0)}</b>)</span>
+            <span><span style="display:inline-block;width:10px;height:10px;background:var(--ok);border-radius:2px;margin-right:5px;"></span>Закрыто (за 12 мес: <b data-dyn="closed">${report.dynamics.reduce(function(s,d){return s+d.closed;},0)}</b>)</span>
+          </div>
+        </div>
         <div class="card card-pad">
           <div class="section-title">По объектам — ${monthLabelRu(monthKey)}, ${vatLabel} ${infoTip("«Выполнено» — заявки объекта в статусе выполнена/закрыта, по которым в этом месяце были расходы либо которые закрыты в этом месяце. «Итого» = прямые + накладные"+(showOv?" (процент месяца)":"")+". «₸ на заявку» — итого ÷ выполнено.")}</div>
           ${report.rows.length===0 ? h`<div class="empty-state"><b>Нет расходов за этот месяц</b></div>` : h`
@@ -5586,8 +5654,8 @@
         </div>` : ''}
         ${report.ticketRows.length ? h`<div class="row-gap" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px;">
           <div class="card card-pad" data-report="top-tickets">
-            <div class="section-title">Топ-5 заявок по затратам</div>
-            <div class="table-wrap"><table><tbody>${report.ticketRows.slice(0,5).map(function(r){ return h`<tr><td><a href="#/tickets/${r.ticket.id}"><b>№${escapeHtml(String(r.ticket.external_ref||String(r.ticket.id).slice(0,8)))}</b></a> <span class="muted">${r.hotel?escapeHtml(r.hotel.name):''}</span></td><td class="num mono"><b>${fmt(showOv?r.total:r.direct)}</b></td></tr>`; }).join("")}</tbody></table></div>
+            <div class="section-title">Топ-5 заявок по затратам за ${monthLabelRu(monthKey)} ${infoTip("Слева — расходы по заявке именно за выбранный месяц; «всего» — за всё время (как «Полная стоимость» в карточке заявки). Если часть расходов заявки пришлась на другие месяцы, «за месяц» будет меньше «всего».")}</div>
+            <div class="table-wrap"><table><thead><tr><th>Заявка</th><th class="num">За месяц</th><th class="num">Всего</th></tr></thead><tbody>${report.ticketRows.slice().sort(function(a,b){ return (showOv?b.total-a.total:b.direct-a.direct); }).slice(0,5).map(function(r){ return h`<tr><td><a href="#/tickets/${r.ticket.id}"><b>№${escapeHtml(String(r.ticket.external_ref||String(r.ticket.id).slice(0,8)))}</b></a> <span class="muted">${r.hotel?escapeHtml(r.hotel.name):''}</span></td><td class="num mono"><b>${fmt(showOv?r.total:r.direct)}</b></td><td class="num mono muted">${fmt(r.life)}</td></tr>`; }).join("")}</tbody></table></div>
           </div>
           <div class="card card-pad" data-report="top-hotels">
             <div class="section-title">Топ-5 объектов по затратам</div>
@@ -5619,10 +5687,10 @@
             <tbody>${curKeys.map(function(c){ var x = report.currencies[c]; return h`<tr><td>${escapeHtml(c)}</td><td class="num mono">${fmt(x.orig)} ${REPORT_CUR_SYMBOL[c]||escapeHtml(c)}</td><td class="num mono">${fmt(x.kzt)}</td><td class="num mono">${x.count}</td></tr>`; }).join("")}</tbody>
           </table></div>
         </div>` : ''}
-        ${report.ticketRows.length ? h`<div class="card card-pad">
+        ${report.ticketRows.length ? h`<div class="card card-pad" data-report="tickets-month">
           <div class="section-title">По заявкам — ${monthLabelRu(monthKey)}, ${vatLabel} ${infoTip("Расходы месяца, привязанные к конкретной заявке."+(showOv?" К прямым расходам добавлен процент накладных этого месяца"+(report.overheadPct!=null?" (+"+fmtPct(report.overheadPct)+")":"")+".":""))}</div>
           <div class="table-wrap"><table>
-            <thead><tr><th>Заявка</th><th>Отель</th><th class="num">Прямые</th>${showOv?h`<th class="num">Накладные</th>`:''}<th class="num">Итого</th></tr></thead>
+            <thead><tr><th>Заявка</th><th>Отель</th><th class="num">Прямые</th>${showOv?h`<th class="num">Накладные</th>`:''}<th class="num">Итого за месяц</th><th class="num">Всего по заявке</th></tr></thead>
             <tbody>${report.ticketRows.slice(0,100).map(function(r){
               return h`<tr>
                 <td><a href="#/tickets/${r.ticket.id}"><b>№${escapeHtml(String(r.ticket.external_ref||String(r.ticket.id).slice(0,8)))}</b></a>${r.done?' <span class="muted" title="Заявка выполнена">✓</span>':''}</td>
@@ -5630,6 +5698,7 @@
                 <td class="num mono">${fmt(r.direct)}</td>
                 ${showOv?h`<td class="num mono">${fmt(r.overhead)}</td>`:''}
                 <td class="num mono"><b>${fmt(showOv?r.total:r.direct)}</b></td>
+                <td class="num mono muted">${fmt(r.life)}</td>
               </tr>`;
             }).join("")}</tbody>
           </table></div>
