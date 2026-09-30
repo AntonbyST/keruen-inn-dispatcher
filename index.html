@@ -1982,9 +1982,244 @@
   // платежей» показываются ВСЕ счета независимо от категории — категория нужна
   // только для группировки внутри карточки заявки.
   var INVOICE_CATEGORY_LABEL = { crew:"Бригада", materials:"Материал" };
+  // ---------- 0.4.18: сжатие файлов (по просьбе Антона: хранилище Supabase
+  // на бесплатном тарифе — 1 ГБ, файл 83 МБ не помещался) ----------
+  // • Фото/картинки при загрузке уменьшаются автоматически (до 2000 px по
+  //   длинной стороне, JPEG 80%), если так получается заметно меньше.
+  // • PDF от 3 МБ — по подтверждению: каждая страница отрисовывается
+  //   (pdf.js, подгружается только при необходимости) и собирается в новый PDF
+  //   из JPEG-страниц — сканы счетов/актов уменьшаются в 5–10 раз, но текст в
+  //   таком PDF перестаёт выделяться. Собственная сборка PDF — без jsPDF.
+  // • «Освободить место» (Профиль, только руководитель/администратор): список
+  //   самых тяжёлых файлов хранилища, выбранные сжимаются и заменяют оригинал
+  //   по тому же пути (после подтверждения).
+  var COMPRESS_PDF_MIN = 3*1024*1024, COMPRESS_IMG_MIN = 700*1024;
+  var PDFJS_BASE = "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.7.284/legacy/build/";
+  var pdfjsPromise = null;
+  function loadPdfJs(){
+    if(!pdfjsPromise){
+      pdfjsPromise = import(PDFJS_BASE + "pdf.min.mjs").then(function(m){
+        m.GlobalWorkerOptions.workerSrc = PDFJS_BASE + "pdf.worker.min.mjs";
+        return m;
+      }).catch(function(err){ pdfjsPromise = null; throw err; });
+    }
+    return pdfjsPromise;
+  }
+  function fmtMB(n){ return (n/1048576).toLocaleString("ru-RU", {minimumFractionDigits:1, maximumFractionDigits:1}) + " МБ"; }
+  function canvasToBytes(canvas, mime, q){
+    return new Promise(function(res, rej){
+      canvas.toBlob(function(b){ if(!b) return rej(new Error("toBlob")); b.arrayBuffer().then(function(ab){ res(new Uint8Array(ab)); }); }, mime, q);
+    });
+  }
+  // Минимальный PDF из JPEG-страниц (DCTDecode): без сторонних библиотек.
+  function buildPdfFromJpegs(pages){
+    var enc = new TextEncoder(), chunks = [], offsets = [], len = 0;
+    function push(x){ var u = (typeof x==="string") ? enc.encode(x) : x; chunks.push(u); len += u.length; }
+    function obj(n, body){ offsets[n] = len; push(n+" 0 obj\n"); if(typeof body==="string") push(body); else body(); push("\nendobj\n"); }
+    var total = 2 + pages.length*3;
+    push("%PDF-1.4\n%âãÏÓ\n");
+    obj(1, "<< /Type /Catalog /Pages 2 0 R >>");
+    var kids = pages.map(function(p,i){ return (3+i*3)+" 0 R"; }).join(" ");
+    obj(2, "<< /Type /Pages /Kids ["+kids+"] /Count "+pages.length+" >>");
+    pages.forEach(function(p, i){
+      var pg = 3+i*3, ct = pg+1, im = pg+2;
+      obj(pg, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 "+p.w.toFixed(2)+" "+p.h.toFixed(2)+"] /Resources << /XObject << /Im0 "+im+" 0 R >> >> /Contents "+ct+" 0 R >>");
+      var content = "q "+p.w.toFixed(2)+" 0 0 "+p.h.toFixed(2)+" 0 0 cm /Im0 Do Q";
+      obj(ct, "<< /Length "+content.length+" >>\nstream\n"+content+"\nendstream");
+      obj(im, function(){
+        push("<< /Type /XObject /Subtype /Image /Width "+p.pxW+" /Height "+p.pxH+" /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length "+p.jpeg.length+" >>\nstream\n");
+        push(p.jpeg); push("\nendstream");
+      });
+    });
+    var xrefAt = len;
+    var xr = "xref\n0 "+(total+1)+"\n0000000000 65535 f \n";
+    for(var n=1;n<=total;n++) xr += String(offsets[n]).padStart(10,"0")+" 00000 n \n";
+    push(xr + "trailer\n<< /Size "+(total+1)+" /Root 1 0 R >>\nstartxref\n"+xrefAt+"\n%%EOF\n");
+    var out = new Uint8Array(len), pos = 0;
+    chunks.forEach(function(c){ out.set(c, pos); pos += c.length; });
+    return out;
+  }
+  function compressPdfFile(file, onProgress){
+    return Promise.all([loadPdfJs(), readFileAsBuffer(file)]).then(function(r){
+      var pdfjs = r[0];
+      return pdfjs.getDocument({data: new Uint8Array(r[1])}).promise.then(function(doc){
+        var pages = [], n = doc.numPages;
+        function step(i){
+          if(i>n) return Promise.resolve();
+          if(onProgress) onProgress(i, n);
+          return doc.getPage(i).then(function(page){
+            var v1 = page.getViewport({scale:1});
+            var scale = Math.min(2.5, 1600/Math.max(v1.width, v1.height));
+            var vp = page.getViewport({scale:scale});
+            var canvas = document.createElement("canvas");
+            canvas.width = Math.max(1, Math.round(vp.width)); canvas.height = Math.max(1, Math.round(vp.height));
+            var ctx = canvas.getContext("2d");
+            ctx.fillStyle = "#fff"; ctx.fillRect(0,0,canvas.width,canvas.height);
+            return page.render({canvasContext: ctx, viewport: vp}).promise.then(function(){
+              return canvasToBytes(canvas, "image/jpeg", 0.68);
+            }).then(function(bytes){
+              pages.push({w:v1.width, h:v1.height, pxW:canvas.width, pxH:canvas.height, jpeg:bytes});
+              canvas.width = 0; canvas.height = 0; page.cleanup();
+            });
+          }).then(function(){ return step(i+1); });
+        }
+        return step(1).then(function(){
+          var bytes = buildPdfFromJpegs(pages);
+          try{ doc.destroy(); }catch(e){}
+          return new File([bytes], file.name, {type:"application/pdf"});
+        });
+      });
+    });
+  }
+  function compressImageFile(file, opts){
+    opts = opts || {};
+    var mime = opts.keepFormat ? (file.type==="image/png"?"image/png":(file.type==="image/webp"?"image/webp":"image/jpeg")) : "image/jpeg";
+    return createImageBitmap(file, {imageOrientation:"from-image"}).then(function(bmp){
+      var max = 2000, sc = Math.min(1, max/Math.max(bmp.width, bmp.height));
+      var canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(bmp.width*sc)); canvas.height = Math.max(1, Math.round(bmp.height*sc));
+      var ctx = canvas.getContext("2d");
+      if(mime==="image/jpeg"){ ctx.fillStyle = "#fff"; ctx.fillRect(0,0,canvas.width,canvas.height); }
+      ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+      try{ bmp.close(); }catch(e){}
+      return canvasToBytes(canvas, mime, 0.8).then(function(bytes){
+        canvas.width = 0; canvas.height = 0;
+        var name = file.name;
+        if(!opts.keepFormat) name = name.replace(/\.[^.]+$/, "") + ".jpg";
+        return new File([bytes], name, {type:mime});
+      });
+    });
+  }
+  function isPdfFile(f){ return f.type==="application/pdf" || /\.pdf$/i.test(f.name||""); }
+  function isImageFile(f){ return /^image\/(jpeg|png|webp)$/.test(f.type||"") ; }
+  var compressOverlayEl = null;
+  function showCompressOverlay(text){
+    if(!compressOverlayEl){
+      compressOverlayEl = document.createElement("div");
+      compressOverlayEl.style.cssText = "position:fixed;inset:0;background:rgba(10,16,22,.5);z-index:60;display:flex;align-items:center;justify-content:center;";
+      compressOverlayEl.innerHTML = '<div style="background:var(--surface);color:var(--ink);border-radius:12px;padding:20px 26px;box-shadow:var(--shadow);max-width:420px;text-align:center;"><b>Сжимаю файл…</b><div id="compress-text" class="muted" style="margin-top:8px;font-size:13px;"></div></div>';
+      document.body.appendChild(compressOverlayEl);
+    }
+    var t = compressOverlayEl.querySelector("#compress-text"); if(t) t.textContent = text;
+  }
+  function hideCompressOverlay(){ if(compressOverlayEl){ compressOverlayEl.remove(); compressOverlayEl = null; } }
+  // Возвращает Promise<File>: сжатый файл, либо исходный (если сжимать не нужно,
+  // отказались, не получилось или выигрыш слишком мал).
+  function prepareFileForUpload(file){
+    try{
+      if(isImageFile(file) && file.size > COMPRESS_IMG_MIN){
+        return compressImageFile(file).then(function(out){ return out.size < file.size*0.9 ? out : file; }).catch(function(){ return file; });
+      }
+      if(isPdfFile(file) && file.size > COMPRESS_PDF_MIN){
+        var ok = confirm("«"+file.name+"» — "+fmtMB(file.size)+".\nСжать перед загрузкой? Страницы превратятся в картинки: файл станет в несколько раз меньше, но текст в нём перестанет выделяться.\n\nОК — сжать, Отмена — загрузить как есть.");
+        if(!ok) return Promise.resolve(file);
+        showCompressOverlay("Подготовка…");
+        return compressPdfFile(file, function(i, n){ showCompressOverlay("Страница "+i+" из "+n); }).then(function(out){
+          hideCompressOverlay();
+          if(out.size < file.size*0.85){ alert("Сжато: "+fmtMB(file.size)+" → "+fmtMB(out.size)+"."); return out; }
+          alert("Файл почти не уменьшился ("+fmtMB(file.size)+" → "+fmtMB(out.size)+") — загружаю оригинал.");
+          return file;
+        }).catch(function(err){
+          hideCompressOverlay();
+          alert("Не удалось сжать PDF ("+(err&&err.message?err.message:err)+") — загружаю как есть.");
+          return file;
+        });
+      }
+    }catch(e){}
+    return Promise.resolve(file);
+  }
+  function prepareFilesSeq(files){
+    var out = [];
+    return (files||[]).reduce(function(p, f){ return p.then(function(){ return prepareFileForUpload(f).then(function(x){ out.push(x); }); }); }, Promise.resolve()).then(function(){ return out; });
+  }
+
+  // «Освободить место»: самые тяжёлые файлы хранилища
+  var STORAGE_BUCKETS = ["invoices","ticket-photos","cash-receipts"];
+  function listBucketFiles(bucket){
+    var out = [];
+    function listPrefix(prefix){
+      return sb.storage.from(bucket).list(prefix, {limit:1000}).then(function(res){
+        var items = (res && res.data) || [];
+        var folders = [];
+        items.forEach(function(it){
+          if(it.id==null && !(it.metadata)) folders.push(it.name);
+          else out.push({bucket:bucket, path:(prefix?prefix+"/":"")+it.name, size:(it.metadata&&it.metadata.size)||0, type:(it.metadata&&it.metadata.mimetype)||""});
+        });
+        return folders;
+      });
+    }
+    return listPrefix("").then(function(folders){
+      var i = 0;
+      function worker(){
+        if(i>=folders.length) return Promise.resolve();
+        var f = folders[i++];
+        return listPrefix(f).then(worker);
+      }
+      return Promise.all([worker(),worker(),worker(),worker(),worker()]);
+    }).then(function(){ return out; });
+  }
+  function openStorageToolModal(){
+    if(!(isOwner() || (state.me && (state.me.role==="dispatcher" || state.me.role==="head")))){ alert("Доступно руководителю и администратору."); return; }
+    closeModal();
+    openModal(h`
+      <div class="modal" data-stop style="width:min(820px,96vw);">
+        <div class="modal-head"><h2>Освободить место в хранилище</h2><button type="button" class="btn btn-ghost" data-close-modal>✕</button></div>
+        <div class="modal-body" id="storage-tool-body"><div class="muted">Считаю файлы…</div></div>
+      </div>`);
+    Promise.all(STORAGE_BUCKETS.map(listBucketFiles)).then(function(lists){
+      var all = [].concat.apply([], lists).filter(function(f){ return f.size>0; });
+      var body = document.getElementById("storage-tool-body"); if(!body) return;
+      var total = all.reduce(function(s,f){ return s+f.size; }, 0);
+      var heavy = all.filter(function(f){ return f.size >= 1048576; }).sort(function(a,b){ return b.size-a.size; }).slice(0,60);
+      state.storageTool = {files: heavy};
+      if(!heavy.length){ body.innerHTML = '<div>Всего файлов: '+all.length+', занято '+fmtMB(total)+'. Файлов крупнее 1 МБ нет — сжимать нечего.</div>'; return; }
+      body.innerHTML = '<div style="margin-bottom:10px;">Всего файлов: '+all.length+', занято '+fmtMB(total)+'. Самые тяжёлые (от 1 МБ):</div>'
+        + '<div class="table-wrap" style="max-height:48vh;overflow-y:auto;"><table><thead><tr><th></th><th>Файл</th><th>Раздел</th><th class="num">Размер</th></tr></thead><tbody>'
+        + heavy.map(function(f,i){
+            var nm = f.path.split("/").pop(); var folder = f.path.split("/")[0];
+            var tk = state.tickets.find(function(t){ return t.id===folder; });
+            var canC = isPdfFile({name:nm,type:f.type}) || /\.(jpe?g|png|webp)$/i.test(nm);
+            return '<tr><td><input type="checkbox" data-storage-pick="'+i+'" '+(canC?'checked':'disabled')+'></td><td style="overflow-wrap:anywhere;">'+escapeHtml(nm)+(tk&&tk.external_ref?' <span class="muted">(заявка '+escapeHtml(tk.external_ref)+')</span>':'')+'</td><td class="muted">'+escapeHtml(f.bucket)+'</td><td class="num mono">'+fmtMB(f.size)+'</td></tr>';
+          }).join("")
+        + '</tbody></table></div><div class="helptext" style="margin-top:8px;">PDF будет пересобран из картинок страниц (текст перестанет выделяться), фото уменьшено. Оригинал заменяется сжатой копией под тем же именем — только если файл уменьшился минимум на 15%.</div>'
+        + '<div style="margin-top:10px;display:flex;gap:8px;align-items:center;"><button type="button" class="btn btn-primary" id="storage-compress-btn">Сжать выбранные</button><span id="storage-progress" class="muted"></span></div>';
+      document.getElementById("storage-compress-btn").addEventListener("click", runStorageCompress);
+    }).catch(function(err){
+      var body = document.getElementById("storage-tool-body");
+      if(body) body.innerHTML = '<div class="banner">Не удалось получить список файлов: '+escapeHtml(err&&err.message?err.message:String(err))+'</div>';
+    });
+  }
+  function runStorageCompress(){
+    var picks = Array.from(document.querySelectorAll("[data-storage-pick]:checked")).map(function(c){ return state.storageTool.files[Number(c.getAttribute("data-storage-pick"))]; }).filter(Boolean);
+    if(!picks.length){ alert("Отметьте файлы."); return; }
+    if(!confirm("Сжать файлов: "+picks.length+"? Оригиналы будут заменены сжатыми копиями (если выигрыш ≥15%). Отменить это потом нельзя.")) return;
+    var btn = document.getElementById("storage-compress-btn"); if(btn) btn.disabled = true;
+    var prog = document.getElementById("storage-progress");
+    var saved = 0, done = 0, skipped = 0, failed = 0;
+    function one(f){
+      var nm = f.path.split("/").pop();
+      return sb.storage.from(f.bucket).download(f.path).then(function(res){
+        if(!res || res.error || !res.data) throw new Error("скачивание");
+        var isPdf = /\.pdf$/i.test(nm);
+        var file = new File([res.data], nm, {type: isPdf ? "application/pdf" : (res.data.type || "image/jpeg")});
+        return (isPdf ? compressPdfFile(file, function(i,n){ if(prog) prog.textContent = "Файл "+(done+1)+" из "+picks.length+": страница "+i+" из "+n; }) : compressImageFile(file, {keepFormat:true})).then(function(out){
+          if(out.size >= file.size*0.85){ skipped++; return; }
+          return sb.storage.from(f.bucket).upload(f.path, out, {upsert:true, contentType:out.type}).then(function(up){
+            if(up && up.error) throw up.error;
+            saved += (file.size - out.size); 
+          });
+        });
+      }).catch(function(){ failed++; }).then(function(){ done++; });
+    }
+    picks.reduce(function(p,f){ return p.then(function(){ return one(f); }); }, Promise.resolve()).then(function(){
+      if(prog) prog.textContent = "Готово: освобождено "+fmtMB(saved)+" (не уменьшилось: "+skipped+", ошибок: "+failed+"). Счётчик в Supabase может обновиться с задержкой.";
+      if(btn) btn.disabled = false;
+    });
+  }
+
   function uploadInvoice(ticketId, file, category){
-    var path = ticketId + "/" + Date.now() + "_" + file.name.replace(/[^\w.\-]+/g,"_");
-    return readFileAsBuffer(file).then(function(buf){
+    var path;
+    return prepareFileForUpload(file).then(function(pf){ file = pf; path = ticketId + "/" + Date.now() + "_" + file.name.replace(/[^\w.\-]+/g,"_"); return readFileAsBuffer(file); }).then(function(buf){
       return sb.storage.from("invoices").upload(path, buf, {contentType: file.type || "application/octet-stream"});
     }).then(function(res){
       if(res.error) throw res.error;
@@ -2432,8 +2667,8 @@
   // подтверждение "Работа выполнена"; теперь этот пункт всегда только ручной).
   var PHOTO_CATEGORY_LABEL = { act: "к Акту" };
   function uploadPhoto(ticketId, file, category){
-    var path = ticketId + "/" + Date.now() + "_" + file.name.replace(/[^\w.\-]+/g,"_");
-    return readFileAsBuffer(file).then(function(buf){
+    var path;
+    return prepareFileForUpload(file).then(function(pf){ file = pf; path = ticketId + "/" + Date.now() + "_" + file.name.replace(/[^\w.\-]+/g,"_"); return readFileAsBuffer(file); }).then(function(buf){
       return sb.storage.from("ticket-photos").upload(path, buf, {contentType: file.type || "application/octet-stream"});
     }).then(function(res){
       if(res.error) throw res.error;
@@ -3102,9 +3337,8 @@
   // иначе автопереход "все 4 пункта -> статус Выполнено" ниже был бы замкнут сам
   // на себя (акт делался бы условием статуса closed, а сам получался бы из него).
   function uploadActFile(ticketId, file){
-    var path = ticketId + "/act_" + Date.now() + "_" + file.name.replace(/[^\w.\-]+/g,"_");
-    var patch = {act_signed:true, act_file_path:path, act_file_name:file.name};
-    return readFileAsBuffer(file).then(function(buf){
+    var path, patch;
+    return prepareFileForUpload(file).then(function(pf){ file = pf; path = ticketId + "/act_" + Date.now() + "_" + file.name.replace(/[^\w.\-]+/g,"_"); patch = {act_signed:true, act_file_path:path, act_file_name:file.name}; return readFileAsBuffer(file); }).then(function(buf){
       return sb.storage.from("invoices").upload(path, buf, {contentType: file.type || "application/octet-stream"});
     }).then(function(res){
       if(res.error) throw res.error;
@@ -3164,9 +3398,8 @@
   // отметка "табель учтён в заявке №..." — когда один табель закрывает сразу
   // несколько заявок и незачем дублировать файл в каждой.
   function uploadTimesheetFile(ticketId, file){
-    var path = ticketId + "/timesheet_" + Date.now() + "_" + file.name.replace(/[^\w.\-]+/g,"_");
-    var patch = {timesheet_file_path:path, timesheet_file_name:file.name, timesheet_ref_ticket_id:null};
-    return readFileAsBuffer(file).then(function(buf){
+    var path, patch;
+    return prepareFileForUpload(file).then(function(pf){ file = pf; path = ticketId + "/timesheet_" + Date.now() + "_" + file.name.replace(/[^\w.\-]+/g,"_"); patch = {timesheet_file_path:path, timesheet_file_name:file.name, timesheet_ref_ticket_id:null}; return readFileAsBuffer(file); }).then(function(buf){
       return sb.storage.from("invoices").upload(path, buf, {contentType: file.type || "application/octet-stream"});
     }).then(function(res){
       if(res.error) throw res.error;
@@ -5852,8 +6085,8 @@
   // файл в Storage (свой бакет "cash-receipts", см. supabase_schema.sql),
   // путь и исходное имя — в самой записи cash_advances.
   function uploadCashReceipt(id, file){
-    var path = id + "/" + Date.now() + "_" + file.name.replace(/[^\w.\-]+/g,"_");
-    return readFileAsBuffer(file).then(function(buf){
+    var path;
+    return prepareFileForUpload(file).then(function(pf){ file = pf; path = id + "/" + Date.now() + "_" + file.name.replace(/[^\w.\-]+/g,"_"); return readFileAsBuffer(file); }).then(function(buf){
       return sb.storage.from("cash-receipts").upload(path, buf, {contentType: file.type || "application/octet-stream"});
     }).then(function(res){
       if(res.error) throw res.error;
@@ -6074,7 +6307,7 @@
   // 0.4.10: к записи можно приложить файлы (счета/акты/чеки) — Storage-бакет
   // "invoices", папка overhead/, список [{path,name}] в overhead_expenses.files.
   function uploadOverheadFiles(files){
-    return Promise.all((files||[]).map(function(file, i){
+    return prepareFilesSeq(files).then(function(prepared){ return Promise.all(prepared.map(function(file, i){
       var path = "overhead/" + Date.now() + "_" + i + "_" + file.name.replace(/[^\w.\-]+/g,"_");
       return readFileAsBuffer(file).then(function(buf){
         return sb.storage.from("invoices").upload(path, buf, {contentType: file.type || "application/octet-stream"});
@@ -6082,7 +6315,7 @@
         if(res.error) throw res.error;
         return {path:path, name:file.name};
       });
-    }));
+    })); });
   }
   // 0.4.13 (по просьбе Антона): в «Накладных расходах» те же поля, что в
   // «Реестре платежей» — Валюта / НДС / Налог (доп. налог по способу оплаты,
@@ -7772,6 +8005,7 @@
             <div class="field"><label>Имя</label><input type="text" name="name" value="${escapeHtml(state.me.name||'')}" placeholder="Как к вам обращаться"></div>
             <div class="field"><label>Роль</label><input type="text" value="${roleLabel(state.me.role)}" disabled></div>
             <div class="helptext">Роль и зоны назначает руководитель службы в разделе «Команда».</div>
+            ${(isOwner() || state.me.role==="dispatcher" || state.me.role==="head") ? h`<div class="field" style="margin-top:10px;"><label>Хранилище файлов</label><button type="button" class="btn btn-sm" id="me-storage-tool">Освободить место (сжать тяжёлые файлы)…</button></div>` : ''}
           </div>
           <div class="modal-foot">
             <button type="button" class="btn btn-danger" id="me-signout">Выйти</button>
@@ -7783,6 +8017,7 @@
       e.preventDefault(); saveMyName(new FormData(e.target).get("name")||""); closeModal();
     });
     document.getElementById("me-signout").addEventListener("click", function(){ closeModal(); signOut(); });
+    var stBtn = document.getElementById("me-storage-tool"); if(stBtn) stBtn.addEventListener("click", openStorageToolModal);
   }
 
   // Окно «Права» в «Команде» (0.2.10, полностью переработано в 0.4.4 по
