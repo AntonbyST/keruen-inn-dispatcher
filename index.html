@@ -1686,6 +1686,8 @@
     // редактируется (одновременно только одна). «Название» сюда не входит —
     // оно обязательное и всегда остаётся обычным полем ввода.
     hotelEditingKey: null,
+    // 0.4.17: «Показывать закрытые/отклонённые/удалённые» в списке заявок включена по умолчанию
+    filters: {statusList:[], zone:"", hotel:"", q:"", showClosed:true, attentionOnly:false},
     loaded: false,
     importHeaders: [], importRows: [], importMapping: {}, importResult: null, importBusy: false, importFileError: "",
     // «Финансы» → «Наличные расходы» (0.2.4): вставка таблицы, как импорт c-lector,
@@ -4108,7 +4110,7 @@
   // «Заявки», и для выгрузки в Excel (чтобы выгружался ровно тот же список, что
   // сейчас показан на экране, с теми же фильтрами и сортировкой).
   function getFilteredTicketsList(){
-    var f = state.filters || {statusList:[], zone:"", hotel:"", q:"", showClosed:false, attentionOnly:false};
+    var f = state.filters || {statusList:[], zone:"", hotel:"", q:"", showClosed:true, attentionOnly:false};
     if(!f.statusList) f.statusList = [];
     if(!f.tagFilters) f.tagFilters = {};
     if(!f.caseTypeList) f.caseTypeList = [];
@@ -4213,7 +4215,7 @@
     XLSX.writeFile(wb, "Заявки_Keruen_Inn_"+new Date().toISOString().slice(0,10)+".xlsx");
   }
   function viewTickets(){
-    var f = state.filters || {statusList:[], zone:"", hotel:"", q:"", showClosed:false, attentionOnly:false};
+    var f = state.filters || {statusList:[], zone:"", hotel:"", q:"", showClosed:true, attentionOnly:false};
     if(!f.statusList) f.statusList = [];
     if(!f.caseTypeList) f.caseTypeList = [];
     // Список статусов для фильтра строим из реальных значений, которые сейчас есть
@@ -6213,12 +6215,22 @@
     }).then(function(){ e.files = list; render(); });
   }
   function deleteOverheadExpense(id){
-    if(!canEditRegistry()) return;
+    if(!canEditRegistry()){ alert("Удалять накладные расходы может только Администратор, Руководитель или Финансист."); return; }
     if(!confirm("Удалить эту запись о накладном расходе?")) return;
     var oe = (state.overheadExpenses||[]).find(function(x){ return x.id===id; });
     var paths = oe && Array.isArray(oe.files) ? oe.files.map(function(f){ return f.path; }) : [];
-    if(paths.length) sb.storage.from("invoices").remove(paths).then(function(){});
-    sb.from("overhead_expenses").delete().eq("id", id).then(function(){});
+    // 0.4.17: раньше запись пропадала только после события realtime и без
+    // проверки ответа — если удаление не проходило, ничего не происходило и
+    // не было понятно почему. Теперь ждём ответ базы, при успехе убираем
+    // запись сразу, при отказе — показываем причину.
+    sb.from("overhead_expenses").delete().eq("id", id).select().then(function(res){
+      if(res && res.error){ alert("Не удалось удалить запись: " + res.error.message); return; }
+      if(!res || !res.data || res.data.length===0){ alert("Запись не удалена: у вашей роли нет права удаления, либо она уже удалена. Обновите страницу."); return; }
+      var i = (state.overheadExpenses||[]).findIndex(function(x){ return x.id===id; });
+      if(i!==-1) state.overheadExpenses.splice(i,1);
+      render();
+      if(paths.length) sb.storage.from("invoices").remove(paths).then(function(){});
+    }).catch(function(err){ alert("Не удалось удалить запись: " + (err&&err.message?err.message:err)); });
   }
   // Вставка таблицы для "Расходов" — тот же принцип, что и импорт из c-lector
   // (parseDelimited + угадывание колонок по заголовку), но своя, более узкая
