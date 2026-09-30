@@ -1993,7 +1993,7 @@
   // • «Освободить место» (Профиль, только руководитель/администратор): список
   //   самых тяжёлых файлов хранилища, выбранные сжимаются и заменяют оригинал
   //   по тому же пути (после подтверждения).
-  var COMPRESS_PDF_MIN = 3*1024*1024, COMPRESS_IMG_MIN = 700*1024;
+  var COMPRESS_PDF_MIN = 3*1024*1024, COMPRESS_IMG_MIN = 700*1024, COMPRESS_VIDEO_MIN = 8*1024*1024;
   var PDFJS_BASE = "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.7.284/legacy/build/";
   var pdfjsPromise = null;
   function loadPdfJs(){
@@ -2092,6 +2092,232 @@
   }
   function isPdfFile(f){ return f.type==="application/pdf" || /\.pdf$/i.test(f.name||""); }
   function isImageFile(f){ return /^image\/(jpeg|png|webp)$/.test(f.type||"") ; }
+  // ---------- 0.4.19: сжатие видео (mp4/m4v/mov) ----------
+  // Перекодирование встроенными кодеками браузера (WebCodecs): декодируем
+  // кадры, уменьшаем до 720p, кодируем заново (H.264 — в Chrome/Edge/Safari;
+  // если H.264 недоступен — VP9) и собираем новый mp4. Звук копируется как
+  // есть (без перекодирования). Разбор и сборка mp4 — собственные, без
+  // сторонних библиотек. Всё идёт в браузере, быстрее реального времени.
+  function mp4Boxes(u8, start, end){
+    var out = [], p = start, dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    while(p+8 <= end){
+      var size = dv.getUint32(p), hdr = 8;
+      var type = String.fromCharCode(u8[p+4],u8[p+5],u8[p+6],u8[p+7]);
+      if(size===1){ size = Number(dv.getBigUint64(p+8)); hdr = 16; } else if(size===0){ size = end-p; }
+      if(size < hdr || p+size > end) break;
+      out.push({type:type, start:p, hdr:hdr, body:p+hdr, end:p+size});
+      p += size;
+    }
+    return out;
+  }
+  function mp4Find(u8, box, type){ var k = mp4Boxes(u8, box.body, box.end); for(var i=0;i<k.length;i++) if(k[i].type===type) return k[i]; return null; }
+  function mp4ParseTrack(u8, trak){
+    var dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    var tkhd = mp4Find(u8, trak, "tkhd"), mdia = mp4Find(u8, trak, "mdia");
+    if(!tkhd || !mdia) return null;
+    var tv = u8[tkhd.body];
+    var mpos = tkhd.body + 4 + (tv===1 ? 32 : 20) + 16;
+    var t = { matrix: u8.slice(mpos, mpos+36), tkW: dv.getUint32(mpos+36)/65536, tkH: dv.getUint32(mpos+40)/65536 };
+    var mdhd = mp4Find(u8, mdia, "mdhd"), mv = u8[mdhd.body];
+    t.timescale = dv.getUint32(mdhd.body + 4 + (mv===1 ? 16 : 8));
+    var hdlr = mp4Find(u8, mdia, "hdlr");
+    var h = String.fromCharCode(u8[hdlr.body+8],u8[hdlr.body+9],u8[hdlr.body+10],u8[hdlr.body+11]);
+    t.kind = h==="vide" ? "video" : (h==="soun" ? "audio" : h);
+    var minf = mp4Find(u8, mdia, "minf"), stbl = minf && mp4Find(u8, minf, "stbl");
+    if(!stbl) return null;
+    var stsd = mp4Find(u8, stbl, "stsd"), entries = mp4Boxes(u8, stsd.body+8, stsd.end), e = entries[0];
+    if(!e) return null;
+    t.entry = { type: e.type, raw: u8.subarray(e.start, e.end) };
+    if(t.kind==="video"){
+      t.width = dv.getUint16(e.body+24); t.height = dv.getUint16(e.body+26);
+      var kids = mp4Boxes(u8, e.body+78, e.end);
+      kids.forEach(function(k){
+        if(k.type==="avcC"){ t.entry.description = u8.subarray(k.body, k.end); t.entry.codec = "avc1."+[u8[k.body+1],u8[k.body+2],u8[k.body+3]].map(function(b){ return ("0"+b.toString(16)).slice(-2); }).join(""); }
+        else if(k.type==="hvcC"){
+          var b = k.body, prof = u8[b+1], cf = dv.getUint32(b+2), rev = 0;
+          for(var i=0;i<32;i++) if(cf & (1<<i)) rev |= (1<<(31-i));
+          var cons = []; for(var j=0;j<6;j++) cons.push(u8[b+6+j]); while(cons.length>1 && cons[cons.length-1]===0) cons.pop();
+          t.entry.description = u8.subarray(k.body, k.end);
+          t.entry.codec = (e.type==="hev1"?"hev1":"hvc1")+"."+(["","A","B","C"][prof>>6])+(prof&31)+"."+(rev>>>0).toString(16)+"."+((prof&32)?"H":"L")+u8[b+12]+"."+cons.map(function(c){ return c.toString(16).toUpperCase(); }).join(".");
+        }
+        else if(k.type==="vpcC"){ t.entry.codec = "vp09."+("0"+u8[k.body+4]).slice(-2)+"."+("0"+u8[k.body+5]).slice(-2)+"."+("0"+(u8[k.body+6]>>4)).slice(-2); }
+      });
+    }
+    function tbl(name){ var b = mp4Find(u8, stbl, name); return b; }
+    var stsz = tbl("stsz"), stts = tbl("stts"), stsc = tbl("stsc"), stco = tbl("stco") || tbl("co64"), ctts = tbl("ctts"), stss = tbl("stss");
+    if(!stsz || !stts || !stsc || !stco) return null;
+    var fixed = dv.getUint32(stsz.body+4), n = dv.getUint32(stsz.body+8), sizes = new Uint32Array(n), i;
+    for(i=0;i<n;i++) sizes[i] = fixed ? fixed : dv.getUint32(stsz.body+12+i*4);
+    var dts = new Float64Array(n), durs = new Uint32Array(n), ne = dv.getUint32(stts.body+4), si = 0, acc = 0;
+    for(i=0;i<ne;i++){ var cnt = dv.getUint32(stts.body+8+i*8), d = dv.getUint32(stts.body+12+i*8); for(var c=0;c<cnt && si<n;c++){ dts[si] = acc; durs[si] = d; acc += d; si++; } }
+    var cts = new Float64Array(n); for(i=0;i<n;i++) cts[i] = dts[i];
+    if(ctts){ var ce = dv.getUint32(ctts.body+4), ci = 0; for(i=0;i<ce;i++){ var cc = dv.getUint32(ctts.body+8+i*8), off = dv.getInt32(ctts.body+12+i*8); for(var q=0;q<cc && ci<n;q++){ cts[ci] += off; ci++; } } }
+    var is64 = stco.type==="co64", nch = dv.getUint32(stco.body+4), chunkOff = new Float64Array(nch);
+    for(i=0;i<nch;i++) chunkOff[i] = is64 ? Number(dv.getBigUint64(stco.body+8+i*8)) : dv.getUint32(stco.body+8+i*4);
+    var nsc = dv.getUint32(stsc.body+4), scE = [];
+    for(i=0;i<nsc;i++) scE.push({first: dv.getUint32(stsc.body+8+i*12), per: dv.getUint32(stsc.body+12+i*12)});
+    var offs = new Float64Array(n), s = 0;
+    for(var ch=0; ch<nch && s<n; ch++){
+      var per = 1; for(var k2=0;k2<scE.length;k2++){ if(scE[k2].first <= ch+1) per = scE[k2].per; else break; }
+      var cur = chunkOff[ch]; for(var z=0; z<per && s<n; z++){ offs[s] = cur; cur += sizes[s]; s++; }
+    }
+    var sync = new Uint8Array(n); if(stss){ var sn = dv.getUint32(stss.body+4); for(i=0;i<sn;i++){ var idx = dv.getUint32(stss.body+8+i*4)-1; if(idx>=0 && idx<n) sync[idx] = 1; } } else sync.fill(1);
+    t.n = n; t.sizes = sizes; t.offs = offs; t.dts = dts; t.cts = cts; t.durs = durs; t.sync = sync;
+    return t;
+  }
+  function mp4Parse(u8){
+    var top = mp4Boxes(u8, 0, u8.length), moov = null;
+    top.forEach(function(b){ if(b.type==="moov") moov = b; });
+    if(!moov) throw new Error("не mp4 (нет moov)");
+    var traks = mp4Boxes(u8, moov.body, moov.end).filter(function(b){ return b.type==="trak"; });
+    return traks.map(function(tr){ return mp4ParseTrack(u8, tr); }).filter(Boolean);
+  }
+  // --- сборка
+  function mpCat(arrs){ var n = 0; arrs.forEach(function(a){ n += a.length; }); var o = new Uint8Array(n), p = 0; arrs.forEach(function(a){ o.set(a, p); p += a.length; }); return o; }
+  function mpU32(v){ var a = new Uint8Array(4); new DataView(a.buffer).setUint32(0, v>>>0); return a; }
+  function mpU16(v){ var a = new Uint8Array(2); new DataView(a.buffer).setUint16(0, v); return a; }
+  function mpBox(type, parts){ var body = mpCat(parts||[]); var hdr = new Uint8Array(8); new DataView(hdr.buffer).setUint32(0, body.length+8); for(var i=0;i<4;i++) hdr[4+i] = type.charCodeAt(i); return mpCat([hdr, body]); }
+  function mpZ(n){ return new Uint8Array(n); }
+  function mpVideoEntry(type, w, h, childType, childBody){
+    var dv8 = new Uint8Array(78), dv = new DataView(dv8.buffer);
+    dv.setUint16(6, 1); dv.setUint16(24, w); dv.setUint16(26, h); dv.setUint32(28, 0x00480000); dv.setUint32(32, 0x00480000); dv.setUint16(40, 1); dv.setUint16(74, 0x18); dv.setUint16(76, 0xffff);
+    return mpBox(type, [dv8, mpBox(childType, [childBody])]);
+  }
+  // tracks: [{kind, timescale, width, height, matrix, entry(Uint8Array), samples:[{data,dur,sync,cto}]}]
+  function mp4Build(tracks){
+    var all = [];
+    tracks.forEach(function(t, ti){ var d = 0; t.samples.forEach(function(s, si){ all.push({ti:ti, si:si, time:d/t.timescale}); d += s.dur; }); });
+    all.sort(function(a,b){ return a.time-b.time || a.ti-b.ti; });
+    var rel = 0;
+    all.forEach(function(e){ var s = tracks[e.ti].samples[e.si]; s.rel = rel; rel += s.data.length; });
+    if(rel > 4e9) throw new Error("файл слишком большой для сборки");
+    var movieTs = 1000, movieDur = 0;
+    tracks.forEach(function(t){ var d = 0; t.samples.forEach(function(s){ d += s.dur; }); t.totalDur = d; movieDur = Math.max(movieDur, Math.round(d*movieTs/t.timescale)); });
+    function buildMoov(mdatStart){
+      var mvhd = new Uint8Array(100), mv = new DataView(mvhd.buffer);
+      mv.setUint32(12, movieTs); mv.setUint32(16, movieDur); mv.setUint32(20, 0x00010000); mv.setUint16(24, 0x0100);
+      [0x00010000,0,0,0,0x00010000,0,0,0,0x40000000].forEach(function(x,i){ mv.setUint32(36+i*4, x); });
+      mv.setUint32(96, tracks.length+1);
+      var traksB = tracks.map(function(t, ti){
+        var isV = t.kind==="video";
+        var tk = new Uint8Array(76), tv = new DataView(tk.buffer);
+        tv.setUint32(0, 3); tv.setUint32(12, ti+1); tv.setUint32(20, Math.round(t.totalDur*movieTs/t.timescale));
+        if(!isV) tv.setUint16(36, 0x0100);
+        tk.set(isV && t.matrix ? t.matrix : mpCat([0x00010000,0,0,0,0x00010000,0,0,0,0x40000000].map(mpU32)), 40);
+        var tkW = isV ? mpU32(Math.round(t.width*65536)) : mpU32(0), tkH = isV ? mpU32(Math.round(t.height*65536)) : mpU32(0);
+        var tkhd = mpBox("tkhd", [tk, tkW, tkH]);
+        var md = new Uint8Array(24), mdv = new DataView(md.buffer); mdv.setUint32(12, t.timescale); mdv.setUint32(16, t.totalDur); mdv.setUint16(20, 0x55c4);
+        var mdhd = mpBox("mdhd", [mpZ(0), md.subarray(0,24)]);
+        var nameB = new TextEncoder().encode(isV ? "VideoHandler\0" : "SoundHandler\0");
+        var hd = mpCat([mpZ(4), mpZ(4), new TextEncoder().encode(isV?"vide":"soun"), mpZ(12), nameB]);
+        var hdlr = mpBox("hdlr", [hd]);
+        var xmhd = isV ? mpBox("vmhd", [mpU32(1), mpZ(8)]) : mpBox("smhd", [mpZ(8)]);
+        var dinf = mpBox("dinf", [mpBox("dref", [mpZ(4), mpU32(1), mpBox("url ", [mpU32(1)])])]);
+        var stsd = mpBox("stsd", [mpZ(4), mpU32(1), t.entry]);
+        // stts (RLE)
+        var sr = [], last = null; t.samples.forEach(function(s){ if(last && last.d===s.dur) last.c++; else { last = {c:1, d:s.dur}; sr.push(last); } });
+        var stts = mpBox("stts", [mpZ(4), mpU32(sr.length), mpCat(sr.map(function(r){ return mpCat([mpU32(r.c), mpU32(r.d)]); }))]);
+        var hasCto = t.samples.some(function(s){ return s.cto; }), ctts = null;
+        if(hasCto){ var cr = [], lc = null, neg = false; t.samples.forEach(function(s){ var o = s.cto||0; if(o<0) neg = true; if(lc && lc.o===o) lc.c++; else { lc = {c:1,o:o}; cr.push(lc); } });
+          ctts = mpBox("ctts", [mpU32(neg?0x01000000:0), mpU32(cr.length), mpCat(cr.map(function(r){ return mpCat([mpU32(r.c), mpU32(r.o)]); }))]); }
+        var stsc = mpBox("stsc", [mpZ(4), mpU32(1), mpU32(1), mpU32(1), mpU32(1)]);
+        var n = t.samples.length, szb = new Uint8Array(n*4), szv = new DataView(szb.buffer), cob = new Uint8Array(n*4), cov = new DataView(cob.buffer);
+        t.samples.forEach(function(s, i){ szv.setUint32(i*4, s.data.length); cov.setUint32(i*4, mdatStart + 8 + s.rel); });
+        var stsz = mpBox("stsz", [mpZ(4), mpZ(4), mpU32(n), szb]);
+        var stco = mpBox("stco", [mpZ(4), mpU32(n), cob]);
+        var syncIdx = []; t.samples.forEach(function(s,i){ if(s.sync) syncIdx.push(i+1); });
+        var stss = (isV && syncIdx.length < n) ? mpBox("stss", [mpZ(4), mpU32(syncIdx.length), mpCat(syncIdx.map(mpU32))]) : null;
+        var stbl = mpBox("stbl", [stsd, stts].concat(ctts?[ctts]:[], [stsc, stsz, stco], stss?[stss]:[]));
+        var minf = mpBox("minf", [xmhd, dinf, stbl]);
+        return mpBox("trak", [tkhd, mpBox("mdia", [mdhd, hdlr, minf])]);
+      });
+      return mpBox("moov", [mpBox("mvhd", [mvhd]) ].concat(traksB));
+    }
+    var ftyp = mpBox("ftyp", [new TextEncoder().encode("isom"), mpU32(512), new TextEncoder().encode("isomiso2avc1mp41")]);
+    var moov0 = buildMoov(0), mdatStart = ftyp.length + moov0.length, moov = buildMoov(mdatStart);
+    var parts = [ftyp, moov, mpU32(rel+8), new TextEncoder().encode("mdat")];
+    all.forEach(function(e){ parts.push(tracks[e.ti].samples[e.si].data); });
+    return new Blob(parts, {type:"video/mp4"});
+  }
+  function sleepMs(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
+  function compressVideoFile(file, onProgress){
+    if(typeof VideoDecoder==="undefined" || typeof VideoEncoder==="undefined") return Promise.reject(new Error("браузер не поддерживает кодирование видео — откройте сайт в актуальном Chrome/Edge"));
+    return readFileAsBuffer(file).then(function(ab){
+      var u8 = new Uint8Array(ab), tracks = mp4Parse(u8);
+      var v = tracks.filter(function(t){ return t.kind==="video"; })[0], a = tracks.filter(function(t){ return t.kind==="audio"; })[0];
+      if(!v || !v.entry.codec) throw new Error("не удалось прочитать видеодорожку");
+      var cfgDec = {codec: v.entry.codec, codedWidth: v.width, codedHeight: v.height};
+      if(v.entry.description) cfgDec.description = v.entry.description;
+      return VideoDecoder.isConfigSupported(cfgDec).then(function(sup){
+        if(!sup.supported) throw new Error("формат видео ("+v.entry.codec+") этот браузер не читает");
+        var n = v.n, totalSec = (v.dts[n-1] + v.durs[n-1]) / v.timescale, fps = Math.max(1, Math.min(60, n/Math.max(0.1,totalSec)));
+        var sc = Math.min(1, 1280/Math.max(v.width, v.height));
+        var tw = Math.max(2, Math.round(v.width*sc/2)*2), th = Math.max(2, Math.round(v.height*sc/2)*2);
+        var bitrate = Math.round(tw*th*fps*0.06);
+        var tries = [{codec: (tw*th>921600 ? "avc1.640028" : "avc1.64001f"), kind:"avc"}, {codec:"vp09.00.10.08", kind:"vp9"}];
+        function pickEncoder(i){
+          if(i>=tries.length) return Promise.reject(new Error("в браузере нет кодировщика видео"));
+          var cfg = {codec: tries[i].codec, width: tw, height: th, bitrate: bitrate, framerate: fps, latencyMode:"quality"};
+          if(tries[i].kind==="avc") cfg.avc = {format:"avc"};
+          return VideoEncoder.isConfigSupported(cfg).then(function(r){ return r.supported ? {cfg: r.config || cfg, kind: tries[i].kind} : pickEncoder(i+1); }).catch(function(){ return pickEncoder(i+1); });
+        }
+        return pickEncoder(0).then(function(enc){
+          var minCts = Infinity; for(var i=0;i<n;i++) if(v.cts[i]<minCts) minCts = v.cts[i];
+          var outChunks = [], encDesc = null, failure = null, done = 0;
+          var encoder = new VideoEncoder({
+            output: function(chunk, meta){ var d = new Uint8Array(chunk.byteLength); chunk.copyTo(d); outChunks.push({data:d, ts:chunk.timestamp, key:chunk.type==="key"}); if(meta && meta.decoderConfig && meta.decoderConfig.description && !encDesc){ var ds = meta.decoderConfig.description; encDesc = new Uint8Array(ds.buffer ? ds.buffer.slice(ds.byteOffset, ds.byteOffset+ds.byteLength) : ds); } },
+            error: function(e){ failure = e; }
+          });
+          encoder.configure(enc.cfg);
+          var canvas = (tw!==v.width || th!==v.height) ? new OffscreenCanvas(tw, th) : null, ctx = canvas && canvas.getContext("2d");
+          var kfEvery = Math.max(1, Math.round(fps*2)), fcount = 0, frameDur = Math.round(1e6/fps);
+          var decoder = new VideoDecoder({
+            output: function(frame){
+              try{
+                var f = frame;
+                if(canvas){ ctx.drawImage(frame, 0, 0, tw, th); f = new VideoFrame(canvas, {timestamp: frame.timestamp, duration: frameDur}); frame.close(); }
+                encoder.encode(f, {keyFrame: fcount % kfEvery === 0}); fcount++;
+                f.close();
+              }catch(e){ failure = e; }
+            },
+            error: function(e){ failure = e; }
+          });
+          decoder.configure(cfgDec);
+          function feed(i){
+            if(failure) return Promise.reject(failure);
+            if(i>=n) return Promise.resolve();
+            if(decoder.decodeQueueSize>8 || encoder.encodeQueueSize>8) return sleepMs(2).then(function(){ return feed(i); });
+            var off = v.offs[i];
+            decoder.decode(new EncodedVideoChunk({type: v.sync[i]?"key":"delta", timestamp: Math.round((v.cts[i]-minCts)*1e6/v.timescale), data: u8.subarray(off, off+v.sizes[i])}));
+            if(onProgress && (i & 15)===0) onProgress(i, n);
+            return feed(i+1);
+          }
+          return feed(0).then(function(){ return decoder.flush(); }).then(function(){ return encoder.flush(); }).then(function(){
+            if(failure) throw failure;
+            try{ decoder.close(); encoder.close(); }catch(e){}
+            if(!outChunks.length) throw new Error("кодировщик не вернул кадров");
+            outChunks.sort(function(x,y){ return x.ts-y.ts; });
+            var TS = 90000, samples = [], prev = 0;
+            var t0 = outChunks.map(function(c){ return Math.round(c.ts*TS/1e6); });
+            outChunks.forEach(function(c, i){ var dur = i+1<outChunks.length ? Math.max(1, t0[i+1]-t0[i]) : (samples.length ? samples[samples.length-1].dur : Math.round(TS/fps)); samples.push({data:c.data, dur:dur, sync:c.key}); });
+            var entry;
+            if(enc.kind==="avc"){ if(!encDesc) throw new Error("нет avcC"); entry = mpVideoEntry("avc1", tw, th, "avcC", encDesc); }
+            else { var vp = new Uint8Array(12); vp[0] = 1; vp[4] = 0; vp[5] = 10; vp[6] = (8<<4)|(1<<1); vp[7] = 1; vp[8] = 1; vp[9] = 1; entry = mpVideoEntry("vp09", tw, th, "vpcC", mpCat([vp.subarray(0,10), mpU16(0)])); }
+            var outTracks = [{kind:"video", timescale:TS, width:Math.round(v.tkW*tw/v.width), height:Math.round(v.tkH*th/v.height), matrix:v.matrix, entry:entry, samples:samples}];
+            if(a){
+              var as = []; for(var k=0;k<a.n;k++) as.push({data:u8.subarray(a.offs[k], a.offs[k]+a.sizes[k]), dur:a.durs[k], sync:true});
+              outTracks.push({kind:"audio", timescale:a.timescale, entry:a.entry.raw, samples:as});
+            }
+            var blob = mp4Build(outTracks);
+            return new File([blob], file.name, {type:"video/mp4"});
+          });
+        });
+      });
+    });
+  }
+  function isVideoFile(f){ return /^video\/(mp4|quicktime|x-m4v)$/.test(f.type||"") || /\.(mp4|m4v|mov)$/i.test(f.name||""); }
+  if(window.__mockClient){ window.__mp4test = {mp4Parse: mp4Parse, mp4Build: mp4Build}; }
+
   var compressOverlayEl = null;
   function showCompressOverlay(text){
     if(!compressOverlayEl){
@@ -2109,6 +2335,21 @@
     try{
       if(isImageFile(file) && file.size > COMPRESS_IMG_MIN){
         return compressImageFile(file).then(function(out){ return out.size < file.size*0.9 ? out : file; }).catch(function(){ return file; });
+      }
+      if(isVideoFile(file) && file.size > COMPRESS_VIDEO_MIN){
+        var okv = confirm("«"+file.name+"» — "+fmtMB(file.size)+".\nСжать видео перед загрузкой? Оно будет уменьшено до 720p, звук сохранится. Это займёт от нескольких секунд до пары минут, вкладку не закрывайте.\n\nОК — сжать, Отмена — загрузить как есть.");
+        if(!okv) return Promise.resolve(file);
+        showCompressOverlay("Подготовка видео…");
+        return compressVideoFile(file, function(i, n){ showCompressOverlay("Кадр "+i+" из "+n); }).then(function(out){
+          hideCompressOverlay();
+          if(out.size < file.size*0.85){ alert("Сжато: "+fmtMB(file.size)+" → "+fmtMB(out.size)+"."); return out; }
+          alert("Видео почти не уменьшилось ("+fmtMB(file.size)+" → "+fmtMB(out.size)+") — загружаю оригинал.");
+          return file;
+        }).catch(function(err){
+          hideCompressOverlay();
+          alert("Не удалось сжать видео ("+(err&&err.message?err.message:err)+") — загружаю как есть.");
+          return file;
+        });
       }
       if(isPdfFile(file) && file.size > COMPRESS_PDF_MIN){
         var ok = confirm("«"+file.name+"» — "+fmtMB(file.size)+".\nСжать перед загрузкой? Страницы превратятся в картинки: файл станет в несколько раз меньше, но текст в нём перестанет выделяться.\n\nОК — сжать, Отмена — загрузить как есть.");
@@ -2178,10 +2419,10 @@
         + heavy.map(function(f,i){
             var nm = f.path.split("/").pop(); var folder = f.path.split("/")[0];
             var tk = state.tickets.find(function(t){ return t.id===folder; });
-            var canC = isPdfFile({name:nm,type:f.type}) || /\.(jpe?g|png|webp)$/i.test(nm);
+            var canC = isPdfFile({name:nm,type:f.type}) || /\.(jpe?g|png|webp|mp4|m4v|mov)$/i.test(nm);
             return '<tr><td><input type="checkbox" data-storage-pick="'+i+'" '+(canC?'checked':'disabled')+'></td><td style="overflow-wrap:anywhere;">'+escapeHtml(nm)+(tk&&tk.external_ref?' <span class="muted">(заявка '+escapeHtml(tk.external_ref)+')</span>':'')+'</td><td class="muted">'+escapeHtml(f.bucket)+'</td><td class="num mono">'+fmtMB(f.size)+'</td></tr>';
           }).join("")
-        + '</tbody></table></div><div class="helptext" style="margin-top:8px;">PDF будет пересобран из картинок страниц (текст перестанет выделяться), фото уменьшено. Оригинал заменяется сжатой копией под тем же именем — только если файл уменьшился минимум на 15%.</div>'
+        + '</tbody></table></div><div class="helptext" style="margin-top:8px;">PDF будет пересобран из картинок страниц (текст перестанет выделяться), фото уменьшено, видео (mp4) перекодировано до 720p. Оригинал заменяется сжатой копией под тем же именем — только если файл уменьшился минимум на 15%.</div>'
         + '<div style="margin-top:10px;display:flex;gap:8px;align-items:center;"><button type="button" class="btn btn-primary" id="storage-compress-btn">Сжать выбранные</button><span id="storage-progress" class="muted"></span></div>';
       document.getElementById("storage-compress-btn").addEventListener("click", runStorageCompress);
     }).catch(function(err){
@@ -2195,24 +2436,26 @@
     if(!confirm("Сжать файлов: "+picks.length+"? Оригиналы будут заменены сжатыми копиями (если выигрыш ≥15%). Отменить это потом нельзя.")) return;
     var btn = document.getElementById("storage-compress-btn"); if(btn) btn.disabled = true;
     var prog = document.getElementById("storage-progress");
-    var saved = 0, done = 0, skipped = 0, failed = 0;
+    var saved = 0, done = 0, skipped = 0, failed = 0, failMsgs = [];
     function one(f){
       var nm = f.path.split("/").pop();
       return sb.storage.from(f.bucket).download(f.path).then(function(res){
         if(!res || res.error || !res.data) throw new Error("скачивание");
-        var isPdf = /\.pdf$/i.test(nm);
-        var file = new File([res.data], nm, {type: isPdf ? "application/pdf" : (res.data.type || "image/jpeg")});
-        return (isPdf ? compressPdfFile(file, function(i,n){ if(prog) prog.textContent = "Файл "+(done+1)+" из "+picks.length+": страница "+i+" из "+n; }) : compressImageFile(file, {keepFormat:true})).then(function(out){
+        var isPdf = /\.pdf$/i.test(nm), isVid = /\.(mp4|m4v|mov)$/i.test(nm);
+        var file = new File([res.data], nm, {type: isPdf ? "application/pdf" : (isVid ? "video/mp4" : (res.data.type || "image/jpeg"))});
+        var job = isPdf ? compressPdfFile(file, function(i,n){ if(prog) prog.textContent = "Файл "+(done+1)+" из "+picks.length+": страница "+i+" из "+n; })
+          : (isVid ? compressVideoFile(file, function(i,n){ if(prog) prog.textContent = "Файл "+(done+1)+" из "+picks.length+": кадр "+i+" из "+n; }) : compressImageFile(file, {keepFormat:true}));
+        return job.then(function(out){
           if(out.size >= file.size*0.85){ skipped++; return; }
           return sb.storage.from(f.bucket).upload(f.path, out, {upsert:true, contentType:out.type}).then(function(up){
             if(up && up.error) throw up.error;
             saved += (file.size - out.size); 
           });
         });
-      }).catch(function(){ failed++; }).then(function(){ done++; });
+      }).catch(function(err){ failed++; failMsgs.push(nm+": "+(err&&err.message?err.message:err)); }).then(function(){ done++; });
     }
     picks.reduce(function(p,f){ return p.then(function(){ return one(f); }); }, Promise.resolve()).then(function(){
-      if(prog) prog.textContent = "Готово: освобождено "+fmtMB(saved)+" (не уменьшилось: "+skipped+", ошибок: "+failed+"). Счётчик в Supabase может обновиться с задержкой.";
+      if(prog) prog.textContent = "Готово: освобождено "+fmtMB(saved)+" (не уменьшилось: "+skipped+", ошибок: "+failed+"). Счётчик в Supabase может обновиться с задержкой."+(failMsgs.length?" Ошибки: "+failMsgs.join("; "):"");
       if(btn) btn.disabled = false;
     });
   }
@@ -2241,7 +2484,7 @@
   // для остальных типов (Excel, Word…) — кнопка «Скачать». Файл забирается
   // через storage.download (blob), поэтому не зависит от заголовков ссылки.
   var previewBlobUrl = null;
-  var PREVIEW_TYPES = {pdf:"application/pdf", png:"image/png", jpg:"image/jpeg", jpeg:"image/jpeg", gif:"image/gif", webp:"image/webp", bmp:"image/bmp", svg:"image/svg+xml", heic:"image/heic"};
+  var PREVIEW_TYPES = {pdf:"application/pdf", png:"image/png", jpg:"image/jpeg", jpeg:"image/jpeg", gif:"image/gif", webp:"image/webp", bmp:"image/bmp", svg:"image/svg+xml", heic:"image/heic", mp4:"video/mp4", m4v:"video/mp4", mov:"video/mp4", webm:"video/webm"};
   function previewStorageFile(bucket, path){
     var rawName = String(path||"").split("/").pop() || "файл";
     var name = rawName;
@@ -2273,6 +2516,7 @@
       var actions = document.getElementById("file-preview-actions");
       if(actions) actions.innerHTML = '<a class="btn btn-sm" href="'+url+'" download="'+escapeHtml(name)+'">Скачать</a><a class="btn btn-sm" href="'+url+'" target="_blank" rel="noopener">В новой вкладке</a>';
       if(type.indexOf("image/")===0) body.innerHTML = '<img src="'+url+'" alt="'+escapeHtml(name)+'" style="max-width:100%;max-height:74vh;display:block;margin:0 auto;">';
+      else if(type.indexOf("video/")===0) body.innerHTML = '<video src="'+url+'" controls style="max-width:100%;max-height:74vh;display:block;margin:0 auto;background:#000;"></video>';
       else if(type==="application/pdf") body.innerHTML = '<iframe src="'+url+'" title="'+escapeHtml(name)+'" style="width:100%;height:74vh;border:0;border-radius:6px;background:var(--surface-2);"></iframe>';
       else body.innerHTML = '<div class="banner">Предпросмотр для этого типа файла недоступен — нажмите «Скачать».</div>';
     }).catch(function(){ fallback(); });
