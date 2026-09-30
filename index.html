@@ -442,6 +442,37 @@
   .modal-head h2{ font-size:16px; margin:0; flex:1; }
   .modal-body{ padding:18px 20px; max-height:70vh; overflow-y:auto; }
   .modal-foot{ padding:14px 20px; border-top:1px solid var(--line); display:flex; justify-content:flex-end; gap:8px; }
+  /* ---------- накладные расходы (0.4.14): карточки + окно ---------- */
+  .oh-head{ display:flex; align-items:center; gap:10px; margin-bottom:12px; }
+  .oh-head .section-title{ margin:0; flex:1; }
+  .oh-list{ display:flex; flex-direction:column; }
+  .oh-card{ display:grid; grid-template-columns:1fr auto; gap:8px 16px; padding:14px 2px; border-top:1px solid var(--line); align-items:start; }
+  .oh-card:first-child{ border-top:0; padding-top:4px; }
+  .oh-cat{ font-weight:600; font-size:15px; overflow-wrap:anywhere; }
+  .oh-meta{ font-size:12px; color:var(--ink-faint); margin-top:2px; }
+  .oh-note{ font-size:12.5px; color:var(--ink-soft); margin-top:4px; overflow-wrap:anywhere; }
+  .oh-sum{ text-align:right; font-variant-numeric:tabular-nums; }
+  .oh-sum b{ display:block; font-size:19px; font-weight:700; letter-spacing:-.01em; font-family:ui-monospace,"SF Mono",Consolas,monospace; white-space:nowrap; }
+  .oh-sum small{ display:block; font-size:12px; color:var(--ink-faint); margin-top:2px; }
+  .oh-chips{ display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+  .oh-chip{ display:inline-flex; align-items:center; gap:5px; font-size:12px; font-weight:600; padding:2px 10px; border-radius:20px; background:var(--surface-2); color:var(--ink-soft); border:1px solid var(--line); }
+  .oh-chip.accent{ background:var(--accent-soft); border-color:var(--accent-line); color:var(--accent); }
+  .oh-chip.warn{ background:transparent; color:var(--crit); border-color:var(--crit); }
+  .oh-chip a{ color:inherit; text-decoration:none; max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .oh-chip a:hover{ text-decoration:underline; }
+  .oh-acts{ display:flex; gap:2px; justify-content:flex-end; align-items:center; }
+  .oh-acts .btn{ color:var(--accent); font-weight:600; }
+  .oh-acts .oh-del{ color:var(--crit); }
+  .oh-search{ min-width:200px; max-width:280px; }
+  @media(max-width:560px){ .oh-card{ grid-template-columns:1fr; } .oh-sum,.oh-acts{ text-align:left; justify-content:flex-start; } }
+  .oh-live{ background:var(--accent-soft); border:1px solid var(--accent-line); border-radius:8px; padding:10px 12px; margin:4px 0 12px; }
+  .oh-live b{ font-size:20px; font-variant-numeric:tabular-nums; }
+  .oh-live small{ display:block; color:var(--ink-soft); font-size:11.5px; margin-top:2px; }
+  .oh-drop{ position:relative; border:1.5px dashed var(--accent-line); border-radius:8px; padding:14px; text-align:center; color:var(--ink-soft); font-size:12.5px; background:var(--surface-2); }
+  .oh-drop input{ position:absolute; inset:0; width:100%; height:100%; opacity:0; cursor:pointer; }
+  .oh-drop.has{ color:var(--ink); border-style:solid; }
+  .oh-form-grid{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .oh-form-grid .full{ grid-column:1/-1; }
 
   /* ---------- workorder (print) ---------- */
   .wo-page{ max-width:760px; margin:0 auto; background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:40px 44px; box-shadow:var(--shadow); }
@@ -1073,7 +1104,19 @@
     if(r==="error") return { value:null, state:"error", original:accounted, currency:cur };
     return { value: accounted * (r.rate/r.quant), state:"ok", original:accounted, currency:cur };
   }
-  function fmtKZT(n){ return (Number(n)||0).toLocaleString("ru-RU", {minimumFractionDigits:0, maximumFractionDigits:2}); }
+  // 0.4.16: toLocaleString/toLocaleDateString создают форматтер при каждом вызове —
+  // на длинных таблицах («Наличные», «Реестр») это главная доля времени
+  // перерисовки. Форматтеры кэшируются по набору параметров.
+  var _nfCache = {};
+  function nfmt(n, opts){
+    var k = JSON.stringify(opts||{});
+    var f = _nfCache[k] || (_nfCache[k] = new Intl.NumberFormat("ru-RU", opts||{}));
+    return f.format(n);
+  }
+  var _dfShort = new Intl.DateTimeFormat("ru-RU",{day:"2-digit",month:"2-digit",year:"2-digit"});
+  var _dfDate = new Intl.DateTimeFormat("ru-RU",{day:"2-digit",month:"2-digit",year:"numeric"});
+  var _dfTime = new Intl.DateTimeFormat("ru-RU",{hour:"2-digit",minute:"2-digit"});
+  function fmtKZT(n){ return nfmt(Number(n)||0, {minimumFractionDigits:0, maximumFractionDigits:2}); }
   // 0.3.7 (по просьбе Антона, п.3): "где 'учтено в затратах' где-то отражается
   // сумма после запятой, а где-то нет" — это особенность fmtKZT выше
   // (minimumFractionDigits:0) — она специально оставляет разное число знаков
@@ -1082,7 +1125,7 @@
   // форматтер, применяется везде, где показывается именно "Учтено в
   // затратах" (accountedKZTLabel, итоги "Оплачено"/"К оплате" внизу реестра,
   // сумма в разделителе месяца, и новая колонка в развёрнутых строках).
-  function fmtKZT2(n){ return (Number(n)||0).toLocaleString("ru-RU", {minimumFractionDigits:2, maximumFractionDigits:2}); }
+  function fmtKZT2(n){ return nfmt(Number(n)||0, {minimumFractionDigits:2, maximumFractionDigits:2}); }
 
   // 0.2.20: в «Реестре платежей» один и тот же файл счёта иногда прикреплён по
   // отдельности сразу к нескольким заявкам (см. invoiceRelatedTickets ниже) —
@@ -1215,8 +1258,8 @@
   }
 
   function hotelById(id){ var list=state.hotels||[]; for (var i=0;i<list.length;i++){ if (list[i].id===Number(id)) return list[i]; } return null; }
-  function fmtDate(iso){ if(!iso) return "—"; var d=new Date(iso); return d.toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit",year:"numeric"})+" "+d.toLocaleTimeString("ru-RU",{hour:"2-digit",minute:"2-digit"}); }
-  function fmtDateShort(iso){ if(!iso) return "—"; var d=new Date(iso); return d.toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit",year:"2-digit"}); }
+  function fmtDate(iso){ if(!iso) return "—"; var d=new Date(iso); return _dfDate.format(d)+" "+_dfTime.format(d); }
+  function fmtDateShort(iso){ if(!iso) return "—"; return _dfShort.format(new Date(iso)); }
   // 0.2.19: группировка оплаченных счетов в «Реестре платежей» по месяцу
   // ОПЛАТЫ (invoices.paid_at), по просьбе Антона. paidMonthKey — ключ вида
   // "YYYY-MM" для сортировки/группировки (сортируется как обычная строка,
@@ -1799,65 +1842,65 @@
     startActivityHeartbeat();
     sb.channel("tickets-rt").on("postgres_changes", {event:"*", schema:"public", table:"tickets"}, function(payload){
       rtPatchArray(state.tickets, payload, rtSortBy("created_at", false));
-      maybeSeed(); maybeRecordTodaysStatsSnapshot(); render();
+      maybeSeed(); maybeRecordTodaysStatsSnapshot(); scheduleRender();
     }).subscribe();
     sb.channel("profiles-rt").on("postgres_changes", {event:"*", schema:"public", table:"profiles"}, function(payload){
       rtPatchArray(state.profiles, payload, rtSortBy("created_at", true));
       var mine = state.profiles.find(function(p){ return state.session && p.id===state.session.user.id; });
       if(mine) state.me = mine;
-      render();
+      scheduleRender();
     }).subscribe();
     sb.channel("parts-rt").on("postgres_changes", {event:"*", schema:"public", table:"parts"}, function(payload){
       rtPatchArray(state.parts, payload, rtSortBy("name", true));
-      render();
+      scheduleRender();
     }).subscribe();
     sb.channel("portfolio-rt").on("postgres_changes", {event:"*", schema:"public", table:"portfolio_snapshot"}, function(payload){
       if(payload.eventType === "DELETE") state.portfolio = null;
       else if(payload.new) state.portfolio = payload.new;
-      maybeSeedPortfolio(); render();
+      maybeSeedPortfolio(); scheduleRender();
     }).subscribe();
     sb.channel("invoices-rt").on("postgres_changes", {event:"*", schema:"public", table:"invoices"}, function(payload){
       rtPatchArray(state.invoices, payload, rtSortBy("uploaded_at", false));
-      render();
+      scheduleRender();
     }).subscribe();
     sb.channel("photos-rt").on("postgres_changes", {event:"*", schema:"public", table:"ticket_photos"}, function(payload){
       rtPatchArray(state.photos, payload, rtSortBy("uploaded_at", false));
-      render();
+      scheduleRender();
     }).subscribe();
     sb.channel("snapshots-rt").on("postgres_changes", {event:"*", schema:"public", table:"import_snapshots"}, function(payload){
       rtPatchArray(state.snapshots, payload, rtSortBy("imported_at", true));
-      render();
+      scheduleRender();
     }).subscribe();
     sb.channel("crews-rt").on("postgres_changes", {event:"*", schema:"public", table:"crews"}, function(payload){
       rtPatchArray(state.crews, payload, rtSortBy("name", true));
-      render();
+      scheduleRender();
     }).subscribe();
     sb.channel("hotels-rt").on("postgres_changes", {event:"*", schema:"public", table:"hotels"}, function(payload){
       rtPatchArray(state.hotels, payload, rtSortBy("id", true));
-      maybeSeed(); maybeRecordTodaysStatsSnapshot(); render();
+      maybeSeed(); maybeRecordTodaysStatsSnapshot(); scheduleRender();
     }).subscribe();
     sb.channel("cash-advances-rt").on("postgres_changes", {event:"*", schema:"public", table:"cash_advances"}, function(payload){
       rtPatchArray(state.cashAdvances, payload, rtSortBy("date", false));
-      render();
+      scheduleRender();
     }).subscribe();
     sb.channel("cash-expenses-rt").on("postgres_changes", {event:"*", schema:"public", table:"cash_expenses"}, function(payload){
       rtPatchArray(state.cashExpenses, payload, rtSortBy("date", false));
-      render();
+      scheduleRender();
     }).subscribe();
     sb.channel("overhead-expenses-rt").on("postgres_changes", {event:"*", schema:"public", table:"overhead_expenses"}, function(payload){
       rtPatchArray(state.overheadExpenses, payload, rtSortBy("date", false));
-      render();
+      scheduleRender();
     }).subscribe();
     sb.channel("stats-snapshots-rt").on("postgres_changes", {event:"*", schema:"public", table:"ticket_stats_snapshots"}, function(payload){
       rtPatchArray(state.statsSnapshots, payload, rtSortBy("snapshot_date", true));
-      maybeRecordTodaysStatsSnapshot(); render();
+      maybeRecordTodaysStatsSnapshot(); scheduleRender();
     }).subscribe();
     // 0.3.7 (по просьбе Антона, п.4): «Активность» — свои же обновления
     // (pingActivity) тоже приходят сюда через realtime, но это не проблема:
     // rtPatchArray просто заменяет ту же строку тем же значением.
     sb.channel("activity-daily-rt").on("postgres_changes", {event:"*", schema:"public", table:"activity_daily"}, function(payload){
       rtPatchArray(state.activityDaily, payload, rtSortBy("day", true));
-      render();
+      scheduleRender();
     }).subscribe();
   }
   // Список отелей — раньше был константой в коде, теперь строка в таблице hotels;
@@ -1955,12 +1998,49 @@
       alert("Не удалось загрузить счёт: " + (err&&err.message?err.message:err));
     });
   }
-  function openInvoiceFile(path){
-    sb.storage.from("invoices").createSignedUrl(path, 3600).then(function(res){
-      if(res.data && res.data.signedUrl) window.open(res.data.signedUrl, "_blank");
-      else alert("Не удалось открыть файл.");
-    });
+  // 0.4.16: просмотр вложений прямо в приложении (по просьбе Антона: раньше файл
+  // открывался в новой вкладке/скачивался, и чтобы проверить, тот ли файл
+  // загрузили, его приходилось сохранять). PDF и картинки показываются в окне;
+  // для остальных типов (Excel, Word…) — кнопка «Скачать». Файл забирается
+  // через storage.download (blob), поэтому не зависит от заголовков ссылки.
+  var previewBlobUrl = null;
+  var PREVIEW_TYPES = {pdf:"application/pdf", png:"image/png", jpg:"image/jpeg", jpeg:"image/jpeg", gif:"image/gif", webp:"image/webp", bmp:"image/bmp", svg:"image/svg+xml", heic:"image/heic"};
+  function previewStorageFile(bucket, path){
+    var rawName = String(path||"").split("/").pop() || "файл";
+    var name = rawName;
+    try{ name = decodeURIComponent(rawName); }catch(e){}
+    var ext = (name.split(".").pop()||"").toLowerCase();
+    closeModal();
+    openModal(h`
+      <div class="modal" data-stop style="width:min(980px,96vw);">
+        <div class="modal-head"><h2 style="overflow-wrap:anywhere;">${escapeHtml(name)}</h2><span id="file-preview-actions" style="display:flex;gap:6px;margin-right:8px;"></span><button type="button" class="btn btn-ghost" data-close-modal>✕</button></div>
+        <div class="modal-body" id="file-preview-body" style="min-height:120px;"><div class="muted">Загружаю файл…</div></div>
+      </div>`);
+    function fallback(){
+      sb.storage.from(bucket).createSignedUrl(path, 3600).then(function(res){
+        var body = document.getElementById("file-preview-body"); if(!body) return;
+        if(res.data && res.data.signedUrl) body.innerHTML = '<div>Не удалось показать файл в окне. <a href="'+escapeHtml(res.data.signedUrl)+'" target="_blank" rel="noopener">Открыть в новой вкладке</a></div>';
+        else body.innerHTML = '<div class="banner">Не удалось открыть файл.</div>';
+      });
+    }
+    if(!sb.storage.from(bucket).download){ fallback(); return; }
+    sb.storage.from(bucket).download(path).then(function(res){
+      var body = document.getElementById("file-preview-body");
+      if(!body) return; // окно уже закрыли
+      if(!res || res.error || !res.data){ fallback(); return; }
+      var type = PREVIEW_TYPES[ext] || res.data.type || "application/octet-stream";
+      var blob = new Blob([res.data], {type: type});
+      if(previewBlobUrl) URL.revokeObjectURL(previewBlobUrl);
+      previewBlobUrl = URL.createObjectURL(blob);
+      var url = previewBlobUrl;
+      var actions = document.getElementById("file-preview-actions");
+      if(actions) actions.innerHTML = '<a class="btn btn-sm" href="'+url+'" download="'+escapeHtml(name)+'">Скачать</a><a class="btn btn-sm" href="'+url+'" target="_blank" rel="noopener">В новой вкладке</a>';
+      if(type.indexOf("image/")===0) body.innerHTML = '<img src="'+url+'" alt="'+escapeHtml(name)+'" style="max-width:100%;max-height:74vh;display:block;margin:0 auto;">';
+      else if(type==="application/pdf") body.innerHTML = '<iframe src="'+url+'" title="'+escapeHtml(name)+'" style="width:100%;height:74vh;border:0;border-radius:6px;background:var(--surface-2);"></iframe>';
+      else body.innerHTML = '<div class="banner">Предпросмотр для этого типа файла недоступен — нажмите «Скачать».</div>';
+    }).catch(function(){ fallback(); });
   }
+  function openInvoiceFile(path){ previewStorageFile("invoices", path); }
   function deleteInvoice(invoiceId, path){
     if(!confirm("Удалить этот файл?")) return;
     var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
@@ -2376,12 +2456,7 @@
   // подписанная ссылка — запрашиваем её один раз на путь файла и кешируем в
   // памяти (не в state, чтобы не гонять её через realtime/сравнения состояния),
   // а когда ссылка приходит — перерисовываем открытую карточку заявки.
-  function openPhotoFile(path){
-    sb.storage.from("ticket-photos").createSignedUrl(path, 3600).then(function(res){
-      if(res.data && res.data.signedUrl) window.open(res.data.signedUrl, "_blank");
-      else alert("Не удалось открыть фото.");
-    });
-  }
+  function openPhotoFile(path){ previewStorageFile("ticket-photos", path); }
   var photoUrlCache = {};
   function ensurePhotoUrl(path){
     if(photoUrlCache.hasOwnProperty(path)) return;
@@ -3080,12 +3155,7 @@
       maybeAutoComplete(id);
     });
   }
-  function openActFile(path){
-    sb.storage.from("invoices").createSignedUrl(path, 3600).then(function(res){
-      if(res.data && res.data.signedUrl) window.open(res.data.signedUrl, "_blank");
-      else alert("Не удалось открыть файл акта.");
-    });
-  }
+  function openActFile(path){ previewStorageFile("invoices", path); }
   // Табель на выполненные работы — по просьбе Антона живёт внутри пункта
   // "Акт" (см. milestoneRow key:"act" ниже), а не отдельным пунктом чек-листа.
   // Два взаимоисключающих варианта: свой файл табеля НА ЭТУ заявку, либо
@@ -3116,12 +3186,7 @@
       addNote(id, "Табель удалён.");
     });
   }
-  function openTimesheetFile(path){
-    sb.storage.from("invoices").createSignedUrl(path, 3600).then(function(res){
-      if(res.data && res.data.signedUrl) window.open(res.data.signedUrl, "_blank");
-      else alert("Не удалось открыть файл табеля.");
-    });
-  }
+  function openTimesheetFile(path){ previewStorageFile("invoices", path); }
   function setTimesheetRef(id){
     var ref = prompt("Номер заявки c-lector, в которой учтён табель на эту заявку:", "");
     if(ref==null) return;
@@ -4759,7 +4824,10 @@
       if(rf.dateTo && (!iv.added_to_registry_at || iv.added_to_registry_at > (rf.dateTo+"T23:59:59"))) return false;
       if(q){
         var hay = normalizeForMatch((tk&&tk.external_ref||"")+" "+(hotel?hotel.name:"")+" "+(iv.file_name||""));
-        if(hay.indexOf(q)===-1) return false;
+        if(hay.indexOf(q)===-1){
+          var ivAcc = invoiceAccountedKZT(iv);
+          if(!amountQueryMatch(rf.q, [iv.amount, ivAcc && ivAcc.value])) return false;
+        }
       }
       return true;
     });
@@ -4835,7 +4903,7 @@
       ${financeTabs('registry')}
       <div class="row-gap">
         <div class="filters">
-          <input type="text" data-registry-filter="q" value="${escapeHtml(rf.q||"")}" placeholder="Поиск: № заявки, отель, файл…" style="min-width:220px;">
+          <input type="text" data-registry-filter="q" value="${escapeHtml(rf.q||"")}" placeholder="Поиск: № заявки, отель, файл, сумма…" style="min-width:220px;">
           <select data-registry-filter="hotel"><option value="">Все отели</option>${state.hotels.filter(function(x){return x.in_service;}).map(function(x){return h`<option value="${x.id}" ${rf.hotel===String(x.id)?'selected':''}>№${x.id} ${x.name}</option>`;}).join("")}</select>
           <select data-registry-filter="currency"><option value="">Все валюты</option><option value="KZT" ${rf.currency==='KZT'?'selected':''}>KZT</option><option value="RUB" ${rf.currency==='RUB'?'selected':''}>RUB</option><option value="BYN" ${rf.currency==='BYN'?'selected':''}>BYN</option></select>
           <label style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ink-soft);margin:0;">с <input type="date" data-registry-filter="dateFrom" value="${rf.dateFrom||''}" style="width:auto;"></label>
@@ -4976,6 +5044,7 @@
   // раньше, группа по нескольким заявкам сворачивается/разворачивается
   // отдельно, см. clusterCashExpenseRows/cashExpenseGroupExpanded.
   function cashExpensePersonExpanded(person){
+    if(state.cashSearch) return true; // при поиске показываем найденное сразу
     return !!(state.cashExpandedExpensePersons||{})[person];
   }
   function cashExpenseMonthKey(e){
@@ -5001,6 +5070,7 @@
     return order.map(function(key){ return {key:key, rows:map[key]}; });
   }
   function cashExpenseMonthExpanded(key){
+    if(state.cashSearch) return true;
     return !!(state.cashExpandedExpenseMonths||{})[key];
   }
   // Расходы конкретной заявки (по одной, не по нескольким — см. cash_expenses.ticket_id
@@ -5101,8 +5171,20 @@
   // есть, без наценки (тот же смысл "не учитывать", что и у самой выдачи).
   // Пример Антона: у Стефановича стоит "Нал. 30%" — материал за 1000 ₸ из этих
   // денег разносится в заявку как 1000/(1-0.3)=1429 ₸.
+  // 0.4.16: ставка по прорабу считалась заново (фильтр + сортировка всех
+  // выдач) для КАЖДОЙ строки расхода на каждой перерисовке — на «Наличных» с
+  // сотнями выдач и тысячами расходов это давало секунды задержки. Кэш
+  // живёт до следующего render() (см. render()) — состояние между
+  // перерисовками не меняется.
+  var personRateCache = Object.create(null);
   function personAccountedRate(person){
     if(!person) return null;
+    if(person in personRateCache) return personRateCache[person];
+    var r = personAccountedRateCalc(person);
+    personRateCache[person] = r;
+    return r;
+  }
+  function personAccountedRateCalc(person){
     var rows = (state.cashAdvances||[]).filter(function(a){ return a.person===person && a.accounted_basis; });
     if(!rows.length) return null;
     rows.sort(function(a,b){ return (b.created_at||b.date||"").localeCompare(a.created_at||a.date||""); });
@@ -5553,7 +5635,7 @@
     var monthKey = state.reportsMonth || new Date().toISOString().slice(0,7);
     var vatMode = state.reportsVat==="gross" ? "gross" : "net";
     var report = buildFinanceReport(monthKey, vatMode);
-    function fmt(n){ return (Number(n)||0).toLocaleString("ru-RU", {maximumFractionDigits:0}); }
+    function fmt(n){ return nfmt(Number(n)||0, {maximumFractionDigits:0}); }
     function fmtPct(n){ return (Math.round(n*10)/10).toLocaleString("ru-RU")+"%"; }
     var overheadCats = Object.keys(report.overheadByCategory).sort();
     var curKeys = Object.keys(report.currencies).sort(function(a,b){ return a==="KZT"?-1:b==="KZT"?1:a.localeCompare(b); });
@@ -5783,12 +5865,7 @@
       alert("Не удалось прикрепить чек: " + (err&&err.message?err.message:err));
     });
   }
-  function openCashReceiptFile(path){
-    sb.storage.from("cash-receipts").createSignedUrl(path, 3600).then(function(res){
-      if(res.data && res.data.signedUrl) window.open(res.data.signedUrl, "_blank");
-      else alert("Не удалось открыть файл.");
-    });
-  }
+  function openCashReceiptFile(path){ previewStorageFile("cash-receipts", path); }
   function deleteCashReceipt(id, path){
     if(!confirm("Удалить прикреплённый чек?")) return;
     sb.storage.from("cash-receipts").remove([path]).then(function(){
@@ -6012,6 +6089,17 @@
   // счетов (invoiceAccountedKZT): запись превращается во временный «счёт».
   // Старые записи (без валюты/НДС/налога — внесены до 0.4.13) считаются как
   // раньше: сумма «как есть» в ₸.
+  // 0.4.15: поиск по сумме — «101000», «101 000», «101000,5» находят суммы,
+  // содержащие эти цифры (как в документе, так и «Учтено в затратах»).
+  function amountQueryMatch(qRaw, nums){
+    var q = String(qRaw||"").replace(/[\s\u00a0]/g,"").replace(",",".");
+    if(!/^\d+(\.\d+)?$/.test(q)) return false;
+    return (nums||[]).some(function(n){
+      if(n==null || isNaN(Number(n))) return false;
+      var v = Number(n);
+      return String(Math.round(v*100)/100).indexOf(q)>-1 || String(Math.round(v)).indexOf(q)>-1;
+    });
+  }
   function overheadAccountedKZT(oe){
     if(oe.vat_included==null && !oe.currency && !oe.tax_basis) return { value: Number(oe.amount)||0, state:"ok", legacy:true };
     var day = oe.date ? String(oe.date).slice(0,10) : new Date().toISOString().slice(0,10);
@@ -6065,7 +6153,7 @@
       if(res && res.error) alert("Не удалось сохранить: " + res.error.message);
     });
   }
-  function addOverheadExpense(data, files, onOk){
+  function addOverheadExpense(data, files, onOk, onDone){
     if(!canEditRegistry()){ alert("Вносить накладные расходы может только Администратор, Руководитель или Финансист."); return false; }
     if(state.overheadSaving) return false;
     var category = (data.category||"").trim();
@@ -6098,7 +6186,7 @@
       if(onOk) onOk();
     }).catch(function(err){
       alert("Не удалось сохранить: " + (err&&err.message?err.message:err));
-    }).then(function(){ state.overheadSaving = false; render(); });
+    }).then(function(){ state.overheadSaving = false; render(); if(onDone) onDone(); });
     return true;
   }
   function addFilesToOverhead(id, files){
@@ -6113,12 +6201,7 @@
       });
     }).catch(function(err){ alert("Не удалось прикрепить файл: " + (err&&err.message?err.message:err)); });
   }
-  function openOverheadFile(path){
-    sb.storage.from("invoices").createSignedUrl(path, 3600).then(function(res){
-      if(res.data && res.data.signedUrl) window.open(res.data.signedUrl, "_blank");
-      else alert("Не удалось открыть файл.");
-    });
-  }
+  function openOverheadFile(path){ previewStorageFile("invoices", path); }
   function deleteOverheadFile(id, path){
     if(!canEditRegistry()) return;
     if(!confirm("Удалить прикреплённый файл?")) return;
@@ -6357,13 +6440,22 @@
     var editable = canEditCashExpenses();
     var advances = (state.cashAdvances||[]).slice().sort(function(a,b){ return (b.date||"").localeCompare(a.date||""); });
     var expenses = (state.cashExpenses||[]).slice().sort(function(a,b){ return (b.date||"").localeCompare(a.date||""); });
+    // 0.4.15: поиск по расходам — описание, прораб, отель, № заявки, сумма
+    var cq = normalizeForMatch(state.cashSearch||"");
+    var expensesAll = expenses;
+    if(cq) expenses = expenses.filter(function(e){
+      var hotel = e.hotel_id ? hotelById(e.hotel_id) : null;
+      var tk = e.ticket_id ? state.tickets.find(function(x){return x.id===e.ticket_id;}) : null;
+      var hay = normalizeForMatch((e.description||"")+" "+(e.person||"")+" "+(hotel?hotel.name:"")+" "+(tk&&tk.external_ref||""));
+      return hay.indexOf(cq)>-1 || amountQueryMatch(state.cashSearch, [e.amount, e.unit_cost]);
+    });
     var persons = distinctCashPersons();
     var todayIso = new Date().toISOString().slice(0,10);
-    function fmtSum(n){ return (Number(n)||0).toLocaleString("ru-RU", {maximumFractionDigits:2}); }
+    function fmtSum(n){ return nfmt(Number(n)||0, {maximumFractionDigits:2}); }
     var byPerson = {};
     persons.forEach(function(p){ byPerson[p] = {given:0, spent:0}; });
     advances.forEach(function(a){ if(byPerson[a.person]) byPerson[a.person].given += Number(a.amount)||0; });
-    expenses.forEach(function(e){ if(byPerson[e.person]) byPerson[e.person].spent += Number(e.amount)||0; });
+    expensesAll.forEach(function(e){ if(byPerson[e.person]) byPerson[e.person].spent += Number(e.amount)||0; });
     var hotelOptions = state.hotels.filter(function(x){return x.in_service;}).map(function(x){ return h`<option value="${x.id}">№${x.id} ${escapeHtml(x.name)}</option>`; }).join("");
     var advanceGroups = groupCashByPerson(advances);
     var expenseGroups = groupCashByPerson(expenses);
@@ -6443,7 +6535,7 @@
           </div>
 
           <div class="card card-pad">
-            <div class="section-title">Расходы</div>
+            <div class="oh-head"><div class="section-title">Расходы</div><input type="text" class="oh-search" data-cash-search value="${escapeHtml(state.cashSearch||'')}" placeholder="Поиск: описание, сумма, заявка…"></div>
             <div class="table-wrap"><table>
               <thead><tr><th>Дата</th><th>Наименование</th><th class="num">Кол-во</th><th class="num">Цена</th><th class="num">Сумма</th><th>Мотель</th><th>Заявка</th><th>Категория</th><th>Прораб</th>${editable?'<th></th>':''}</tr></thead>
               <tbody>${expenses.length===0 ? h`<tr><td colspan="${editable?10:9}"><div class="empty-state"><b>Пока нет расходов</b>Внесите отчёт прораба ниже — вручную или вставкой таблицы.</div></td></tr>` :
@@ -6499,7 +6591,7 @@
                       // выделена (см. .registry-group-row в <style>) — раньше
                       // сливалась с обычными строками расходов, когда была
                       // развёрнута.
-                      var gexpanded = !!state.cashExpenseGroupExpanded[cl.key];
+                      var gexpanded = !!state.cashExpenseGroupExpanded[cl.key] || !!state.cashSearch;
                       var first = cl.rows[0];
                       var sumAmt = cl.rows.reduce(function(s,e){ return s+(Number(e.amount)||0); }, 0);
                       var header2 = h`<tr class="registry-group-row">
@@ -6540,12 +6632,104 @@
   // общий журнал компании, без привязки к заявкам/отелям (см. AskUserQuestion
   // в диалоге) — зарплаты бэк-офиса, прорабов, аренда и т.д. Не участвует ни
   // в «Затратах по заявке», ни в чек-листах — только своя лента и итог.
+  // 0.4.14: окно «Добавить/Изменить расход» (вариант A: карточки + окно).
+  // Окно живёт в overlay-root вне render(), поэтому набранное не теряется при
+  // обновлениях страницы; «Учтено в затратах» считается на лету.
+  function overheadTaxOptionsHtml(sel){
+    return [["","—"],["simplified","Упрощ. +20%"],["cash","Нал. +30%"],["custom","Свой, %"],["custom_amt","Своя сумма, ₸"]].map(function(o){
+      return '<option value="'+o[0]+'"'+(sel===o[0]?' selected':'')+'>'+o[1]+'</option>';
+    }).join("");
+  }
+  function overheadFormRecord(form){
+    var fd = new FormData(form);
+    var f = overheadTaxFields(fd.get("currency"), fd.get("vat"), fd.get("tax"), fd.get("tax_value")||"");
+    var num = Number(parseAmountInputValue(fd.get("amount")||""));
+    return { date: fd.get("date"), amount: isNaN(num)?0:num, currency: f.currency, vat_included: f.vat_included, tax_basis: f.tax_basis, extra: f.extra };
+  }
+  function overheadLiveUpdate(){
+    var form = document.getElementById("overhead-expense-form");
+    if(!form) return;
+    var vatOn = form.elements.vat.value==="with";
+    form.elements.tax.disabled = vatOn;
+    var tax = vatOn ? "" : form.elements.tax.value;
+    var cust = tax==="custom" || tax==="custom_amt";
+    var wrap = document.getElementById("oh-taxval-wrap");
+    if(wrap) wrap.style.display = cust ? "" : "none";
+    form.elements.tax_value.placeholder = tax==="custom_amt" ? "₸" : "%";
+    var box = document.getElementById("overhead-live");
+    if(!box) return;
+    var rec = overheadFormRecord(form);
+    var html;
+    if(!(rec.amount>0)){ html = '<b>—</b><small>Введите сумму — здесь появится «Учтено в затратах».</small>'; }
+    else {
+      var acc = overheadAccountedKZT(rec);
+      var desc = (rec.currency||"KZT")+" · "+(rec.vat_included ? "сумма с НДС — без НДС в затраты" : "без НДС")+(rec.tax_basis ? " · доп. налог: "+taxBasisLabel({tax_basis:rec.tax_basis, extra:rec.extra}) : "");
+      if(acc.state==="ok") html = '<b>'+fmtKZT2(acc.value)+' ₸</b><small>'+escapeHtml(desc)+'</small>';
+      else if(acc.state==="pending"){ html = '<b>курс…</b><small>Получаю курс Нацбанка РК</small>'; setTimeout(overheadLiveUpdate, 800); }
+      else if(acc.state==="error") html = '<b>—</b><small>Не удалось получить курс Нацбанка РК на эту дату</small>';
+      else html = '<b>—</b><small>Выберите валюту и «с НДС / без НДС»</small>';
+    }
+    if(box.innerHTML!==html) box.innerHTML = html;
+  }
+  function openOverheadModal(id){
+    if(!canEditRegistry()){ alert("Вносить накладные расходы может только Администратор, Руководитель или Финансист."); return; }
+    var e = id ? (state.overheadExpenses||[]).find(function(x){ return x.id===id; }) : null;
+    if(id && !e) return;
+    var todayIso = new Date().toISOString().slice(0,10);
+    var taxSel = e ? overheadTaxSelectValue(e) : "";
+    var customVal = e && e.extra ? (taxSel==="custom_amt" ? e.extra.custom_tax_amount : e.extra.custom_tax_pct) : null;
+    var vatVal = e ? (e.vat_included===true?"with":"without") : "without";
+    var curVal = e ? (e.currency||"KZT") : "KZT";
+    openModal(h`
+      <div class="modal" data-stop style="width:560px;">
+        <div class="modal-head"><h2>${e?'Изменить расход':'Новый накладной расход'}</h2><button type="button" class="btn btn-ghost" data-close-modal>✕</button></div>
+        <form id="overhead-expense-form" ${e?h`data-edit-id="${e.id}"`:''}>
+          <div class="modal-body">
+            <div class="oh-form-grid">
+              <div class="field"><label>Дата</label><input type="date" name="date" value="${e&&e.date?String(e.date).slice(0,10):todayIso}" required></div>
+              <div class="field"><label>Статья</label><input type="text" name="category" list="overhead-categories" placeholder="напр. Зарплата бэк-офиса" value="${e?escapeHtml(e.category):''}" required></div>
+              <div class="field"><label>Сумма</label><input type="text" inputmode="decimal" class="registry-amount-input" name="amount" placeholder="напр. 100 000" value="${e?formatAmountInputValue(String(e.amount)):''}" required></div>
+              <div class="field"><label>Валюта</label><select name="currency">${["KZT","RUB","BYN"].map(function(c){ return '<option value="'+c+'"'+(curVal===c?' selected':'')+'>'+c+'</option>'; }).join("")}</select></div>
+              <div class="field"><label>НДС</label><select name="vat"><option value="without"${vatVal==='without'?' selected':''}>Без НДС</option><option value="with"${vatVal==='with'?' selected':''}>С НДС</option></select></div>
+              <div class="field"><label>Налог (при «Без НДС»)</label><select name="tax">${overheadTaxOptionsHtml(taxSel)}</select></div>
+              <div class="field full" id="oh-taxval-wrap" style="display:none;"><label>Свой налог: % или ₸</label><input type="text" inputmode="decimal" class="registry-tax-custom-input" name="tax_value" placeholder="%" value="${customVal!=null?formatAmountInputValue(String(customVal)):''}"></div>
+            </div>
+            <div class="oh-live" style="margin-top:12px;"><div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;">Учтено в затратах</div><div id="overhead-live"></div></div>
+            <div class="field"><label>Примечание (необязательно)</label><input type="text" name="note" placeholder="комментарий" value="${e?escapeHtml(e.note||''):''}"></div>
+            ${e ? '' : h`<div class="field"><label>Файлы (необязательно — счета, акты, чеки)</label>
+              <div class="oh-drop" id="oh-drop"><span id="oh-drop-text">Перетащите файлы сюда или нажмите, чтобы выбрать</span><input type="file" name="files" multiple></div></div>`}
+          </div>
+          <div class="modal-foot"><button type="button" class="btn" data-close-modal>Отмена</button><button type="submit" class="btn btn-primary" id="oh-submit">${e?'Сохранить':'Добавить'}</button></div>
+        </form>
+      </div>`);
+    overheadLiveUpdate();
+    var first = document.querySelector('#overhead-expense-form input[name=category]');
+    if(first && !e) first.focus();
+  }
+  function saveOverheadEdit(id, data){
+    if(!canEditRegistry()) return false;
+    var e = (state.overheadExpenses||[]).find(function(x){ return x.id===id; });
+    if(!e) return false;
+    var category = (data.category||"").trim();
+    var rawAmt = parseAmountInputValue(data.amount); var amount = Number(rawAmt);
+    if(!category){ alert("Укажите статью расхода."); return false; }
+    if(rawAmt==="" || isNaN(amount) || amount<=0){ alert("Укажите сумму."); return false; }
+    var tax = overheadTaxFields(data.currency, data.vat, data.tax, data.tax_value||"");
+    var patch = { date: data.date || e.date, category: category, amount: amount, currency: tax.currency, vat_included: tax.vat_included, tax_basis: tax.tax_basis, extra: tax.extra, note: (data.note||"").trim() || null };
+    Object.assign(e, patch);
+    state.overheadExpenses.sort(rtSortBy("date", false));
+    render();
+    sb.from("overhead_expenses").update(patch).eq("id", id).then(function(res){
+      if(res && res.error) alert("Не удалось сохранить: " + res.error.message);
+    });
+    return true;
+  }
   function viewOverhead(){
     var editable = canEditRegistry();
     var rows = (state.overheadExpenses||[]).slice().sort(function(a,b){ return (b.date||"").localeCompare(a.date||""); });
     var categories = distinctOverheadCategories();
     var todayIso = new Date().toISOString().slice(0,10);
-    function fmtSum(n){ return (Number(n)||0).toLocaleString("ru-RU", {minimumFractionDigits:2, maximumFractionDigits:2}); }
+    function fmtSum(n){ return nfmt(Number(n)||0, {minimumFractionDigits:2, maximumFractionDigits:2}); }
     var total = 0, incomplete = 0;
     var byCategory = {};
     rows.forEach(function(e){
@@ -6555,6 +6739,13 @@
     });
     var categoryTotals = Object.keys(byCategory).sort();
     var saving = !!state.overheadSaving;
+    var oq = normalizeForMatch(state.overheadSearch||"");
+    var shown = !oq ? rows : rows.filter(function(e){
+      var hay = normalizeForMatch((e.category||"")+" "+(e.note||"")+" "+(e.created_by||"")+" "+(Array.isArray(e.files)?e.files:[]).map(function(f){ return f.name||""; }).join(" "));
+      if(hay.indexOf(oq)>-1) return true;
+      var acc = overheadAccountedKZT(e);
+      return amountQueryMatch(state.overheadSearch, [e.amount, acc.state==="ok"?acc.value:null]);
+    });
     function taxOptions(sel, vatOn){
       return h`<option value="" ${sel===''?'selected':''}>—</option>${vatOn?'':h`<option value="simplified" ${sel==='simplified'?'selected':''}>Упрощ. +20%</option><option value="cash" ${sel==='cash'?'selected':''}>Нал. +30%</option><option value="custom" ${sel==='custom'?'selected':''}>Свой, %</option><option value="custom_amt" ${sel==='custom_amt'?'selected':''}>Своя сумма, ₸</option>`}`;
     }
@@ -6577,43 +6768,34 @@
         </div>
 
         <div class="card card-pad">
-          <div class="section-title">Записи</div>
-          <div class="table-wrap"><table>
-            <thead><tr><th>Дата</th><th>Статья</th><th class="num">Сумма</th><th>Валюта</th><th>НДС</th><th>Налог</th><th class="num">Учтено в затратах, ₸</th><th>Примечание</th><th>Файлы</th><th>Кто внёс</th>${editable?'<th></th>':''}</tr></thead>
-            <tbody>${rows.length===0 ? h`<tr><td colspan="${editable?11:10}"><div class="empty-state"><b>Пока нет записей</b>Внесите накладной расход ниже.</div></td></tr>` :
-              rows.map(function(e){
-                var vatOn = e.vat_included===true;
-                var taxSel = overheadTaxSelectValue(e);
-                var taxCustom = (taxSel==="custom"||taxSel==="custom_amt");
-                var customVal = taxSel==="custom_amt" ? (e.extra&&e.extra.custom_tax_amount) : (e.extra&&e.extra.custom_tax_pct);
-                return h`<tr>
-                  <td class="mono muted" style="white-space:nowrap;">${fmtDateShort(e.date)}</td>
-                  <td>${escapeHtml(e.category)}</td>
-                  <td class="num mono">${editable ? h`<input type="text" inputmode="decimal" class="registry-amount-input" data-overhead-field="amount" data-id="${e.id}" value="${formatAmountInputValue(String(e.amount))}" style="width:110px;text-align:right;">` : fmtSum(e.amount)}</td>
-                  <td>${editable ? h`<select data-overhead-field="currency" data-id="${e.id}"><option value="">—</option>${["KZT","RUB","BYN"].map(function(c){ return h`<option value="${c}" ${e.currency===c?'selected':''}>${c}</option>`; }).join("")}</select>` : escapeHtml(e.currency||'—')}</td>
-                  <td>${editable ? h`<select data-overhead-field="vat" data-id="${e.id}"><option value="">—</option><option value="with" ${vatOn?'selected':''}>С НДС</option><option value="without" ${e.vat_included===false?'selected':''}>Без</option></select>` : (vatOn?'С НДС':(e.vat_included===false?'Без':'—'))}</td>
-                  <td>${editable ? h`<div style="display:flex;flex-direction:column;gap:3px;"><select data-overhead-field="tax" data-id="${e.id}" ${vatOn?'disabled title="При «с НДС» доп. налог не применяется"':''}>${taxOptions(taxSel, vatOn)}</select>${taxCustom?h`<input type="text" inputmode="decimal" class="registry-tax-custom-input" data-overhead-field="tax_value" data-id="${e.id}" value="${customVal!=null?formatAmountInputValue(String(customVal)):''}" placeholder="${taxSel==='custom_amt'?'₸':'%'}" style="width:90px;">`:''}</div>` : escapeHtml(e.tax_basis?taxBasisLabel({tax_basis:e.tax_basis, extra:e.extra}):'—')}</td>
-                  <td class="mono" style="text-align:right;">${overheadAccountedLabel(e)}</td>
-                  <td class="muted">${escapeHtml(e.note||'')}</td>
-                  <td style="font-size:12px;">${(Array.isArray(e.files)?e.files:[]).map(function(f){ return h`<div style="white-space:nowrap;"><a href="#" data-action="overhead-file-open" data-path="${escapeHtml(f.path)}" title="${escapeHtml(f.name||'')}">📎 ${escapeHtml(String(f.name||'файл').length>24?String(f.name).slice(0,22)+'…':(f.name||'файл'))}</a>${editable?h` <a href="#" data-action="overhead-file-delete" data-id="${e.id}" data-path="${escapeHtml(f.path)}" style="color:var(--crit);" title="Удалить файл">✕</a>`:''}</div>`; }).join("")}${editable?h`<label class="btn btn-ghost btn-sm" style="cursor:pointer;">＋ файл<input type="file" multiple data-overhead-file-upload="${e.id}" style="display:none;"></label>`:''}</td>
-                  <td class="muted" style="white-space:nowrap;">${escapeHtml(e.created_by||'')}</td>
-                  ${editable?h`<td><a href="#" data-action="overhead-expense-delete" data-id="${e.id}" style="color:var(--crit);">✕</a></td>`:''}
-                </tr>`;
-              }).join("")}
-            </tbody>
-          </table></div>
-          ${editable ? h`<form id="overhead-expense-form" data-keep-draft class="field-row" style="margin-top:12px;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;">
-            <div class="field"><label>Дата</label><input type="date" name="date" value="${todayIso}" required></div>
-            <div class="field"><label>Статья</label><input type="text" name="category" list="overhead-categories" placeholder="напр. Зарплата бэк-офиса" required></div>
-            <div class="field"><label>Сумма</label><input type="text" inputmode="decimal" class="registry-amount-input" name="amount" placeholder="напр. 100 000" required></div>
-            <div class="field"><label>Валюта</label><select name="currency"><option value="KZT" selected>KZT</option><option value="RUB">RUB</option><option value="BYN">BYN</option></select></div>
-            <div class="field"><label>НДС</label><select name="vat"><option value="without" selected>Без НДС</option><option value="with">С НДС</option></select></div>
-            <div class="field"><label>Налог (при «Без НДС»)</label><select name="tax">${taxOptions('', false)}</select></div>
-            <div class="field"><label>Свой налог: % или ₸</label><input type="text" inputmode="decimal" class="registry-tax-custom-input" name="tax_value" placeholder="если выбран «Свой»"></div>
-            <div class="field" style="grid-column:1/-1;"><label>Примечание (необязательно)</label><input type="text" name="note" placeholder="комментарий"></div>
-            <div class="field" style="grid-column:1/-1;"><label>Файлы (необязательно — счета, акты, чеки)</label><input type="file" name="files" multiple></div>
-            <button class="btn btn-primary" type="submit" ${saving?'disabled':''}>${saving?'Сохраняю…':'Добавить'}</button>
-          </form>` : ''}
+          <div class="oh-head"><div class="section-title">Записи</div><input type="text" class="oh-search" data-overhead-search value="${escapeHtml(state.overheadSearch||'')}" placeholder="Поиск: статья, сумма, файл…">${editable ? h`<button type="button" class="btn btn-primary" data-action="overhead-add-open"${saving?' disabled':''}>＋ Добавить расход</button>` : ''}</div>
+          ${rows.length===0 ? h`<div class="empty-state"><b>Пока нет записей</b>${editable?'Нажмите «＋ Добавить расход».':''}</div>` : shown.length===0 ? h`<div class="empty-state"><b>Ничего не найдено</b>Проверьте статью, сумму или примечание в поиске.</div>` : h`<div class="oh-list">${shown.map(function(e){
+            var acc = overheadAccountedKZT(e);
+            var vatTxt = e.vat_included===true ? 'с НДС' : (e.vat_included===false ? 'без НДС' : '');
+            var taxTxt = e.tax_basis ? taxBasisLabel({tax_basis:e.tax_basis, extra:e.extra}) : '';
+            var subParts = [];
+            if(e.currency) subParts.push(fmtKZT(e.amount)+' '+e.currency);
+            if(vatTxt) subParts.push(vatTxt);
+            var sumHtml = acc.state==="ok" ? h`<b>${fmtKZT2(acc.value)} ₸</b>`
+              : acc.state==="pending" ? h`<b class="muted">курс…</b>`
+              : h`<b class="muted" title="${acc.state==='error'?'Не удалось получить курс Нацбанка РК':'Укажите валюту и НДС'}">—</b>`;
+            if(acc.state==="missing" || acc.state==="error") subParts = [fmtSum(e.amount)+(e.currency?' '+e.currency:'')];
+            var incompleteChip = (acc.state==="missing") ? h`<span class="oh-chip warn" title="Укажите валюту и «с НДС/без», чтобы посчитать «Учтено в затратах»">нужны валюта и НДС</span>` : '';
+            return h`<div class="oh-card" data-oh-id="${e.id}">
+              <div>
+                <div class="oh-cat">${escapeHtml(e.category)}</div>
+                <div class="oh-meta">${fmtDateShort(e.date)}${e.created_by?' · '+escapeHtml(e.created_by):''}</div>
+                ${e.note ? h`<div class="oh-note">${escapeHtml(e.note)}</div>` : ''}
+              </div>
+              <div class="oh-sum">${sumHtml}<small>${escapeHtml(subParts.join(' · '))}</small></div>
+              <div class="oh-chips">${e.currency?h`<span class="oh-chip accent">${escapeHtml(e.currency)}</span>`:''}${vatTxt?h`<span class="oh-chip">${vatTxt==='с НДС'?'С НДС':'Без НДС'}</span>`:''}${taxTxt?h`<span class="oh-chip">${escapeHtml(taxTxt)}</span>`:''}${incompleteChip}${(Array.isArray(e.files)?e.files:[]).map(function(f){ return h`<span class="oh-chip">📎 <a href="#" data-action="overhead-file-open" data-path="${escapeHtml(f.path)}" title="${escapeHtml(f.name||'')}">${escapeHtml(String(f.name||'файл'))}</a>${editable?h`<a href="#" data-action="overhead-file-delete" data-id="${e.id}" data-path="${escapeHtml(f.path)}" style="color:var(--crit);" title="Удалить файл">✕</a>`:''}</span>`; }).join("")}</div>
+              ${editable ? h`<div class="oh-acts">
+                <button type="button" class="btn btn-ghost btn-sm" data-action="overhead-edit-open" data-id="${e.id}">Изменить</button>
+                <label class="btn btn-ghost btn-sm" style="cursor:pointer;margin:0;">＋ файл<input type="file" multiple data-overhead-file-upload="${e.id}" style="display:none;"></label>
+                <button type="button" class="btn btn-ghost btn-sm oh-del" data-action="overhead-expense-delete" data-id="${e.id}">Удалить</button>
+              </div>` : '<div></div>'}
+            </div>`;
+          }).join("")}</div>`}
         </div>
       </div>`;
   }
@@ -7171,9 +7353,12 @@
   }
   function renderTicketPanelInner(){
     var root = document.getElementById("overlay-root");
-    if(!state.selectedTicketId){ root.innerHTML=""; if(notesChannel){ sb.removeChannel(notesChannel); notesChannel=null; notesChannelTicketId=null; } return; }
+    // 0.4.14: открытое окно (openModal) не сносим фоновой перерисовкой — иначе
+    // введённое в окне «Накладные расходы» пропадало при приходе чужой записи.
+    function clearRoot(){ Array.from(root.children).forEach(function(c){ if(!c.classList.contains("modal-scrim")) c.remove(); }); }
+    if(!state.selectedTicketId){ clearRoot(); if(notesChannel){ sb.removeChannel(notesChannel); notesChannel=null; notesChannelTicketId=null; } return; }
     var t = state.tickets.find(function(x){return x.id===state.selectedTicketId;});
-    if(!t){ root.innerHTML=""; return; }
+    if(!t){ clearRoot(); return; }
     var hotel = hotelById(t.hotel_id); var di = deadlineInfo(t);
     var specialists = state.profiles.filter(function(m){ return m.role==="specialist" && m.active!==false; });
 
@@ -7270,7 +7455,7 @@
               // так что здесь достаточно одной категории.
               var crewCash = cashExpensesFor(t, "crew");
               var crewCashTotal = crewCash.reduce(function(sum,ce){ return sum + (Number(ce.amount)||0); }, 0);
-              var fmtCashSum = function(n){ return (Number(n)||0).toLocaleString("ru-RU", {maximumFractionDigits:2}); };
+              var fmtCashSum = function(n){ return nfmt(Number(n)||0, {maximumFractionDigits:2}); };
               // 0.4.5, п.3 (по просьбе Антона): общая сумма по пункту "Бригада" —
               // счета/договоры (category="crew", "Учтено в затратах": без НДС,
               // с доп. налогом по способу оплаты) + наличные (см. crewCashTotal
@@ -7498,7 +7683,7 @@
           ${(function(){
             var cost = ticketCostTotal(t);
             if(!cost.invoiceCount && !cost.cashCount) return "";
-            var fmt = function(n){ return (Number(n)||0).toLocaleString("ru-RU", {maximumFractionDigits:2}); };
+            var fmt = function(n){ return nfmt(Number(n)||0, {maximumFractionDigits:2}); };
             return h`<div>
               <div class="section-title">Затраты по заявке ${infoTip("Сумма оплаченных счетов (Бригада + Материал, без НДС, с доп. налогом по способу оплаты — как в «Итого по работе»/«Итого по материалам» выше) и наличных расходов, привязанных к этой заявке. Неоплаченные счета сюда не входят — деньги ещё не потрачены. Если прорабу, оплатившему расход, в «Финансы → Наличные расходы → Выдачи» указан способ учёта («Учтено в затратах»), сумма расхода досчитывается с наценкой по его ставке (напр. нал. 30%: 1000 ₸ расхода войдёт сюда как 1429 ₸) — раздел «Наличные расходы» при этом продолжает показывать сумму как есть, реально оплаченную.")}</div>
               <div class="cost-summary">
@@ -7563,7 +7748,7 @@
 
   /* ============================== MODALS ============================== */
   function openModal(html){ document.getElementById("overlay-root").appendChild(el(h`<div class="modal-scrim" data-close-modal>${html}</div>`)); }
-  function closeModal(){ var m=document.querySelector(".modal-scrim"); if(m) m.remove(); }
+  function closeModal(){ var m=document.querySelector(".modal-scrim"); if(m) m.remove(); if(previewBlobUrl){ URL.revokeObjectURL(previewBlobUrl); previewBlobUrl=null; } }
 
   function openMeModal(){
     openModal(h`
@@ -7848,13 +8033,31 @@
   function morphInto(container, html){
     window.morphdom(container, "<div>" + html + "</div>", {
       childrenOnly: true,
+      // 0.4.16: открытое окно (openModal, в т.ч. просмотр файла) не удаляется
+      // перерисовкой карточки заявки/страницы.
+      onBeforeNodeDiscarded: function(node){ return !(node.classList && node.classList.contains("modal-scrim")); },
       onBeforeElUpdated: morphdomPreserveTyping,
       onElUpdated: function(el){ if(el.tagName==="SELECT" && el.__draftValue!=null){ el.value = el.__draftValue; el.__draftValue = null; } },
       onBeforeElChildrenUpdated: morphdomSkipChildrenFor
     });
   }
+  // 0.4.16: события realtime приходят пачками (импорт отчёта прораба, массовое
+  // изменение) — раньше КАЖДАЯ строка вызывала полную перерисовку приложения
+  // (сотни мс), и на 40 строках страница «зависала» на секунды; пока вкладка
+  // занята, не обновляется токен входа, и приложение просило авторизоваться
+  // заново. Теперь перерисовки от realtime сливаются в одну (пауза 60 мс, но
+  // не дольше 400 мс подряд, чтобы поток событий всё равно обновлял экран).
+  var rtRenderTimer = null, rtRenderFirst = 0;
+  function scheduleRender(){
+    var now = Date.now();
+    if(!rtRenderTimer) rtRenderFirst = now;
+    if(rtRenderTimer) clearTimeout(rtRenderTimer);
+    var wait = Math.max(0, Math.min(60, 400 - (now - rtRenderFirst)));
+    rtRenderTimer = setTimeout(function(){ rtRenderTimer = null; render(); }, wait);
+  }
   function render(){
     invalidateInvoiceGroupIndex();
+    personRateCache = Object.create(null);
     renderInProgress = true;
     try{ renderInner(); } finally { renderInProgress = false; }
   }
@@ -8325,6 +8528,8 @@
       if(action==="cash-expense-delete"){ e.preventDefault(); deleteCashExpense(id); return; }
       if(action==="overhead-file-open"){ e.preventDefault(); openOverheadFile(actionEl.getAttribute("data-path")); return; }
       if(action==="overhead-file-delete"){ e.preventDefault(); deleteOverheadFile(id, actionEl.getAttribute("data-path")); return; }
+      if(action==="overhead-add-open"){ e.preventDefault(); openOverheadModal(null); return; }
+      if(action==="overhead-edit-open"){ e.preventDefault(); openOverheadModal(id); return; }
       if(action==="overhead-expense-delete"){ e.preventDefault(); deleteOverheadExpense(id); return; }
       if(action==="cash-advance-confirm-toggle"){ setCashAdvanceConfirmed(id, actionEl.getAttribute("data-val")==="1"); return; }
       if(action==="cash-receipt-open"){ e.preventDefault(); openCashReceiptFile(actionEl.getAttribute("data-path")); return; }
@@ -8616,9 +8821,27 @@
     }
     if(e.target.id==="overhead-expense-form"){
       e.preventDefault(); var fdoe=new FormData(e.target);
+      var oeData = {date:fdoe.get("date"), category:fdoe.get("category"), amount:fdoe.get("amount"), currency:fdoe.get("currency"), vat:fdoe.get("vat"), tax:fdoe.get("tax"), tax_value:fdoe.get("tax_value"), note:fdoe.get("note")};
+      var oeEditId = e.target.getAttribute("data-edit-id");
+      if(oeEditId){ if(saveOverheadEdit(oeEditId, oeData)!==false) closeModal(); return; }
       var oeFiles = Array.from((e.target.elements.files && e.target.elements.files.files) || []);
-      var oeForm = e.target;
-      addOverheadExpense({date:fdoe.get("date"), category:fdoe.get("category"), amount:fdoe.get("amount"), currency:fdoe.get("currency"), vat:fdoe.get("vat"), tax:fdoe.get("tax"), tax_value:fdoe.get("tax_value"), note:fdoe.get("note")}, oeFiles, function(){ oeForm.reset(); });
+      var oeBtn = document.getElementById("oh-submit");
+      var started = addOverheadExpense(oeData, oeFiles, function(){ closeModal(); }, function(){ var b=document.getElementById("oh-submit"); if(b){ b.disabled=false; b.textContent="Добавить"; } });
+      if(started && oeBtn){ oeBtn.disabled = true; oeBtn.textContent = "Сохраняю…"; }
+    }
+  });
+  // 0.4.14: живой расчёт «Учтено в затратах» в окне накладных и подпись выбранных файлов
+  document.addEventListener("input", function(e){
+    if(e.target.form && e.target.form.id==="overhead-expense-form") overheadLiveUpdate();
+    if(e.target.matches && e.target.matches("[data-overhead-search]")){ state.overheadSearch = e.target.value; render(); }
+    if(e.target.matches && e.target.matches("[data-cash-search]")){ state.cashSearch = e.target.value; render(); }
+  });
+  document.addEventListener("change", function(e){
+    if(!(e.target.form && e.target.form.id==="overhead-expense-form")) return;
+    overheadLiveUpdate();
+    if(e.target.name==="files"){
+      var fl = Array.from(e.target.files||[]); var dz = document.getElementById("oh-drop"), tx = document.getElementById("oh-drop-text");
+      if(dz && tx){ dz.classList.toggle("has", fl.length>0); tx.textContent = fl.length ? ("📎 " + fl.map(function(f){ return f.name; }).join(", ")) : "Перетащите файлы сюда или нажмите, чтобы выбрать"; }
     }
   });
 
