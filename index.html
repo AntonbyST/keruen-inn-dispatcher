@@ -1920,6 +1920,53 @@
   function reloadCrews(){
     sb.from("crews").select("*").order("name", {ascending:true}).then(function(res){ state.crews = res.data || []; render(); });
   }
+  // 0.4.21: состояние автосинхронизации c-lector (таблица sync_state, пишет
+  // edge-функция clector-sync) — показываем на вкладке «Импорт из c-lector».
+  function reloadSyncState(){
+    return sb.from("sync_state").select("*").then(function(res){
+      var m = {}; (res.data||[]).forEach(function(r){ m[r.key] = r; });
+      state.syncState = m; state.syncStateLoadedAt = Date.now(); render();
+    });
+  }
+  function syncStatusCard(){
+    var m = state.syncState;
+    if(!m) return "";
+    var runRow = m.clector_last_run, run = null;
+    if(runRow && runRow.value){ try{ run = JSON.parse(runRow.value); }catch(e){ run = null; } }
+    var okAt = (m.clector_last_ok && m.clector_last_ok.value) || null;
+    var chk = (m.clector_synced_at && m.clector_synced_at.value) || null;
+    if(!run && !okAt && !chk) return "";
+    var page = Number((m.clector_sync_page && m.clector_sync_page.value) || 1);
+    // если новая версия функции ещё не выкатили — последнего запуска нет, судим по курсору
+    var lastTouch = run ? run.at : ((m.clector_sync_page && m.clector_sync_page.updated_at) || null);
+    var staleMin = lastTouch ? Math.round((Date.now() - new Date(lastTouch).getTime())/60000) : null;
+    var okMin = okAt ? Math.round((Date.now() - new Date(okAt).getTime())/60000) : null;
+    var level = "ok", head = "Автосинхронизация работает";
+    if(run && !run.ok){ level = "warn"; head = "Последний запуск завершился ошибкой"; }
+    if(staleMin!=null && staleMin > 90){ level = "crit"; head = "Синхронизация не запускалась "+fmtAgo(staleMin); }
+    else if(run && !run.ok && okMin!=null && okMin > 90){ level = "crit"; head = "Нет успешной синхронизации "+fmtAgo(okMin); }
+    var col = level==="ok" ? "var(--ok, #2e9e5b)" : (level==="warn" ? "var(--warn)" : "var(--crit)");
+    var rows = [];
+    if(run){
+      rows.push(["Последний запуск", fmtDate(run.at)+" — "+(run.ok ? (run.fetched ? "успешно" : "успешно, изменений нет") : "ошибка")]);
+      if(!run.ok && run.error) rows.push(["Ошибка", String(run.error)]);
+      if(run.ok && run.fetched) rows.push(["Заявки", "получено "+run.fetched+", новых "+(run.inserted||0)+", обновлено "+(run.updated||0)+(run.marked_deleted?", удалено на источнике "+run.marked_deleted:"")+(run.failed?", не сохранено "+run.failed:"")]);
+      if(run.files_downloaded || run.files_failed || run.videos_trimmed || run.videos_skipped) rows.push(["Файлы", "скачано "+(run.files_downloaded||0)+(run.videos_trimmed?", из них видео обрезано до 5 МБ: "+run.videos_trimmed:"")+(run.videos_skipped?", видео пропущено (не удалось обрезать): "+run.videos_skipped:"")+(run.files_failed?", не скачано: "+run.files_failed:"")]);
+      if(run.unmatched_facilities && run.unmatched_facilities.length) rows.push(["Не распознаны объекты", run.unmatched_facilities.join(", ")]);
+    }
+    if(okAt) rows.push(["Последний успешный запуск", fmtDate(okAt)]);
+    if(chk) rows.push(["Заявки актуальны на", fmtDate(chk)]);
+    if(page > 1) rows.push(["Проход не завершён", "следующий запуск продолжит со страницы "+page]);
+    return '<div class="card card-pad sync-status" data-level="'+level+'" style="margin-bottom:14px;border-left:4px solid '+col+';">'
+      + '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;"><div class="section-title" style="margin:0;color:'+col+';">'+escapeHtml(head)+'</div>'
+      + '<button type="button" class="btn btn-sm" data-action="sync-state-refresh">Обновить</button></div>'
+      + '<table style="margin-top:8px;font-size:13px;"><tbody>'+rows.map(function(r){ return '<tr><td class="muted" style="padding:2px 14px 2px 0;white-space:nowrap;vertical-align:top;">'+escapeHtml(r[0])+'</td><td style="padding:2px 0;overflow-wrap:anywhere;">'+escapeHtml(r[1])+'</td></tr>'; }).join("")+'</tbody></table></div>';
+  }
+  function fmtAgo(min){
+    if(min < 120) return "уже "+min+" мин";
+    if(min < 2880) return "уже "+Math.round(min/60)+" ч";
+    return "уже "+Math.round(min/1440)+" дн";
+  }
   function reloadSnapshots(){
     sb.from("import_snapshots").select("*").order("imported_at", {ascending:true}).then(function(res){ state.snapshots = res.data || []; render(); });
   }
@@ -7711,7 +7758,9 @@
   }
 
   function viewImport(){
-    return ticketsTabs('import') + viewImportInner();
+    // подгружаем состояние синхронизации при входе на вкладку (не чаще раза в минуту)
+    if(!state.syncStateLoadedAt || Date.now()-state.syncStateLoadedAt > 60000){ state.syncStateLoadedAt = Date.now(); reloadSyncState(); }
+    return ticketsTabs('import') + syncStatusCard() + viewImportInner();
   }
   function viewImportInner(){
     if(state.importResult){
@@ -9038,6 +9087,7 @@
       if(action==="system-defect-clear") return clearSystemDefectName(id);
       if(action==="photo-open") return openPhotoFile(actionEl.getAttribute("data-path"));
       if(action==="photo-delete"){ deletePhoto(id, actionEl.getAttribute("data-path")); return; }
+      if(action==="sync-state-refresh"){ reloadSyncState(); return; }
       if(action==="hotel-add"){
         var hform = document.getElementById("hotel-form");
         var hfd = new FormData(hform);
