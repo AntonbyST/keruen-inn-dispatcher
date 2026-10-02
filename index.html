@@ -2399,6 +2399,34 @@
       return Promise.all([worker(),worker(),worker(),worker(),worker()]);
     }).then(function(){ return out; });
   }
+  // 0.4.20: память о файлах, которые уже пробовали сжать и они не уменьшились
+  // (ключ путь+размер) — чтобы повторный запуск не скачивал их заново (трафик).
+  var NOSHRINK_KEY = "ki_noshrink";
+  function noShrinkLoad(){ try{ return JSON.parse(localStorage.getItem(NOSHRINK_KEY)||"{}")||{}; }catch(e){ return {}; } }
+  function noShrinkSave(m){ try{ localStorage.setItem(NOSHRINK_KEY, JSON.stringify(m)); }catch(e){} }
+  function noShrinkKey(f){ return f.bucket+"/"+f.path+"@"+f.size; }
+  var STORAGE_FREE_LIMIT = 1073741824;
+  function storageUsageHtml(all){
+    var total = all.reduce(function(s,f){ return s+f.size; }, 0);
+    var pct = Math.round(total/STORAGE_FREE_LIMIT*100);
+    var col = pct>=100 ? "var(--crit)" : (pct>=80 ? "var(--warn)" : "var(--ok, #2e9e5b)");
+    var per = {}; all.forEach(function(f){ per[f.bucket] = (per[f.bucket]||0)+f.size; });
+    var names = {"invoices":"счета и накладные","ticket-photos":"фото и видео заявок","cash-receipts":"чеки (наличные)"};
+    return '<div class="storage-usage" style="margin-bottom:12px;">'
+      + '<div style="display:flex;justify-content:space-between;font-weight:600;"><span>Занято файлами: '+fmtMB(total)+' из 1 ГБ (Free)</span><span style="color:'+col+';">'+pct+'%</span></div>'
+      + '<div style="height:8px;border-radius:4px;background:var(--line, rgba(128,128,128,.25));overflow:hidden;margin:5px 0;"><div style="height:100%;width:'+Math.min(100,pct)+'%;background:'+col+';"></div></div>'
+      + '<div class="muted" style="font-size:12px;">'+Object.keys(per).map(function(b){ return escapeHtml(names[b]||b)+': '+fmtMB(per[b]); }).join(' · ')+'</div>'
+      + (pct>=80 ? '<div style="color:'+col+';font-size:12.5px;margin-top:4px;">'+(pct>=100?'Лимит превышен — Supabase может ограничить загрузку файлов.':'Свободного места осталось мало.')+'</div>' : '')
+      + '</div>';
+  }
+  function groupFailMsgs(msgs){
+    var g = {}, order = [];
+    msgs.forEach(function(m){ var i = m.indexOf(": "); var reason = i>-1 ? m.slice(i+2) : m; if(!g[reason]){ g[reason]=0; order.push(reason); } g[reason]++; });
+    return order.map(function(r){
+      var hint = /row-level security/i.test(r) ? " — в Supabase нет права перезаписи файлов (выполните storage_update_policy.sql)" : "";
+      return r+" ×"+g[r]+hint;
+    }).join("; ");
+  }
   function openStorageToolModal(){
     if(!(isOwner() || (state.me && (state.me.role==="dispatcher" || state.me.role==="head")))){ alert("Доступно руководителю и администратору."); return; }
     closeModal();
@@ -2411,10 +2439,13 @@
       var all = [].concat.apply([], lists).filter(function(f){ return f.size>0; });
       var body = document.getElementById("storage-tool-body"); if(!body) return;
       var total = all.reduce(function(s,f){ return s+f.size; }, 0);
-      var heavy = all.filter(function(f){ return f.size >= 1048576; }).sort(function(a,b){ return b.size-a.size; }).slice(0,60);
+      var nsMap = noShrinkLoad(), hiddenNs = 0;
+      var heavy = all.filter(function(f){ if(f.size < 1048576) return false; if(nsMap[noShrinkKey(f)]){ hiddenNs++; return false; } return true; }).sort(function(a,b){ return b.size-a.size; }).slice(0,60);
+      var usage = storageUsageHtml(all);
+      var nsNote = hiddenNs ? '<div class="muted" style="font-size:12px;margin-bottom:8px;">Скрыто файлов, которые уже пробовали сжать и они не уменьшились: '+hiddenNs+'. <a href="#" id="storage-ns-reset">Показать снова</a></div>' : '';
       state.storageTool = {files: heavy};
-      if(!heavy.length){ body.innerHTML = '<div>Всего файлов: '+all.length+', занято '+fmtMB(total)+'. Файлов крупнее 1 МБ нет — сжимать нечего.</div>'; return; }
-      body.innerHTML = '<div style="margin-bottom:10px;">Всего файлов: '+all.length+', занято '+fmtMB(total)+'. Самые тяжёлые (от 1 МБ):</div>'
+      if(!heavy.length){ body.innerHTML = usage+nsNote+'<div>Файлов для сжатия нет.</div>'; var r0=document.getElementById("storage-ns-reset"); if(r0) r0.addEventListener("click", function(e){ e.preventDefault(); noShrinkSave({}); openStorageToolModal(); }); return; }
+      body.innerHTML = usage+nsNote+'<div style="margin-bottom:10px;">Самые тяжёлые файлы (от 1 МБ):</div>'
         + '<div class="table-wrap" style="max-height:48vh;overflow-y:auto;"><table><thead><tr><th></th><th>Файл</th><th>Раздел</th><th class="num">Размер</th></tr></thead><tbody>'
         + heavy.map(function(f,i){
             var nm = f.path.split("/").pop(); var folder = f.path.split("/")[0];
@@ -2425,6 +2456,7 @@
         + '</tbody></table></div><div class="helptext" style="margin-top:8px;">PDF будет пересобран из картинок страниц (текст перестанет выделяться), фото уменьшено, видео (mp4) перекодировано до 720p. Оригинал заменяется сжатой копией под тем же именем — только если файл уменьшился минимум на 15%.</div>'
         + '<div style="margin-top:10px;display:flex;gap:8px;align-items:center;"><button type="button" class="btn btn-primary" id="storage-compress-btn">Сжать выбранные</button><span id="storage-progress" class="muted"></span></div>';
       document.getElementById("storage-compress-btn").addEventListener("click", runStorageCompress);
+      var r1=document.getElementById("storage-ns-reset"); if(r1) r1.addEventListener("click", function(e){ e.preventDefault(); noShrinkSave({}); openStorageToolModal(); });
     }).catch(function(err){
       var body = document.getElementById("storage-tool-body");
       if(body) body.innerHTML = '<div class="banner">Не удалось получить список файлов: '+escapeHtml(err&&err.message?err.message:String(err))+'</div>';
@@ -2446,7 +2478,7 @@
         var job = isPdf ? compressPdfFile(file, function(i,n){ if(prog) prog.textContent = "Файл "+(done+1)+" из "+picks.length+": страница "+i+" из "+n; })
           : (isVid ? compressVideoFile(file, function(i,n){ if(prog) prog.textContent = "Файл "+(done+1)+" из "+picks.length+": кадр "+i+" из "+n; }) : compressImageFile(file, {keepFormat:true}));
         return job.then(function(out){
-          if(out.size >= file.size*0.85){ skipped++; return; }
+          if(out.size >= file.size*0.85){ skipped++; var m=noShrinkLoad(); m[noShrinkKey(f)]=1; noShrinkSave(m); return; }
           return sb.storage.from(f.bucket).upload(f.path, out, {upsert:true, contentType:out.type}).then(function(up){
             if(up && up.error) throw up.error;
             saved += (file.size - out.size); 
@@ -2455,7 +2487,7 @@
       }).catch(function(err){ failed++; failMsgs.push(nm+": "+(err&&err.message?err.message:err)); }).then(function(){ done++; });
     }
     picks.reduce(function(p,f){ return p.then(function(){ return one(f); }); }, Promise.resolve()).then(function(){
-      if(prog) prog.textContent = "Готово: освобождено "+fmtMB(saved)+" (не уменьшилось: "+skipped+", ошибок: "+failed+"). Счётчик в Supabase может обновиться с задержкой."+(failMsgs.length?" Ошибки: "+failMsgs.join("; "):"");
+      if(prog) prog.textContent = "Готово: освобождено "+fmtMB(saved)+" (не уменьшилось: "+skipped+", ошибок: "+failed+"). Счётчик в Supabase может обновиться с задержкой."+(failMsgs.length?" Ошибки: "+groupFailMsgs(failMsgs):"");
       if(btn) btn.disabled = false;
     });
   }
