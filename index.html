@@ -1002,7 +1002,7 @@
     if(!tb) return "";
     if(tb==="custom"){
       var amt = invoiceCustomTaxAmount(iv);
-      if(amt!=null) return "Свой (+"+fmtKZT(amt)+" ₸)";
+      if(amt!=null){ var tcur = iv.extra && iv.extra.custom_tax_currency; return "Свой (+"+fmtKZT(amt)+" "+((tcur && tcur!=="KZT") ? tcur : "₸")+")"; }
       var pct = invoiceCustomTaxPct(iv);
       return "Свой ("+(pct!=null?("+"+fmtKZT(pct)+"%"):"не указано")+")";
     }
@@ -6658,10 +6658,32 @@
       return String(Math.round(v*100)/100).indexOf(q)>-1 || String(Math.round(v)).indexOf(q)>-1;
     });
   }
+  // 0.4.22 (по просьбе Антона): в накладных расходах курс Нацбанка РК берётся
+  // на 1-е число месяца расхода (а не на дату записи, как в реестре платежей);
+  // у «Своей суммы» налога можно указать свою валюту (extra.custom_tax_currency),
+  // она тоже переводится в ₸ по курсу на 1-е число.
+  function overheadRateDay(oe){
+    var day = oe.date ? String(oe.date).slice(0,10) : new Date().toISOString().slice(0,10);
+    return day.slice(0,7) + "-01";
+  }
   function overheadAccountedKZT(oe){
     if(oe.vat_included==null && !oe.currency && !oe.tax_basis) return { value: Number(oe.amount)||0, state:"ok", legacy:true };
-    var day = oe.date ? String(oe.date).slice(0,10) : new Date().toISOString().slice(0,10);
-    return invoiceAccountedKZT({ amount: Number(oe.amount)||0, currency: oe.currency||null, vat_included: oe.vat_included==null?null:oe.vat_included, tax_basis: oe.tax_basis||null, extra: oe.extra||{}, paid:true, paid_at: day+"T12:00:00" });
+    var day1 = overheadRateDay(oe);
+    var ex = oe.extra || {};
+    var taxCur = ex.custom_tax_currency;
+    var amtMode = oe.tax_basis==="custom" && typeof ex.custom_tax_amount==="number" && isFinite(ex.custom_tax_amount) && oe.vat_included!==true && !!taxCur;
+    var base = invoiceAccountedKZT({ amount: Number(oe.amount)||0, currency: oe.currency||null, vat_included: oe.vat_included==null?null:oe.vat_included, tax_basis: amtMode ? null : (oe.tax_basis||null), extra: amtMode ? {} : ex, paid:true, paid_at: day1+"T12:00:00" });
+    if(!amtMode || base.state!=="ok") return base;
+    // налог фиксированной суммой — в своей валюте, переводим отдельно
+    var t = ex.custom_tax_amount;
+    if(taxCur!=="KZT"){
+      ensureNbkRate(taxCur, day1);
+      var r = nbkRateCache[taxCur+"|"+day1];
+      if(!r || r==="pending") return { value:null, state:"pending", original:base.original, currency:base.currency };
+      if(r==="error") return { value:null, state:"error", original:base.original, currency:base.currency };
+      t = t * (r.rate/r.quant);
+    }
+    return { value: base.value + t, state:"ok", original: base.original, currency: base.currency };
   }
   // Значение select «Налог» из полей записи: custom_kind различает «Свой %» и
   // «Своя сумма ₸» (у обоих tax_basis="custom", как у счетов).
@@ -6669,13 +6691,14 @@
     if(oe.tax_basis==="custom") return (oe.extra && oe.extra.custom_kind==="amt") ? "custom_amt" : "custom";
     return oe.tax_basis==="regular" ? "" : (oe.tax_basis||"");
   }
-  function overheadTaxFields(cur, vat, tax, taxValue){
+  function overheadTaxFields(cur, vat, tax, taxValue, taxCur){
     var out = { currency: cur||null, vat_included: vat==="with" ? true : (vat==="without" ? false : null), tax_basis: null, extra: {} };
     if(out.vat_included===true) return out; // при «с НДС» доп. налог не применяется (как в реестре)
     if(tax==="simplified" || tax==="cash") out.tax_basis = tax;
     else if(tax==="custom" || tax==="custom_amt"){
       out.tax_basis = "custom";
       out.extra.custom_kind = tax==="custom_amt" ? "amt" : "pct";
+      if(tax==="custom_amt") out.extra.custom_tax_currency = (["KZT","RUB","BYN"].indexOf(taxCur)>-1) ? taxCur : "KZT";
       var raw = parseAmountInputValue(taxValue); var num = raw==="" ? null : Number(raw);
       if(num!=null && !isNaN(num)){ if(tax==="custom_amt") out.extra.custom_tax_amount = num; else out.extra.custom_tax_pct = num; }
     }
@@ -6702,7 +6725,7 @@
       var vatV = field==="vat" ? val : (e.vat_included===true?"with":(e.vat_included===false?"without":""));
       var taxV = field==="tax" ? val : overheadTaxSelectValue(e);
       var valV = field==="tax_value" ? val : (e.extra ? (taxV==="custom_amt" ? e.extra.custom_tax_amount : e.extra.custom_tax_pct) : "");
-      var f = overheadTaxFields(curV, vatV, taxV, valV==null?"":String(valV));
+      var f = overheadTaxFields(curV, vatV, taxV, valV==null?"":String(valV), e.extra && e.extra.custom_tax_currency);
       patch.currency = f.currency; patch.vat_included = f.vat_included; patch.tax_basis = f.tax_basis; patch.extra = f.extra;
     }
     Object.assign(e, patch);
@@ -6719,7 +6742,7 @@
     var amount = Number(rawAmt);
     if(!category){ alert("Укажите статью расхода."); return false; }
     if(rawAmt==="" || isNaN(amount) || amount<=0){ alert("Укажите сумму."); return false; }
-    var tax = overheadTaxFields(data.currency, data.vat, data.tax, data.tax_value);
+    var tax = overheadTaxFields(data.currency, data.vat, data.tax, data.tax_value, data.tax_currency);
     // «Сохраняю…» — кнопка недоступна, пока идёт загрузка файлов и запись
     // (раньше при больших файлах казалось, что ничего не происходит, и
     // запись «добавлялась медленно»). После записи строка сразу попадает в
@@ -7204,13 +7227,13 @@
   // Окно живёт в overlay-root вне render(), поэтому набранное не теряется при
   // обновлениях страницы; «Учтено в затратах» считается на лету.
   function overheadTaxOptionsHtml(sel){
-    return [["","—"],["simplified","Упрощ. +20%"],["cash","Нал. +30%"],["custom","Свой, %"],["custom_amt","Своя сумма, ₸"]].map(function(o){
+    return [["","—"],["simplified","Упрощ. +20%"],["cash","Нал. +30%"],["custom","Свой, %"],["custom_amt","Своя сумма"]].map(function(o){
       return '<option value="'+o[0]+'"'+(sel===o[0]?' selected':'')+'>'+o[1]+'</option>';
     }).join("");
   }
   function overheadFormRecord(form){
     var fd = new FormData(form);
-    var f = overheadTaxFields(fd.get("currency"), fd.get("vat"), fd.get("tax"), fd.get("tax_value")||"");
+    var f = overheadTaxFields(fd.get("currency"), fd.get("vat"), fd.get("tax"), fd.get("tax_value")||"", fd.get("tax_currency"));
     var num = Number(parseAmountInputValue(fd.get("amount")||""));
     return { date: fd.get("date"), amount: isNaN(num)?0:num, currency: f.currency, vat_included: f.vat_included, tax_basis: f.tax_basis, extra: f.extra };
   }
@@ -7223,7 +7246,8 @@
     var cust = tax==="custom" || tax==="custom_amt";
     var wrap = document.getElementById("oh-taxval-wrap");
     if(wrap) wrap.style.display = cust ? "" : "none";
-    form.elements.tax_value.placeholder = tax==="custom_amt" ? "₸" : "%";
+    form.elements.tax_value.placeholder = tax==="custom_amt" ? "сумма" : "%";
+    var tcs = document.getElementById("oh-taxcur"); if(tcs) tcs.style.display = tax==="custom_amt" ? "" : "none";
     var box = document.getElementById("overhead-live");
     if(!box) return;
     var rec = overheadFormRecord(form);
@@ -7231,7 +7255,8 @@
     if(!(rec.amount>0)){ html = '<b>—</b><small>Введите сумму — здесь появится «Учтено в затратах».</small>'; }
     else {
       var acc = overheadAccountedKZT(rec);
-      var desc = (rec.currency||"KZT")+" · "+(rec.vat_included ? "сумма с НДС — без НДС в затраты" : "без НДС")+(rec.tax_basis ? " · доп. налог: "+taxBasisLabel({tax_basis:rec.tax_basis, extra:rec.extra}) : "");
+      var desc = (rec.currency||"KZT")+" · "+(rec.vat_included ? "сумма с НДС — без НДС в затраты" : "без НДС")+(rec.tax_basis ? " · доп. налог: "+taxBasisLabel({tax_basis:rec.tax_basis, extra:rec.extra}) : "")
+        +((rec.currency && rec.currency!=="KZT") || (rec.extra && rec.extra.custom_tax_currency && rec.extra.custom_tax_currency!=="KZT") ? " · курс Нацбанка на 01."+overheadRateDay(rec).slice(5,7)+"."+overheadRateDay(rec).slice(0,4) : "");
       if(acc.state==="ok") html = '<b>'+fmtKZT2(acc.value)+' ₸</b><small>'+escapeHtml(desc)+'</small>';
       else if(acc.state==="pending"){ html = '<b>курс…</b><small>Получаю курс Нацбанка РК</small>'; setTimeout(overheadLiveUpdate, 800); }
       else if(acc.state==="error") html = '<b>—</b><small>Не удалось получить курс Нацбанка РК на эту дату</small>';
@@ -7248,6 +7273,7 @@
     var customVal = e && e.extra ? (taxSel==="custom_amt" ? e.extra.custom_tax_amount : e.extra.custom_tax_pct) : null;
     var vatVal = e ? (e.vat_included===true?"with":"without") : "without";
     var curVal = e ? (e.currency||"KZT") : "KZT";
+    var taxCurVal = (e && e.extra && e.extra.custom_tax_currency) || "KZT";
     openModal(h`
       <div class="modal" data-stop style="width:560px;">
         <div class="modal-head"><h2>${e?'Изменить расход':'Новый накладной расход'}</h2><button type="button" class="btn btn-ghost" data-close-modal>✕</button></div>
@@ -7260,7 +7286,9 @@
               <div class="field"><label>Валюта</label><select name="currency">${["KZT","RUB","BYN"].map(function(c){ return '<option value="'+c+'"'+(curVal===c?' selected':'')+'>'+c+'</option>'; }).join("")}</select></div>
               <div class="field"><label>НДС</label><select name="vat"><option value="without"${vatVal==='without'?' selected':''}>Без НДС</option><option value="with"${vatVal==='with'?' selected':''}>С НДС</option></select></div>
               <div class="field"><label>Налог (при «Без НДС»)</label><select name="tax">${overheadTaxOptionsHtml(taxSel)}</select></div>
-              <div class="field full" id="oh-taxval-wrap" style="display:none;"><label>Свой налог: % или ₸</label><input type="text" inputmode="decimal" class="registry-tax-custom-input" name="tax_value" placeholder="%" value="${customVal!=null?formatAmountInputValue(String(customVal)):''}"></div>
+              <div class="field full" id="oh-taxval-wrap" style="display:none;"><label>Свой налог: % или сумма</label>
+                <div style="display:flex;gap:8px;"><input type="text" inputmode="decimal" class="registry-tax-custom-input" name="tax_value" placeholder="%" style="flex:1;" value="${customVal!=null?formatAmountInputValue(String(customVal)):''}">
+                <select name="tax_currency" id="oh-taxcur" style="width:90px;display:none;" title="Валюта суммы налога">${["KZT","RUB","BYN"].map(function(c){ return '<option value="'+c+'"'+(taxCurVal===c?' selected':'')+'>'+c+'</option>'; }).join("")}</select></div></div>
             </div>
             <div class="oh-live" style="margin-top:12px;"><div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;">Учтено в затратах</div><div id="overhead-live"></div></div>
             <div class="field"><label>Примечание (необязательно)</label><input type="text" name="note" placeholder="комментарий" value="${e?escapeHtml(e.note||''):''}"></div>
@@ -7282,7 +7310,7 @@
     var rawAmt = parseAmountInputValue(data.amount); var amount = Number(rawAmt);
     if(!category){ alert("Укажите статью расхода."); return false; }
     if(rawAmt==="" || isNaN(amount) || amount<=0){ alert("Укажите сумму."); return false; }
-    var tax = overheadTaxFields(data.currency, data.vat, data.tax, data.tax_value||"");
+    var tax = overheadTaxFields(data.currency, data.vat, data.tax, data.tax_value||"", data.tax_currency);
     var patch = { date: data.date || e.date, category: category, amount: amount, currency: tax.currency, vat_included: tax.vat_included, tax_basis: tax.tax_basis, extra: tax.extra, note: (data.note||"").trim() || null };
     Object.assign(e, patch);
     state.overheadExpenses.sort(rtSortBy("date", false));
@@ -7315,7 +7343,7 @@
       return amountQueryMatch(state.overheadSearch, [e.amount, acc.state==="ok"?acc.value:null]);
     });
     function taxOptions(sel, vatOn){
-      return h`<option value="" ${sel===''?'selected':''}>—</option>${vatOn?'':h`<option value="simplified" ${sel==='simplified'?'selected':''}>Упрощ. +20%</option><option value="cash" ${sel==='cash'?'selected':''}>Нал. +30%</option><option value="custom" ${sel==='custom'?'selected':''}>Свой, %</option><option value="custom_amt" ${sel==='custom_amt'?'selected':''}>Своя сумма, ₸</option>`}`;
+      return h`<option value="" ${sel===''?'selected':''}>—</option>${vatOn?'':h`<option value="simplified" ${sel==='simplified'?'selected':''}>Упрощ. +20%</option><option value="cash" ${sel==='cash'?'selected':''}>Нал. +30%</option><option value="custom" ${sel==='custom'?'selected':''}>Свой, %</option><option value="custom_amt" ${sel==='custom_amt'?'selected':''}>Своя сумма</option>`}`;
     }
 
     return h`
@@ -7323,7 +7351,7 @@
       <datalist id="overhead-categories">${categories.map(function(c){ return `<option value="${escapeHtml(c)}">`; }).join("")}</datalist>
       <div class="row-gap">
         <div class="card card-pad">
-          <div class="section-title">Итого по статьям ${infoTip("«Учтено в затратах»: сумма без НДС, с доп. налогом по способу оплаты, в ₸ (RUB/BYN — по курсу Нацбанка РК на дату записи) — так же, как в «Реестре платежей». Записи без валюты и «с НДС/Без» (внесены раньше) считаются как есть, в ₸.")}</div>
+          <div class="section-title">Итого по статьям ${infoTip("«Учтено в затратах»: сумма без НДС, с доп. налогом по способу оплаты, в ₸ (RUB/BYN — по курсу Нацбанка РК на 1-е число месяца записи; у «Своей суммы» налога можно выбрать свою валюту) — как в «Реестре платежей», только курс на 1-е число. Записи без валюты и «с НДС/Без» (внесены раньше) считаются как есть, в ₸.")}</div>
           ${categoryTotals.length===0 ? h`<div class="muted" style="font-size:13px;">Пока нет ни одной записи.</div>` : h`
           <div class="table-wrap"><table>
             <thead><tr><th>Статья</th><th class="num">Сумма, ₸</th></tr></thead>
