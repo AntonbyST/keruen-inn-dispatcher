@@ -487,11 +487,25 @@
   .wo-desc{ background:var(--surface-2); border-radius:9px; padding:14px 16px; margin:8px 0 20px; font-size:13.5px; }
   .wo-sign{ display:grid; grid-template-columns:1fr 1fr; gap:30px; margin-top:44px; }
   .sign-line{ border-top:1px solid var(--ink-faint); padding-top:6px; font-size:11.5px; color:var(--ink-faint); }
+  .act-meta{ display:grid; gap:4px; font-size:13.5px; }
+  .act-meta .k{ color:var(--ink-faint); }
+  .act-table{ width:100%; border-collapse:collapse; font-size:12.5px; }
+  .act-table th, .act-table td{ border:1px solid var(--ink-faint); padding:6px 8px; vertical-align:top; }
+  .act-table th{ background:var(--surface-2); font-weight:600; text-align:left; }
+  .act-table td.c{ text-align:center; } .act-table td.r{ text-align:right; }
+  .sign-sub{ font-size:10.5px; color:var(--ink-faint); margin-top:3px; }
+  .doc-preview .doc-page{ margin-bottom:22px; }
   .wo-toolbar{ max-width:760px; margin:0 auto 16px; display:flex; gap:8px; justify-content:flex-end; }
   @media print{
     .sidebar, .topbar, .wo-toolbar, .no-print{ display:none !important; }
     body, .content{ background:#fff; padding:0; margin:0; }
     .wo-page{ box-shadow:none; border:none; max-width:none; }
+    .doc-preview .doc-page{ margin:0; page-break-after:always; break-after:page; }
+    .doc-preview .doc-page:last-child{ page-break-after:auto; break-after:auto; }
+    .doc-preview .wo-sign{ grid-template-columns:1fr 1fr !important; }
+    .doc-preview .wo-grid{ grid-template-columns:1fr 1fr !important; }
+    .act-table th, .act-table td{ border-color:#000; }
+    .act-table tr{ break-inside:avoid; }
   }
 
   /* ---------- мобильная адаптация (0.3.9, по просьбе Антона: "чтобы
@@ -4056,8 +4070,10 @@
   // всех, кому доступны «Заявки», есть доступ к импорту (например,
   // Заказчик/Специалист/Снабжение).
   function ticketsTabs(active){
-    if(!navAllowed("import")) return "";
-    var tabs = [["tickets","Заявки"], ["import","Импорт из c-lector"]];
+    var tabs = [["tickets","Заявки"]];
+    if(navAllowed("import")) tabs.push(["import","Импорт из c-lector"]);
+    if(docsAllowed()) tabs.push(["docs","Акты и наряды"]);
+    if(tabs.length<2) return "";
     return h`<div class="finance-tabs">${tabs.map(function(t){
       return h`<a href="#/${t[0]}" class="finance-tab ${active===t[0]?'active':''}">${t[1]}</a>`;
     }).join("")}</div>`;
@@ -7890,17 +7906,55 @@
       </div>`;
   }
 
-  function viewWorkOrder(id){
-    var t = state.tickets.find(function(x){return x.id===id;});
-    if(!t) return h`<div class="empty-state"><b>Заявка не найдена</b></div>`;
-    var hotel = hotelById(t.hotel_id);
-    return h`
-      <div class="wo-toolbar no-print">
-        <a class="btn" href="#/tickets">← К списку заявок</a>
-        <button class="btn" data-action="wo-download" data-id="${t.id}">Скачать .html</button>
-        <button class="btn btn-primary" onclick="window.print()">Печать / PDF</button>
-      </div>
-      <div class="wo-page" id="wo-content">
+  /* ============================== АКТЫ И НАРЯДЫ-ЗАДАНИЯ ==============================
+     0.4.23 (по просьбе Антона): программа сама готовит документы для подписи у
+     заказчика — «Акт выполненных работ» (можно выбрать несколько заявок одного
+     отеля в один акт) и «Наряд-задание» (по нескольким заявкам сразу, каждое с
+     новой страницы). Открывается в «Заявки» → «Акты и наряды», либо кнопкой «Акт»
+     в карточке заявки. Печать/PDF — из браузера. Данные берутся из заявки,
+     отеля («Лицо от Заказчика», «Ответственный техник») и «Затрат по заявке»;
+     стоимость в акте можно поправить вручную по каждой заявке или скрыть. */
+  var DOCS_STORE = "ki_docs_prefs";
+  function docsAllowed(){
+    return !!(state.me && (isOwner() || state.me.role==="dispatcher" || state.me.role==="head"));
+  }
+  function docsPrefsLoad(){ try{ return JSON.parse(localStorage.getItem(DOCS_STORE)||"{}")||{}; }catch(e){ return {}; } }
+  function docsPrefsSave(p){ try{ localStorage.setItem(DOCS_STORE, JSON.stringify(p)); }catch(e){} }
+  function docsState(){
+    if(!state.docs){
+      var pr = docsPrefsLoad();
+      state.docs = { type:"act", hotelId:"", sel:{}, number:"", numberTouched:false, date:new Date().toISOString().slice(0,10), cost:true, amounts:{}, customer: pr.customer||"", basis: pr.basis||"", preId:null };
+    }
+    return state.docs;
+  }
+  function docsTicketEligible(t, type){
+    if(!t || t.clector_deleted_at || t.duplicate_of_ticket_id) return false;
+    if(t.status==="rejected" || /отклон|отказ/i.test(t.external_status||"")) return false;
+    if(!hotelAllowedForMe(t.hotel_id)) return false;
+    var done = !!ticketClosedDate(t) || t.status==="closed" || isClosedExternalStatus(t.external_status);
+    return type==="act" ? done : !done;
+  }
+  function docsDefaultNumber(d){
+    var ds = String(d.date||"").replace(/-/g,"");
+    return (d.type==="act" ? "АВР-" : "НЗ-") + ds + (d.hotelId ? "-"+d.hotelId : "");
+  }
+  function docsDateRu(iso){
+    if(!iso) return "";
+    var p = String(iso).slice(0,10).split("-"); return p.length===3 ? (p[2]+"."+p[1]+"."+p[0]) : "";
+  }
+  function docsCostOf(t){
+    var d = docsState();
+    if(d.amounts.hasOwnProperty(t.id)){
+      var raw = parseAmountInputValue(d.amounts[t.id]); if(raw==="") return null; var n = Number(raw); return isNaN(n) ? null : n;
+    }
+    var c = ticketCostTotal(t).total;
+    return c>0 ? Math.round(c*100)/100 : null;
+  }
+  // Один лист «Наряд-задание» (используется и на странице заявки, и в «Актах и нарядах»).
+  function workOrderPageHtml(t, idAttr){
+    var hotel = hotelById(t.hotel_id) || {id:t.hotel_id, name:"—", zone:null};
+    var perf = ticketPerformers(t);
+    return h`<div class="wo-page doc-page" ${idAttr?('id="'+idAttr+'"'):''}>
         <div class="wo-top">
           <div><div class="wo-co">ТОО «VDS KAZAKHSTAN»</div><div class="wo-addr">Республика Казахстан, г. Астана</div></div>
           <div style="text-align:right;"><div class="wo-addr">Служба сервиса</div><div class="wo-addr">${new Date().toLocaleDateString("ru-RU")}</div></div>
@@ -7909,22 +7963,163 @@
         <div class="wo-no">№ ${workOrderNo(t)}</div>
         <div class="wo-grid">
           ${t.external_ref ? h`<div class="wo-field"><div class="k">№ c-lector</div><div class="v mono">${escapeHtml(t.external_ref)}</div></div>` : ""}
-          <div class="wo-field"><div class="k">Объект</div><div class="v">№${hotel.id} ${hotel.name}${hotel.zone?(' · Зона '+hotel.zone):''}</div></div>
+          <div class="wo-field"><div class="k">Объект</div><div class="v">№${hotel.id} ${escapeHtml(hotel.name)}${hotel.zone?(' · Зона '+hotel.zone):''}</div></div>
           ${t.location ? h`<div class="wo-field"><div class="k">Локация</div><div class="v">${escapeHtml(t.location)}</div></div>` : ""}
-          <div class="wo-field"><div class="k">Категория</div><div class="v">${GROUP_LABEL[t.ticket_group]}</div></div>
-          <div class="wo-field"><div class="k">Исполнитель</div><div class="v">${ticketPerformers(t).length? escapeHtml(ticketPerformers(t).join(", ")): "не назначен"}</div></div>
+          <div class="wo-field"><div class="k">Категория</div><div class="v">${GROUP_LABEL[t.ticket_group]||"—"}</div></div>
+          <div class="wo-field"><div class="k">Исполнитель</div><div class="v">${perf.length? escapeHtml(perf.join(", ")): "не назначен"}</div></div>
           <div class="wo-field"><div class="k">Срок реагирования</div><div class="v">${t.arrival_deadline? fmtDateShort(t.arrival_deadline): "—"}</div></div>
           <div class="wo-field"><div class="k">Дата регистрации</div><div class="v">${fmtDate(t.created_at)}</div></div>
           <div class="wo-field"><div class="k">Срок устранения</div><div class="v">${t.resolution_deadline? fmtDate(t.resolution_deadline): "не указан (нет данных c-lector)"}</div></div>
         </div>
         <div class="wo-field"><div class="k">Описание неисправности</div></div>
         <div class="wo-desc">${escapeHtml(t.description)}</div>
-        <div class="helptext" style="margin-bottom:6px;">Основание: Регламент подачи, рассмотрения заявок и определения гарантийных случаев (Приложение №2 к Протоколу разногласий по ДС №10) и Регламент организации и работы Службы сервиса.</div>
+        <div class="helptext" style="margin-bottom:6px;">Основание: Регламент подачи, рассмотрения заявок и определения гарантийных случаев (Приложение №2 к Протоколу разногласий по ДС №10) и Регламент организации и работы Службы сервиса Keruen Inn.</div>
         <div class="wo-sign">
-          <div class="sign-line">Исполнитель: _______________________ / ${ticketPerformers(t).length?escapeHtml(ticketPerformers(t).join(", ")):''} /</div>
+          <div class="sign-line">Исполнитель: _______________________ / ${perf.length?escapeHtml(perf.join(", ")):''} /</div>
           <div class="sign-line">Представитель Заказчика на объекте: _______________________ /</div>
         </div>
       </div>`;
+  }
+  // «Акт выполненных работ» по выбранным заявкам одного отеля.
+  function actDocHtml(tickets, hotel, opts){
+    opts = opts || {};
+    hotel = hotel || {id:"", name:"—"};
+    var showCost = !!opts.cost, total = 0, anyCost = false;
+    var rows = tickets.map(function(t, i){
+      var closed = ticketClosedDate(t) || t.closed_at;
+      var perf = ticketPerformers(t);
+      var desc = t.description_short || t.description || "";
+      var cost = showCost ? docsCostOf(t) : null;
+      if(cost!=null){ total += cost; anyCost = true; }
+      return '<tr><td class="c">'+(i+1)+'</td>'
+        + '<td class="mono">'+escapeHtml(t.external_ref||"—")+'</td>'
+        + '<td>'+escapeHtml(t.location||"—")+'</td>'
+        + '<td>'+escapeHtml(desc)+'</td>'
+        + '<td>'+(perf.length ? escapeHtml(perf.join(", ")) : "—")+'</td>'
+        + '<td class="c">'+(closed ? escapeHtml(docsDateRu(closed)) : "—")+'</td>'
+        + (showCost ? '<td class="r mono">'+(cost!=null ? escapeHtml(fmtKZT2(cost)) : "—")+'</td>' : '')
+        + '</tr>';
+    }).join("");
+    var cn = hotel.client_contact_name || "", cp = hotel.client_contact_position || "";
+    var performersAll = []; tickets.forEach(function(t){ ticketPerformers(t).forEach(function(n){ if(performersAll.indexOf(n)===-1) performersAll.push(n); }); });
+    var execName = hotel.vds_tech_name || "";
+    return '<div class="wo-page doc-page act-page">'
+      + '<div class="wo-top"><div><div class="wo-co">ТОО «VDS KAZAKHSTAN»</div><div class="wo-addr">Республика Казахстан, г. Астана</div></div>'
+      + '<div style="text-align:right;"><div class="wo-addr">Служба сервиса</div></div></div>'
+      + '<div class="wo-title" style="text-align:center;">Акт выполненных работ</div>'
+      + '<div style="text-align:center;margin-bottom:18px;" class="wo-no">№ '+escapeHtml(opts.number||"______")+' от '+escapeHtml(docsDateRu(opts.date)||"«____» __________ 20__ г.")+'</div>'
+      + '<div class="act-meta">'
+      +   '<div><span class="k">Объект:</span> №'+escapeHtml(hotel.id)+' '+escapeHtml(hotel.name)+'</div>'
+      +   '<div><span class="k">Заказчик:</span> '+(opts.customer ? escapeHtml(opts.customer) : '____________________________')+'</div>'
+      +   '<div><span class="k">Исполнитель:</span> ТОО «VDS KAZAKHSTAN»</div>'
+      +   (opts.basis ? '<div><span class="k">Основание:</span> '+escapeHtml(opts.basis)+'</div>' : '')
+      + '</div>'
+      + '<p style="margin:14px 0 8px;font-size:13.5px;">Исполнитель выполнил, а Заказчик принял следующие работы по заявкам:</p>'
+      + '<table class="act-table"><thead><tr><th>№</th><th>№ заявки</th><th>Локация</th><th>Описание выполненных работ</th><th>Исполнитель</th><th>Дата выполнения</th>'+(showCost?'<th>Стоимость, ₸</th>':'')+'</tr></thead><tbody>'
+      + rows
+      + (showCost && anyCost ? '<tr class="tot"><td colspan="6" class="r"><b>Итого:</b></td><td class="r mono"><b>'+escapeHtml(fmtKZT2(total))+'</b></td></tr>' : '')
+      + '</tbody></table>'
+      + '<p style="margin:16px 0 0;font-size:13.5px;">Вышеперечисленные работы выполнены полностью и в установленные сроки. Заказчик претензий по объёму, качеству и срокам выполнения работ не имеет.</p>'
+      + '<div class="wo-sign">'
+      +   '<div><div class="sign-line">Исполнитель: _______________________ / '+escapeHtml(execName || (performersAll.length===1?performersAll[0]:""))+' /</div><div class="sign-sub">М.П.</div></div>'
+      +   '<div><div class="sign-line">Заказчик: _______________________ / '+escapeHtml(cn)+' /</div>'+(cp?'<div class="sign-sub">'+escapeHtml(cp)+'</div>':'<div class="sign-sub">М.П.</div>')+'</div>'
+      + '</div></div>';
+  }
+  function viewDocs(){
+    var d = docsState();
+    var role = state.route && state.route.id;
+    if(d.preId !== role){
+      d.preId = role;
+      var pt = role ? state.tickets.find(function(x){ return String(x.id)===String(role); }) : null;
+      if(pt){
+        d.hotelId = String(pt.hotel_id);
+        d.type = docsTicketEligible(pt,"act") ? "act" : "wo";
+        d.sel = {}; d.sel[pt.id] = true; d.numberTouched = false;
+      }
+    }
+    if(!d.numberTouched) d.number = docsDefaultNumber(d);
+    var hotels = (state.hotels||[]).filter(function(x){ return hotelAllowedForMe(x.id); });
+    var list = !d.hotelId ? [] : state.tickets.filter(function(t){ return String(t.hotel_id)===String(d.hotelId) && docsTicketEligible(t, d.type); });
+    list.sort(function(a,b){
+      var da = d.type==="act" ? (ticketClosedDate(a)||a.closed_at||"") : (a.created_at||""), db = d.type==="act" ? (ticketClosedDate(b)||b.closed_at||"") : (b.created_at||"");
+      return String(db).localeCompare(String(da));
+    });
+    var chosen = list.filter(function(t){ return d.sel[t.id]; });
+    chosen.sort(function(a,b){ return String(a.external_ref||"").localeCompare(String(b.external_ref||""), "ru", {numeric:true}); });
+    var tabsBtn = function(k, label){ return '<button type="button" class="finance-tab '+(d.type===k?'active':'')+'" data-docs-type="'+k+'">'+label+'</button>'; };
+    var picker = '<div class="doc-picker no-print">'
+      + '<div class="wo-toolbar" style="max-width:none;margin:0 0 12px;justify-content:space-between;"><a class="btn" href="#/tickets">← К списку заявок</a>'
+      + '<button type="button" class="btn btn-primary" data-action="docs-print"'+(chosen.length?'':' disabled')+'>Печать / PDF</button></div>'
+      + '<div class="finance-tabs" style="margin-bottom:12px;">'+tabsBtn("act","Акт выполненных работ")+tabsBtn("wo","Наряд-задание")+'</div>'
+      + '<div class="card card-pad" style="margin-bottom:14px;">'
+      +   '<div class="field-row" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr));">'
+      +     '<div class="field"><label>Объект (отель)</label><select data-docs-hotel><option value="">— выберите —</option>'+hotels.map(function(x){ return '<option value="'+x.id+'"'+(String(d.hotelId)===String(x.id)?' selected':'')+'>№'+x.id+' '+escapeHtml(x.name)+'</option>'; }).join("")+'</select></div>'
+      +     (d.type==="act" ? '<div class="field"><label>Номер акта</label><input type="text" data-docs-field="number" value="'+escapeHtml(d.number)+'"></div><div class="field"><label>Дата акта</label><input type="date" data-docs-field="date" value="'+escapeHtml(d.date)+'"></div>' : '')
+      +   '</div>'
+      +   (d.type==="act" ? '<div class="field-row" style="grid-template-columns:repeat(auto-fit,minmax(260px,1fr));margin-top:10px;"><div class="field"><label>Заказчик (наименование)</label><input type="text" data-docs-field="customer" placeholder="ТОО «…»" value="'+escapeHtml(d.customer)+'"></div><div class="field"><label>Основание (договор), необязательно</label><input type="text" data-docs-field="basis" placeholder="Договор № … от …" value="'+escapeHtml(d.basis)+'"></div></div>'
+        + '<label style="display:inline-flex;align-items:center;gap:6px;margin-top:10px;font-weight:400;"><input type="checkbox" data-docs-cost'+(d.cost?' checked':'')+'> Показывать стоимость работ (по умолчанию — «Затраты по заявке», можно поправить в списке ниже)</label>' : '')
+      + '</div>'
+      + (!d.hotelId ? '<div class="muted">Выберите объект — появятся заявки, '+(d.type==="act"?'по которым работы выполнены.':'ещё не выполненные.')+'</div>'
+        : (!list.length ? '<div class="muted">Нет подходящих заявок'+(d.type==="act"?' (выполненных)':' (открытых)')+' по этому объекту.</div>'
+        : '<div class="card"><div style="padding:10px 14px;display:flex;gap:10px;align-items:center;"><b>Заявки ('+list.length+')</b><button type="button" class="btn btn-sm" data-docs-all="1">Выбрать все</button><button type="button" class="btn btn-sm" data-docs-all="0">Снять все</button><span class="muted" style="margin-left:auto;">выбрано: '+chosen.length+'</span></div>'
+          + '<div class="table-wrap" style="max-height:340px;overflow-y:auto;"><table><thead><tr><th></th><th>№ c-lector</th><th>Описание</th><th>'+(d.type==="act"?'Выполнена':'Подана')+'</th>'+(d.type==="act" && d.cost ? '<th class="num">Стоимость, ₸</th>':'')+'</tr></thead><tbody>'
+          + list.slice(0,300).map(function(t){
+              var on = !!d.sel[t.id];
+              var costCell = '';
+              if(d.type==="act" && d.cost){
+                var c = docsCostOf(t);
+                costCell = '<td class="num"><input type="text" inputmode="decimal" style="width:110px;text-align:right;" data-docs-amount="'+t.id+'" value="'+(d.amounts.hasOwnProperty(t.id) ? escapeHtml(d.amounts[t.id]) : (c!=null ? escapeHtml(String(c)) : ""))+'" placeholder="—"></td>';
+              }
+              var dt = d.type==="act" ? (ticketClosedDate(t)||t.closed_at) : t.created_at;
+              return '<tr><td><input type="checkbox" data-docs-pick="'+t.id+'"'+(on?' checked':'')+'></td><td class="mono">'+escapeHtml(t.external_ref||"—")+(t.act_signed?' <span class="pill pill-ok" title="Акт уже отмечен подписанным">акт</span>':'')+'</td><td style="max-width:420px;overflow-wrap:anywhere;">'+escapeHtml(t.description_short||t.description||"")+'</td><td>'+escapeHtml(docsDateRu(dt)||"—")+'</td>'+costCell+'</tr>';
+            }).join("")
+          + '</tbody></table></div></div>'))
+      + '</div>';
+    var doc = "";
+    if(chosen.length){
+      if(d.type==="act") doc = actDocHtml(chosen, hotelById(d.hotelId), {number:d.number, date:d.date, cost:d.cost, customer:d.customer, basis:d.basis});
+      else doc = chosen.map(function(t){ return workOrderPageHtml(t); }).join("");
+    }
+    return picker + (doc ? '<div class="doc-preview">'+doc+'</div>' : '');
+  }
+  document.addEventListener("click", function(e){
+    var tb = e.target.closest && e.target.closest("[data-docs-type]");
+    if(tb){ var d = docsState(); d.type = tb.getAttribute("data-docs-type"); d.sel = {}; d.numberTouched = false; render(); return; }
+    var al = e.target.closest && e.target.closest("[data-docs-all]");
+    if(al){
+      var d2 = docsState(), on = al.getAttribute("data-docs-all")==="1";
+      state.tickets.forEach(function(t){ if(String(t.hotel_id)===String(d2.hotelId) && docsTicketEligible(t, d2.type)){ if(on) d2.sel[t.id] = true; else delete d2.sel[t.id]; } });
+      render(); return;
+    }
+    var pr = e.target.closest && e.target.closest('[data-action="docs-print"]');
+    if(pr){ window.print(); return; }
+  });
+  document.addEventListener("change", function(e){
+    var t = e.target; if(!t || !t.matches) return;
+    var d = docsState();
+    if(t.matches("[data-docs-hotel]")){ d.hotelId = t.value; d.sel = {}; d.numberTouched = false; render(); return; }
+    if(t.matches("[data-docs-pick]")){ var id = t.getAttribute("data-docs-pick"); if(t.checked) d.sel[id] = true; else delete d.sel[id]; render(); return; }
+    if(t.matches("[data-docs-cost]")){ d.cost = t.checked; render(); return; }
+    if(t.matches("[data-docs-amount]")){ d.amounts[t.getAttribute("data-docs-amount")] = t.value; render(); return; }
+    if(t.matches("[data-docs-field]")){
+      var f = t.getAttribute("data-docs-field");
+      d[f] = t.value;
+      if(f==="number") d.numberTouched = (t.value.trim()!==""  && t.value!==docsDefaultNumber(d));
+      if(f==="customer" || f==="basis"){ var pf = docsPrefsLoad(); pf[f] = t.value; docsPrefsSave(pf); }
+      render(); return;
+    }
+  });
+
+  function viewWorkOrder(id){
+    var t = state.tickets.find(function(x){return x.id===id;});
+    if(!t) return h`<div class="empty-state"><b>Заявка не найдена</b></div>`;
+    return h`
+      <div class="wo-toolbar no-print">
+        <a class="btn" href="#/tickets">← К списку заявок</a>
+        <button class="btn" data-action="wo-download" data-id="${t.id}">Скачать .html</button>
+        <button class="btn btn-primary" onclick="window.print()">Печать / PDF</button>
+      </div>
+      ${workOrderPageHtml(t, "wo-content")}`;
   }
 
   /* ============================== TICKET PANEL ============================== */
@@ -8276,6 +8471,7 @@
             <div class="kv"><span class="k">Категория</span><span class="v">${t.case_type? CASE_LABEL[t.case_type]:'—'}</span></div>
             <div class="kv"><span class="k">Срок устранения</span><span class="v" style="${(!di.done && t.resolution_deadline && new Date(t.resolution_deadline).getTime()<Date.now())?'color:var(--crit);font-weight:600;':''}">${t.resolution_deadline? fmtDate(t.resolution_deadline): "не указан (нет данных c-lector)"}</span></div>
             <div class="kv"><span class="k">Наряд-задание</span><span class="v mono">${workOrderNo(t)}</span></div>
+            ${docsAllowed() ? h`<div class="kv"><span class="k">Документы</span><span class="v"><a class="btn btn-sm" href="#/docs/${t.id}">Акт / наряд-задание</a></span></div>` : ""}
           </div>
           ${clectorSyncSection(t)}
           ${(function(){
@@ -8725,6 +8921,12 @@
     }
 
     var app = document.getElementById("app");
+    if(state.route.view==="docs"){
+      state.selectedTicketId = null; document.getElementById("overlay-root").innerHTML = "";
+      if(!docsAllowed()){ state.route = {view: firstAllowedView(), id:null}; location.hash = "#/"+state.route.view; return; }
+      morphInto(app, h`<div class="content" style="max-width:960px;">${viewDocs()}</div>`);
+      return;
+    }
     if(state.route.view==="workorder"){
       state.selectedTicketId = null; document.getElementById("overlay-root").innerHTML = "";
       morphInto(app, h`<div class="content" style="max-width:900px;">${viewWorkOrder(state.route.id)}</div>`);
