@@ -2460,6 +2460,125 @@
       return Promise.all([worker(),worker(),worker(),worker(),worker()]);
     }).then(function(){ return out; });
   }
+  var APP_VERSION_LABEL = "0.4.25";
+  /* ============================== РЕЗЕРВНАЯ КОПИЯ ==============================
+     0.4.25 (по просьбе Антона): на плане Free у Supabase нет автоматического
+     восстановления на любой момент, а всё (заявки, счета, накладные, наличные)
+     лежит только там. Кнопка в профиле скачивает ВСЕ таблицы одним JSON-файлом
+     (полная копия, из неё можно восстановить) и, по желанию, Excel (по листу на
+     таблицу, удобно читать). Файлы из хранилища (фото, счета, акты) не
+     скачиваются — только их список с путями. Напоминание на дашборде, если
+     копии не было больше недели. */
+  var BACKUP_KEY = "ki_last_backup";
+  var BACKUP_TABLES = ["tickets","ticket_notes","ticket_photos","invoices","parts","hotels","crews","profiles","cash_advances","cash_expenses","overhead_expenses","portfolio_snapshot","import_snapshots","ticket_stats_snapshots","activity_daily","sync_state","nbk_rates"];
+  function backupAllowed(){ return !!(state.me && (isOwner() || state.me.role==="dispatcher" || state.me.role==="head")); }
+  function backupLast(){ try{ return localStorage.getItem(BACKUP_KEY)||""; }catch(e){ return ""; } }
+  function backupDaysAgo(){ var t = backupLast(); if(!t) return null; return Math.floor((Date.now()-new Date(t).getTime())/86400000); }
+  function backupReminderHtml(){
+    if(!backupAllowed()) return "";
+    var d = backupDaysAgo();
+    if(d!=null && d<=7) return "";
+    return '<div class="banner" style="margin-bottom:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">'
+      + '<span>'+(d==null ? 'Резервной копии данных ещё не было на этом компьютере.' : 'Последняя резервная копия — '+d+' дн. назад.')+' На бесплатном плане Supabase данные не восстанавливаются автоматически.</span>'
+      + '<button type="button" class="btn btn-sm btn-primary" data-action="backup-open">Скачать копию</button></div>';
+  }
+  // Постранично (Supabase отдаёт не больше 1000 строк за запрос).
+  function backupFetchTable(name){
+    var rows = [], from = 0, PAGE = 1000;
+    function next(){
+      return sb.from(name).select("*").range(from, from+PAGE-1).then(function(res){
+        if(res && res.error) throw res.error;
+        var part = (res && res.data) || [];
+        rows = rows.concat(part);
+        if(part.length===PAGE && rows.length < 200000){ from += PAGE; return next(); }
+        return rows;
+      });
+    }
+    return next();
+  }
+  function backupListFiles(){
+    return Promise.all(STORAGE_BUCKETS.map(listBucketFiles)).then(function(lists){
+      return [].concat.apply([], lists).map(function(f){ return { bucket:f.bucket, path:f.path, size:f.size }; });
+    });
+  }
+  function backupCollect(onProgress){
+    var data = { meta:{ app:"Диспетчерская Keruen Inn", version:APP_VERSION_LABEL, created_at:new Date().toISOString(), created_by:(state.me&&state.me.email)||"", counts:{}, errors:{} }, tables:{} };
+    var chain = Promise.resolve();
+    BACKUP_TABLES.forEach(function(name, i){
+      chain = chain.then(function(){
+        if(onProgress) onProgress("Таблица "+(i+1)+" из "+BACKUP_TABLES.length+": "+name);
+        return backupFetchTable(name).then(function(rows){ data.tables[name] = rows; data.meta.counts[name] = rows.length; })
+          .catch(function(err){ data.meta.errors[name] = (err && err.message) ? err.message : String(err); data.tables[name] = []; data.meta.counts[name] = 0; });
+      });
+    });
+    return chain.then(function(){
+      if(onProgress) onProgress("Список файлов в хранилище…");
+      return backupListFiles().then(function(files){ data.tables.storage_files = files; data.meta.counts.storage_files = files.length; })
+        .catch(function(err){ data.meta.errors.storage_files = (err && err.message) ? err.message : String(err); data.tables.storage_files = []; });
+    }).then(function(){ return data; });
+  }
+  function backupDownloadBlob(blob, filename){
+    var url = URL.createObjectURL(blob), a = document.createElement("a");
+    a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 4000);
+  }
+  function backupCell(v){
+    if(v==null) return "";
+    if(typeof v==="object"){ var s = JSON.stringify(v); return s.length>32000 ? s.slice(0,32000)+"…" : s; }
+    if(typeof v==="string" && v.length>32000) return v.slice(0,32000)+"…";
+    return v;
+  }
+  function backupToWorkbook(data){
+    var wb = XLSX.utils.book_new();
+    var info = [["Показатель","Значение"],["Версия сайта", data.meta.version],["Создана", data.meta.created_at],["Кем", data.meta.created_by]];
+    Object.keys(data.meta.counts).forEach(function(k){ info.push(["Строк: "+k, data.meta.counts[k]]); });
+    Object.keys(data.meta.errors).forEach(function(k){ info.push(["ОШИБКА "+k, data.meta.errors[k]]); });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(info), "О копии");
+    Object.keys(data.tables).forEach(function(name){
+      var rows = data.tables[name]; if(!rows.length) return;
+      var cols = []; rows.forEach(function(r){ Object.keys(r).forEach(function(k){ if(cols.indexOf(k)===-1) cols.push(k); }); });
+      var aoa = [cols].concat(rows.map(function(r){ return cols.map(function(c){ return backupCell(r[c]); }); }));
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), name.slice(0,31));
+    });
+    return wb;
+  }
+  function openBackupModal(){
+    if(!backupAllowed()){ alert("Доступно руководителю и администратору."); return; }
+    closeModal();
+    var d = backupDaysAgo();
+    openModal(h`
+      <div class="modal" data-stop style="width:min(520px,96vw);">
+        <div class="modal-head"><h2>Резервная копия данных</h2><button type="button" class="btn btn-ghost" data-close-modal>✕</button></div>
+        <div class="modal-body" id="backup-body">
+          <div class="muted" style="margin-bottom:10px;">${d==null?'Копию на этом компьютере ещё не делали.':('Последняя копия: '+d+' дн. назад ('+escapeHtml(fmtDate(backupLast()))+').')}</div>
+          <div style="font-size:13.5px;margin-bottom:12px;">Скачивает все таблицы (заявки, счета, накладные, наличные, команда и т.д.). Сами файлы (фото, счета, акты) не скачиваются — только их список. Храните файл в надёжном месте, не на этом же сервере.</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button type="button" class="btn btn-primary" id="backup-json">Скачать копию (JSON)</button>
+            <button type="button" class="btn" id="backup-xlsx">Скачать в Excel</button>
+          </div>
+          <div id="backup-status" class="muted" style="margin-top:12px;font-size:13px;"></div>
+        </div>
+      </div>`);
+    function run(kind){
+      var st = document.getElementById("backup-status"), b1 = document.getElementById("backup-json"), b2 = document.getElementById("backup-xlsx");
+      if(kind==="xlsx" && (typeof XLSX==="undefined" || !XLSX.utils)){ st.textContent = "Модуль Excel не загрузился (интернет/VPN) — скачайте JSON."; return; }
+      b1.disabled = b2.disabled = true; st.textContent = "Готовлю…";
+      backupCollect(function(msg){ st.textContent = msg; }).then(function(data){
+        var day = new Date().toISOString().slice(0,10);
+        if(kind==="json") backupDownloadBlob(new Blob([JSON.stringify(data)], {type:"application/json"}), "keruen-backup-"+day+".json");
+        else XLSX.writeFile(backupToWorkbook(data), "keruen-backup-"+day+".xlsx");
+        try{ localStorage.setItem(BACKUP_KEY, new Date().toISOString()); }catch(e){}
+        var total = Object.keys(data.meta.counts).reduce(function(s,k){ return s+data.meta.counts[k]; }, 0);
+        var errs = Object.keys(data.meta.errors);
+        st.innerHTML = 'Готово: '+total+' строк в '+Object.keys(data.meta.counts).length+' таблицах.'+(errs.length ? ' <span style="color:var(--crit);">Не удалось прочитать: '+escapeHtml(errs.join(", "))+'.</span>' : '');
+        b1.disabled = b2.disabled = false;
+        render();
+      }).catch(function(err){ st.textContent = "Ошибка: "+((err&&err.message)||err); b1.disabled = b2.disabled = false; });
+    }
+    document.getElementById("backup-json").addEventListener("click", function(){ run("json"); });
+    document.getElementById("backup-xlsx").addEventListener("click", function(){ run("xlsx"); });
+  }
+
   // 0.4.20: память о файлах, которые уже пробовали сжать и они не уменьшились
   // (ключ путь+размер) — чтобы повторный запуск не скачивал их заново (трафик).
   var NOSHRINK_KEY = "ki_noshrink";
@@ -4574,6 +4693,9 @@
       </div>`;
   }
   function viewDashboard(){
+    return backupReminderHtml() + viewDashboardMain();
+  }
+  function viewDashboardMain(){
     if(isClientRole()) return viewDashboardClient();
     var active = state.tickets.filter(isActive);
     var overdue = active.filter(function(t){ return deadlineInfo(t).overdue; });
@@ -8554,7 +8676,7 @@
             <div class="field"><label>Имя</label><input type="text" name="name" value="${escapeHtml(state.me.name||'')}" placeholder="Как к вам обращаться"></div>
             <div class="field"><label>Роль</label><input type="text" value="${roleLabel(state.me.role)}" disabled></div>
             <div class="helptext">Роль и зоны назначает руководитель службы в разделе «Команда».</div>
-            ${(isOwner() || state.me.role==="dispatcher" || state.me.role==="head") ? h`<div class="field" style="margin-top:10px;"><label>Хранилище файлов</label><button type="button" class="btn btn-sm" id="me-storage-tool">Освободить место (сжать тяжёлые файлы)…</button></div>` : ''}
+            ${(isOwner() || state.me.role==="dispatcher" || state.me.role==="head") ? h`<div class="field" style="margin-top:10px;"><label>Хранилище файлов</label><button type="button" class="btn btn-sm" id="me-storage-tool">Освободить место (сжать тяжёлые файлы)…</button> <button type="button" class="btn btn-sm" id="me-backup">Резервная копия данных…</button></div>` : ''}
           </div>
           <div class="modal-foot">
             <button type="button" class="btn btn-danger" id="me-signout">Выйти</button>
@@ -8567,6 +8689,7 @@
     });
     document.getElementById("me-signout").addEventListener("click", function(){ closeModal(); signOut(); });
     var stBtn = document.getElementById("me-storage-tool"); if(stBtn) stBtn.addEventListener("click", openStorageToolModal);
+    var bkBtn = document.getElementById("me-backup"); if(bkBtn) bkBtn.addEventListener("click", openBackupModal);
   }
 
   // Окно «Права» в «Команде» (0.2.10, полностью переработано в 0.4.4 по
@@ -9318,6 +9441,7 @@
       if(action==="photo-open") return openPhotoFile(actionEl.getAttribute("data-path"));
       if(action==="photo-delete"){ deletePhoto(id, actionEl.getAttribute("data-path")); return; }
       if(action==="sync-state-refresh"){ reloadSyncState(); return; }
+      if(action==="backup-open"){ openBackupModal(); return; }
       if(action==="hotel-add"){
         var hform = document.getElementById("hotel-form");
         var hfd = new FormData(hform);
