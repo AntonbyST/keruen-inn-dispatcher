@@ -1089,17 +1089,42 @@
   // по готовности, вызывающий код получает {state:"pending"} на первый показ.
   var nbkRateCache = {}; // ключ "ВАЛЮТА|ГГГГ-ММ-ДД" -> "pending" | "error" | {rate,quant}
   function isoToDDMMYYYY(iso){ var p=iso.split("-"); return p[2]+"."+p[1]+"."+p[0]; }
+  // 0.4.27: если Нацбанк (через функцию nbk-rate) не ответил — запасной источник:
+  // открытые курсы валют (currency-api, через jsdelivr — тот же CDN, что уже
+  // нужен сайту). Это НЕ официальный курс НБ РК, но очень близок; в отчётах такие
+  // курсы помечаются «резервный». Дата в будущем → берётся последний курс.
+  function fallbackRate(currency, dateIso){
+    var cur = String(currency).toLowerCase();
+    var today = new Date().toISOString().slice(0,10);
+    var ver = (dateIso && dateIso<=today) ? dateIso : "latest";
+    function load(v){
+      return fetch("https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@"+v+"/v1/currencies/"+cur+".json").then(function(r){
+        if(!r.ok) throw new Error("http "+r.status);
+        return r.json();
+      }).then(function(d){
+        var v2 = d && d[cur] && d[cur].kzt;
+        if(!(v2>0)) throw new Error("no kzt");
+        return v2;
+      });
+    }
+    return load(ver).catch(function(){ return ver==="latest" ? Promise.reject(new Error("fallback failed")) : load("latest"); });
+  }
+  var nbkFallbackUsed = false;
   function ensureNbkRate(currency, dateIso){
     var key = currency+"|"+dateIso;
     if(nbkRateCache.hasOwnProperty(key)) return;
     if(!sb || !sb.functions){ nbkRateCache[key]="error"; return; }
     nbkRateCache[key] = "pending";
+    function viaFallback(){
+      if(typeof fetch!=="function"){ nbkRateCache[key]="error"; render(); return; }
+      fallbackRate(currency, dateIso).then(function(v){ nbkRateCache[key] = { rate:v, quant:1, fallback:true }; nbkFallbackUsed = true; render(); })
+        .catch(function(){ nbkRateCache[key] = "error"; render(); });
+    }
     sb.functions.invoke("nbk-rate", { body: { currency: currency, date: isoToDDMMYYYY(dateIso) } }).then(function(res){
       var d = res && res.data;
-      if(d && d.rate!=null && d.quant){ nbkRateCache[key] = { rate:d.rate, quant:d.quant }; }
-      else { nbkRateCache[key] = "error"; }
-      render();
-    }).catch(function(){ nbkRateCache[key] = "error"; render(); });
+      if(d && d.rate!=null && d.quant){ nbkRateCache[key] = { rate:d.rate, quant:d.quant }; render(); }
+      else viaFallback();
+    }).catch(viaFallback);
   }
   // Возвращает {value, state, original, currency}: value — сумма в KZT (или
   // null, пока не готова/неизвестна), state — "ok"/"pending"/"error"/"missing"
@@ -2460,7 +2485,7 @@
       return Promise.all([worker(),worker(),worker(),worker(),worker()]);
     }).then(function(){ return out; });
   }
-  var APP_VERSION_LABEL = "0.4.26";
+  var APP_VERSION_LABEL = "0.4.27";
   /* ============================== РЕЗЕРВНАЯ КОПИЯ ==============================
      0.4.25 (по просьбе Антона): на плане Free у Supabase нет автоматического
      восстановления на любой момент, а всё (заявки, счета, накладные, наличные)
@@ -2496,10 +2521,15 @@
     }
     return next();
   }
+  // 0.4.27: список файлов хранилища не должен задерживать копию — если Supabase
+  // отвечает долго (много папок), ждём не больше 25 секунд, копия таблиц всё
+  // равно скачивается, а в «О копии» указано, что список файлов не получен.
   function backupListFiles(){
-    return Promise.all(STORAGE_BUCKETS.map(listBucketFiles)).then(function(lists){
+    var all = Promise.all(STORAGE_BUCKETS.map(listBucketFiles)).then(function(lists){
       return [].concat.apply([], lists).map(function(f){ return { bucket:f.bucket, path:f.path, size:f.size }; });
     });
+    var timeout = new Promise(function(_, rej){ setTimeout(function(){ rej(new Error("список файлов не получен за 25 секунд (таблицы сохранены)")); }, 25000); });
+    return Promise.race([all, timeout]);
   }
   function backupCollect(onProgress){
     var data = { meta:{ app:"Диспетчерская Keruen Inn", version:APP_VERSION_LABEL, created_at:new Date().toISOString(), created_by:(state.me&&state.me.email)||"", counts:{}, errors:{} }, tables:{} };
@@ -2570,7 +2600,7 @@
         try{ localStorage.setItem(BACKUP_KEY, new Date().toISOString()); }catch(e){}
         var total = Object.keys(data.meta.counts).reduce(function(s,k){ return s+data.meta.counts[k]; }, 0);
         var errs = Object.keys(data.meta.errors);
-        st.innerHTML = 'Готово: '+total+' строк в '+Object.keys(data.meta.counts).length+' таблицах.'+(errs.length ? ' <span style="color:var(--crit);">Не удалось прочитать: '+escapeHtml(errs.join(", "))+'.</span>' : '');
+        st.innerHTML = 'Готово: файл <b>keruen-backup-'+day+'.'+kind+'</b> сохранён браузером (обычно папка «Загрузки»). '+total+' строк в '+Object.keys(data.meta.counts).length+' таблицах.'+(errs.length ? ' <span style="color:var(--crit);">Не удалось прочитать: '+escapeHtml(errs.join(", "))+'.</span>' : '');
         b1.disabled = b2.disabled = false;
         render();
       }).catch(function(err){ st.textContent = "Ошибка: "+((err&&err.message)||err); b1.disabled = b2.disabled = false; });
@@ -6338,7 +6368,7 @@
     var r = nbkRateCache["USD|"+day1];
     if(!r || r==="pending") return { state:"pending" };
     if(r==="error") return { state:"error" };
-    return { state:"ok", value: r.rate/r.quant };
+    return { state:"ok", value: r.rate/r.quant, fallback: !!r.fallback };
   }
   function buildYearReport(year, vatMode){
     vatMode = vatMode==="gross" ? "gross" : "net";
@@ -6347,11 +6377,18 @@
     var direct = collectReportDirect(vatMode);
     var rates = withOv ? reportOverheadRates(direct, reportOverheadByMonth()) : {};
     var ovByMonth = withOv ? reportOverheadByMonth() : {};
-    var usd = []; var usdState = "ok";
+    // Курс нужен только за месяцы, в которых есть расходы (будущие месяцы и
+    // месяцы без расходов не запрашиваем — для будущих дат курса ещё нет).
+    var needMonth = {};
+    direct.forEach(function(e){ if(String(e.month).slice(0,4)===year) needMonth[e.month] = true; });
+    Object.keys(ovByMonth).forEach(function(k){ if(k.slice(0,4)===year && ovByMonth[k]>0) needMonth[k] = true; });
+    var usd = []; var usdState = "ok", usdFallback = false;
     for(var mi=1; mi<=12; mi++){
-      var u = yearUsdRate(year, mi); usd.push(u);
+      var mk0 = year+"-"+String(mi).padStart(2,"0");
+      var u = needMonth[mk0] ? yearUsdRate(year, mi) : { state:"skip" }; usd.push(u);
       if(u.state==="pending" && usdState==="ok") usdState = "pending";
       if(u.state==="error") usdState = "error";
+      if(u.fallback) usdFallback = true;
     }
     var months = []; for(var i=1;i<=12;i++){ months.push({ key: year+"-"+String(i).padStart(2,"0"), direct:0, overhead:0, total:0, usd:null, rate: usd[i-1].state==="ok" ? usd[i-1].value : null }); }
     var byHotel = {};
@@ -6378,7 +6415,7 @@
     // показываем отдельной строкой, чтобы «Итого» сошлось с реальными накладными года.
     var ovUnalloc = 0;
     Object.keys(ovByMonth).forEach(function(k){ if(k.slice(0,4)===year && !(rates[k]>0)) ovUnalloc += ovByMonth[k]; });
-    return { year: year, rows: rows, months: months, total: tot, usdState: usdState, withOv: withOv, ovUnalloc: ovUnalloc };
+    return { year: year, rows: rows, months: months, total: tot, usdState: usdState, usdFallback: usdFallback, withOv: withOv, ovUnalloc: ovUnalloc };
   }
   function yearReportToCsv(rep){
     var out = [];
@@ -6412,7 +6449,7 @@
     function fmt(n){ return nfmt(Number(n)||0, {maximumFractionDigits:0}); }
     var showOv = rep.withOv;
     var vatLabel = vatMode==="gross" ? "с НДС" : "без НДС";
-    var usdNote = rep.usdState==="pending" ? "курсы загружаются…" : (rep.usdState==="error" ? "курс USD за некоторые месяцы не получен" : "");
+    var usdNote = rep.usdState==="pending" ? "курсы загружаются…" : (rep.usdState==="error" ? "курс USD за некоторые месяцы не получен" : (rep.usdFallback ? "часть курсов — из резервного источника (не НБ РК)" : ""));
     return h`
       ${financeTabs('reports')}
       <div class="row-gap">
@@ -6448,7 +6485,7 @@
           <div class="section-title">По месяцам</div>
           <div class="table-wrap"><table data-report="year-months">
             <thead><tr><th>Месяц</th><th class="num">Итого, ₸</th><th class="num">Курс USD на 1-е</th><th class="num">Итого, $</th></tr></thead>
-            <tbody>${rep.months.map(function(m){ return h`<tr><td>${monthLabelRu(m.key)}</td><td class="num mono">${fmt(m.total)}</td><td class="num mono muted">${m.rate!=null?(Math.round(m.rate*100)/100).toLocaleString("ru-RU"):'…'}</td><td class="num mono">${m.usd!=null?fmt(m.usd):'…'}</td></tr>`; }).join("")}</tbody>
+            <tbody>${rep.months.map(function(m){ return h`<tr><td>${monthLabelRu(m.key)}</td><td class="num mono">${fmt(m.total)}</td><td class="num mono muted">${m.rate!=null?(Math.round(m.rate*100)/100).toLocaleString("ru-RU"):(m.total>0?'…':'—')}</td><td class="num mono">${m.usd!=null?fmt(m.usd):(m.total>0?'…':'—')}</td></tr>`; }).join("")}</tbody>
           </table></div>
         </div>
       </div>`;
