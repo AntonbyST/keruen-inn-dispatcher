@@ -9624,7 +9624,7 @@
     }
     if(e.target.id==="overhead-expense-form"){
       e.preventDefault(); var fdoe=new FormData(e.target);
-      var oeData = {date:fdoe.get("date"), category:fdoe.get("category"), amount:fdoe.get("amount"), currency:fdoe.get("currency"), vat:fdoe.get("vat"), tax:fdoe.get("tax"), tax_value:fdoe.get("tax_value"), note:fdoe.get("note")};
+      var oeData = {date:fdoe.get("date"), category:fdoe.get("category"), amount:fdoe.get("amount"), currency:fdoe.get("currency"), vat:fdoe.get("vat"), tax:fdoe.get("tax"), tax_value:fdoe.get("tax_value"), tax_currency:fdoe.get("tax_currency"), note:fdoe.get("note")};
       var oeEditId = e.target.getAttribute("data-edit-id");
       if(oeEditId){ if(saveOverheadEdit(oeEditId, oeData)!==false) closeModal(); return; }
       var oeFiles = Array.from((e.target.elements.files && e.target.elements.files.files) || []);
