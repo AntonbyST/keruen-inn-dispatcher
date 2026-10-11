@@ -475,7 +475,8 @@
   .oh-form-grid .full{ grid-column:1/-1; }
 
   /* ---------- workorder (print) ---------- */
-  .wo-page{ max-width:760px; margin:0 auto; background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:40px 44px; box-shadow:var(--shadow); }
+  /* документ — всегда «белый лист» (как на печати), независимо от тёмной темы */
+  .wo-page{ max-width:760px; margin:0 auto; background:#fff; color:#15181d; --ink:#15181d; --ink-soft:#3a424d; --ink-faint:#5b6470; --line:#d5d9df; --surface:#fff; --surface-2:#eef1f5; border:1px solid #d5d9df; border-radius:4px; padding:40px 44px; box-shadow:0 6px 24px rgba(0,0,0,.28); box-sizing:border-box; overflow:hidden; }
   .wo-top{ display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:22px; }
   .wo-co{ font-weight:700; font-size:14px; }
   .wo-addr{ color:var(--ink-faint); font-size:12px; margin-top:2px; }
@@ -485,21 +486,32 @@
   .wo-field .k{ font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-faint); font-weight:600; }
   .wo-field .v{ font-size:14.5px; margin-top:3px; }
   .wo-desc{ background:var(--surface-2); border-radius:9px; padding:14px 16px; margin:8px 0 20px; font-size:13.5px; }
-  .wo-sign{ display:grid; grid-template-columns:1fr 1fr; gap:30px; margin-top:44px; }
+  .wo-sign{ display:grid; grid-template-columns:1fr 1fr; gap:48px; margin-top:44px; }
   .sign-line{ border-top:1px solid var(--ink-faint); padding-top:6px; font-size:11.5px; color:var(--ink-faint); }
   .act-meta{ display:grid; gap:4px; font-size:13.5px; }
   .act-meta .k{ color:var(--ink-faint); }
-  .act-table{ width:100%; border-collapse:collapse; font-size:12.5px; }
+  .act-table{ width:100%; border-collapse:collapse; font-size:12px; table-layout:fixed; }
+  .act-table th, .act-table td{ overflow-wrap:anywhere; word-break:normal; }
+  .act-table th:nth-child(1){ width:5%; } .act-table th:nth-child(2){ width:10%; } .act-table th:nth-child(3){ width:17%; }
+  .act-table th:nth-child(5){ width:15%; } .act-table th:nth-child(6){ width:13%; } .act-table th:nth-child(7){ width:15%; }
+  .act-table .nw{ white-space:nowrap; font-variant-numeric:tabular-nums; }
+  .act-table th{ font-size:11px; text-transform:none; letter-spacing:0; line-height:1.25; overflow-wrap:break-word; hyphens:auto; white-space:normal; }
   .act-table th, .act-table td{ border:1px solid var(--ink-faint); padding:6px 8px; vertical-align:top; }
   .act-table th{ background:var(--surface-2); font-weight:600; text-align:left; }
   .act-table td.c{ text-align:center; } .act-table td.r{ text-align:right; }
   .sign-sub{ font-size:10.5px; color:var(--ink-faint); margin-top:3px; }
+  .sig{ font-size:12.5px; }
+  .sig-role{ font-weight:600; margin-bottom:34px; }
+  .sig-line{ border-top:1px solid #15181d; }
+  .sig-cap{ display:flex; justify-content:space-between; gap:10px; color:var(--ink-faint); font-size:10.5px; margin-top:3px; }
+  .sig-cap .sig-name{ color:var(--ink); font-size:12px; text-align:right; }
+  .sig-sub{ color:var(--ink-faint); font-size:11px; margin-top:6px; }
   .doc-preview .doc-page{ margin-bottom:22px; }
   .wo-toolbar{ max-width:760px; margin:0 auto 16px; display:flex; gap:8px; justify-content:flex-end; }
   @media print{
     .sidebar, .topbar, .wo-toolbar, .no-print{ display:none !important; }
     body, .content{ background:#fff; padding:0; margin:0; }
-    .wo-page{ box-shadow:none; border:none; max-width:none; }
+    .wo-page{ box-shadow:none; border:none; max-width:none; padding:0; border-radius:0; }
     .doc-preview .doc-page{ margin:0; page-break-after:always; break-after:page; }
     .doc-preview .doc-page:last-child{ page-break-after:auto; break-after:auto; }
     .doc-preview .wo-sign{ grid-template-columns:1fr 1fr !important; }
@@ -2485,7 +2497,7 @@
       return Promise.all([worker(),worker(),worker(),worker(),worker()]);
     }).then(function(){ return out; });
   }
-  var APP_VERSION_LABEL = "0.4.27";
+  var APP_VERSION_LABEL = "0.4.28";
   /* ============================== РЕЗЕРВНАЯ КОПИЯ ==============================
      0.4.25 (по просьбе Антона): на плане Free у Supabase нет автоматического
      восстановления на любой момент, а всё (заявки, счета, накладные, наличные)
@@ -8262,8 +8274,8 @@
         <div class="wo-desc">${escapeHtml(t.description)}</div>
         <div class="helptext" style="margin-bottom:6px;">Основание: Регламент подачи, рассмотрения заявок и определения гарантийных случаев (Приложение №2 к Протоколу разногласий по ДС №10) и Регламент организации и работы Службы сервиса Keruen Inn.</div>
         <div class="wo-sign">
-          <div class="sign-line">Исполнитель: _______________________ / ${perf.length?escapeHtml(perf.join(", ")):''} /</div>
-          <div class="sign-line">Представитель Заказчика на объекте: _______________________ /</div>
+          ${docsSignBlock("Исполнитель", perf.join(", "), "", false)}
+          ${docsSignBlock("Представитель Заказчика на объекте", "", "", false)}
         </div>
       </div>`;
   }
@@ -8284,7 +8296,7 @@
         + '<td>'+escapeHtml(desc)+'</td>'
         + '<td>'+(perf.length ? escapeHtml(perf.join(", ")) : "—")+'</td>'
         + '<td class="c">'+(closed ? escapeHtml(docsDateRu(closed)) : "—")+'</td>'
-        + (showCost ? '<td class="r mono">'+(cost!=null ? escapeHtml(fmtKZT2(cost)) : "—")+'</td>' : '')
+        + (showCost ? '<td class="r nw">'+(cost!=null ? escapeHtml(fmtKZT2(cost)) : "—")+'</td>' : '')
         + '</tr>';
     }).join("");
     var cn = hotel.client_contact_name || "", cp = hotel.client_contact_position || "";
@@ -8304,13 +8316,20 @@
       + '<p style="margin:14px 0 8px;font-size:13.5px;">Исполнитель выполнил, а Заказчик принял следующие работы по заявкам:</p>'
       + '<table class="act-table"><thead><tr><th>№</th><th>№ заявки</th><th>Локация</th><th>Описание выполненных работ</th><th>Исполнитель</th><th>Дата выполнения</th>'+(showCost?'<th>Стоимость, ₸</th>':'')+'</tr></thead><tbody>'
       + rows
-      + (showCost && anyCost ? '<tr class="tot"><td colspan="6" class="r"><b>Итого:</b></td><td class="r mono"><b>'+escapeHtml(fmtKZT2(total))+'</b></td></tr>' : '')
+      + (showCost && anyCost ? '<tr class="tot"><td colspan="6" class="r"><b>Итого:</b></td><td class="r nw"><b>'+escapeHtml(fmtKZT2(total))+'</b></td></tr>' : '')
       + '</tbody></table>'
       + '<p style="margin:16px 0 0;font-size:13.5px;">Вышеперечисленные работы выполнены полностью и в установленные сроки. Заказчик претензий по объёму, качеству и срокам выполнения работ не имеет.</p>'
       + '<div class="wo-sign">'
-      +   '<div><div class="sign-line">Исполнитель: _______________________ / '+escapeHtml(execName || (performersAll.length===1?performersAll[0]:""))+' /</div><div class="sign-sub">М.П.</div></div>'
-      +   '<div><div class="sign-line">Заказчик: _______________________ / '+escapeHtml(cn)+' /</div>'+(cp?'<div class="sign-sub">'+escapeHtml(cp)+'</div>':'<div class="sign-sub">М.П.</div>')+'</div>'
+      +   docsSignBlock("Исполнитель", execName || (performersAll.length===1?performersAll[0]:""), "", true)
+      +   docsSignBlock("Заказчик", cn, cp, !cp || true)
       + '</div></div>';
+  }
+  // 0.4.28: подпись: роль, линия для подписи, под ней «подпись / ФИО», должность, М.П.
+  function docsSignBlock(role, name, sub, stamp){
+    return '<div class="sig"><div class="sig-role">'+escapeHtml(role)+'</div><div class="sig-line"></div>'
+      + '<div class="sig-cap"><span>подпись</span><span class="sig-name">'+(name?escapeHtml(name):'')+'</span></div>'
+      + (sub ? '<div class="sig-sub">'+escapeHtml(sub)+'</div>' : '')
+      + (stamp ? '<div class="sig-sub">М.П.</div>' : '')+'</div>';
   }
   function viewDocs(){
     var d = docsState();
