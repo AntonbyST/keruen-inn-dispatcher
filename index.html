@@ -471,6 +471,12 @@
   .oh-drop{ position:relative; border:1.5px dashed var(--accent-line); border-radius:8px; padding:14px; text-align:center; color:var(--ink-soft); font-size:12.5px; background:var(--surface-2); }
   .oh-drop input{ position:absolute; inset:0; width:100%; height:100%; opacity:0; cursor:pointer; }
   .oh-drop.has{ color:var(--ink); border-style:solid; }
+  .oh-grp{ display:flex; align-items:center; gap:8px; cursor:pointer; user-select:none; padding:8px 4px; }
+  .oh-grp-y{ font-size:15.5px; border-bottom:1px solid var(--line); margin-top:14px; }
+  .oh-grp-m{ font-size:13.5px; background:var(--surface-2); border-radius:8px; padding:7px 10px; margin:10px 0 2px; }
+  .oh-grp-sum{ margin-left:auto; font-variant-numeric:tabular-nums; font-weight:600; }
+  .oh-caret{ width:12px; color:var(--ink-faint); }
+  .oh-month{ margin-left:6px; }
   .oh-form-grid{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }
   .oh-form-grid .full{ grid-column:1/-1; }
 
@@ -2497,7 +2503,7 @@
       return Promise.all([worker(),worker(),worker(),worker(),worker()]);
     }).then(function(){ return out; });
   }
-  var APP_VERSION_LABEL = "0.4.29";
+  var APP_VERSION_LABEL = "0.4.30";
   /* ============================== РЕЗЕРВНАЯ КОПИЯ ==============================
      0.4.25 (по просьбе Антона): на плане Free у Supabase нет автоматического
      восстановления на любой момент, а всё (заявки, счета, накладные, наличные)
@@ -6049,7 +6055,7 @@
     var m = {};
     if(isClientRole()) return m; // «Клиенту» компанейские накладные ни к чему
     (state.overheadExpenses||[]).forEach(function(oe){
-      var mk = oe.date ? String(oe.date).slice(0,7) : null; if(!mk) return;
+      var mk = overheadMonthKey(oe); if(!mk) return;
       var acc = overheadAccountedKZT(oe);
       if(acc.state!=="ok" || acc.value==null) return; // неполная запись (нет валюты/НДС или курса) — как и у счетов, молча не считаем
       m[mk] = (m[mk]||0) + acc.value;
@@ -6085,7 +6091,7 @@
     var overheadCatsInMonth = {};
     if(withOv){
       (state.overheadExpenses||[]).forEach(function(oe){
-        var mk = oe.date ? String(oe.date).slice(0,7) : null;
+        var mk = overheadMonthKey(oe);
         var acc2 = overheadAccountedKZT(oe);
         if(mk===monthKey && acc2.state==="ok" && acc2.value!=null) overheadCatsInMonth[oe.category||"—"] = (overheadCatsInMonth[oe.category||"—"]||0) + acc2.value;
       });
@@ -6977,9 +6983,22 @@
   // на 1-е число месяца расхода (а не на дату записи, как в реестре платежей);
   // у «Своей суммы» налога можно указать свою валюту (extra.custom_tax_currency),
   // она тоже переводится в ₸ по курсу на 1-е число.
+  // 0.4.30 (по просьбе Антона): накладные группируются по месяцам и годам. Месяц
+  // учёта берётся из даты автоматически, но его можно поменять вручную
+  // (extra.period = "ГГГГ-ММ", хранится только если отличается от месяца даты —
+  // иначе месяц следует за датой). Отчёты и курс на 1-е число — по месяцу учёта.
+  function overheadMonthKey(oe){
+    var p = oe && oe.extra && oe.extra.period;
+    if(typeof p==="string" && /^\d{4}-(0[1-9]|1[0-2])$/.test(p)) return p;
+    return (oe && oe.date) ? String(oe.date).slice(0,7) : new Date().toISOString().slice(0,7);
+  }
+  function overheadApplyPeriod(extra, date, period){
+    var dm = date ? String(date).slice(0,7) : "";
+    if(period && /^\d{4}-(0[1-9]|1[0-2])$/.test(period) && period!==dm) extra.period = period;
+    return extra;
+  }
   function overheadRateDay(oe){
-    var day = oe.date ? String(oe.date).slice(0,10) : new Date().toISOString().slice(0,10);
-    return day.slice(0,7) + "-01";
+    return overheadMonthKey(oe) + "-01";
   }
   function overheadAccountedKZT(oe){
     if(oe.vat_included==null && !oe.currency && !oe.tax_basis) return { value: Number(oe.amount)||0, state:"ok", legacy:true };
@@ -7081,6 +7100,7 @@
     if(!category){ alert("Укажите статью расхода."); return false; }
     if(rawAmt==="" || isNaN(amount) || amount<=0){ alert("Укажите сумму."); return false; }
     var tax = overheadTaxFields(data.currency, data.vat, data.tax, data.tax_value, data.tax_currency);
+    overheadApplyPeriod(tax.extra, data.date || new Date().toISOString().slice(0,10), data.period);
     // «Сохраняю…» — кнопка недоступна, пока идёт загрузка файлов и запись
     // (раньше при больших файлах казалось, что ничего не происходит, и
     // запись «добавлялась медленно»). После записи строка сразу попадает в
@@ -7573,6 +7593,7 @@
     var fd = new FormData(form);
     var f = overheadTaxFields(fd.get("currency"), fd.get("vat"), fd.get("tax"), fd.get("tax_value")||"", fd.get("tax_currency"));
     var num = Number(parseAmountInputValue(fd.get("amount")||""));
+    overheadApplyPeriod(f.extra, fd.get("date"), fd.get("period"));
     return { date: fd.get("date"), amount: isNaN(num)?0:num, currency: f.currency, vat_included: f.vat_included, tax_basis: f.tax_basis, extra: f.extra };
   }
   function overheadLiveUpdate(){
@@ -7619,6 +7640,7 @@
           <div class="modal-body">
             <div class="oh-form-grid">
               <div class="field"><label>Дата</label><input type="date" name="date" value="${e&&e.date?String(e.date).slice(0,10):todayIso}" required></div>
+              <div class="field"><label>Месяц учёта <span class="muted" style="font-weight:400;">(по дате; можно изменить)</span></label><div style="display:flex;gap:6px;"><input type="month" name="period" value="${e?overheadMonthKey(e):todayIso.slice(0,7)}" style="flex:1;" ${e&&e.extra&&e.extra.period?'data-touched="1"':''}><button type="button" class="btn btn-ghost btn-sm" data-action="oh-period-auto" title="Вернуть месяц по дате">по дате</button></div></div>
               <div class="field"><label>Статья</label><input type="text" name="category" list="overhead-categories" placeholder="напр. Зарплата бэк-офиса" value="${e?escapeHtml(e.category):''}" required></div>
               <div class="field"><label>Сумма</label><input type="text" inputmode="decimal" class="registry-amount-input" name="amount" placeholder="напр. 100 000" value="${e?formatAmountInputValue(String(e.amount)):''}" required></div>
               <div class="field"><label>Валюта</label><select name="currency">${["KZT","RUB","BYN"].map(function(c){ return '<option value="'+c+'"'+(curVal===c?' selected':'')+'>'+c+'</option>'; }).join("")}</select></div>
@@ -7649,6 +7671,7 @@
     if(!category){ alert("Укажите статью расхода."); return false; }
     if(rawAmt==="" || isNaN(amount) || amount<=0){ alert("Укажите сумму."); return false; }
     var tax = overheadTaxFields(data.currency, data.vat, data.tax, data.tax_value||"", data.tax_currency);
+    overheadApplyPeriod(tax.extra, data.date || e.date, data.period);
     var patch = { date: data.date || e.date, category: category, amount: amount, currency: tax.currency, vat_included: tax.vat_included, tax_basis: tax.tax_basis, extra: tax.extra, note: (data.note||"").trim() || null };
     Object.assign(e, patch);
     state.overheadExpenses.sort(rtSortBy("date", false));
@@ -7684,6 +7707,33 @@
       return h`<option value="" ${sel===''?'selected':''}>—</option>${vatOn?'':h`<option value="simplified" ${sel==='simplified'?'selected':''}>Упрощ. +20%</option><option value="cash" ${sel==='cash'?'selected':''}>Нал. +30%</option><option value="custom" ${sel==='custom'?'selected':''}>Свой, %</option><option value="custom_amt" ${sel==='custom_amt'?'selected':''}>Своя сумма</option>`}`;
     }
 
+    // 0.4.30: группировка: год → месяц учёта (из даты или вручную) → записи.
+    // Заголовки сворачиваются (состояние в state.ohClosed), у каждого — итог в ₸.
+    function ohGrouped(list, cardFn){
+      var years = {}, order = [];
+      list.forEach(function(e){
+        var mk = overheadMonthKey(e), y = mk.slice(0,4);
+        var Y = years[y] || (years[y] = { total:0, months:{}, mOrder:[] });
+        var M = Y.months[mk] || (Y.months[mk] = { total:0, items:[] });
+        if(Y.mOrder.indexOf(mk)===-1) Y.mOrder.push(mk);
+        var acc = overheadAccountedKZT(e);
+        if(acc.state==="ok" && acc.value!=null){ Y.total += acc.value; M.total += acc.value; }
+        M.items.push(e);
+      });
+      var yKeys = Object.keys(years).sort().reverse();
+      var closed = state.ohClosed || {};
+      return yKeys.map(function(y){
+        var Y = years[y], yClosed = !!closed["y"+y];
+        var mHtml = yClosed ? "" : Y.mOrder.sort().reverse().map(function(mk){
+          var M = Y.months[mk], mClosed = !!closed["m"+mk];
+          M.items.sort(function(a,b){ return String(b.date||"").localeCompare(String(a.date||"")); });
+          return '<div class="oh-month" data-oh-month="'+mk+'"><div class="oh-grp oh-grp-m" data-action="oh-group-toggle" data-key="m'+mk+'"><span class="oh-caret">'+(mClosed?'▸':'▾')+'</span><b>'+escapeHtml(monthLabelRu(mk))+'</b><span class="muted"> · '+M.items.length+' '+ruPlural(M.items.length,["запись","записи","записей"])+'</span><span class="oh-grp-sum">'+escapeHtml(fmtSum(M.total))+' ₸</span></div>'
+            + (mClosed ? '' : M.items.map(cardFn).join("")) + '</div>';
+        }).join("");
+        return '<div class="oh-year" data-oh-year="'+y+'"><div class="oh-grp oh-grp-y" data-action="oh-group-toggle" data-key="y'+y+'"><span class="oh-caret">'+(yClosed?'▸':'▾')+'</span><b>'+y+' год</b><span class="muted"> · '+Y.mOrder.length+' '+ruPlural(Y.mOrder.length,["месяц","месяца","месяцев"])+'</span><span class="oh-grp-sum">'+escapeHtml(fmtSum(Y.total))+' ₸</span></div>'+mHtml+'</div>';
+      }).join("");
+    }
+
     return h`
       ${financeTabs('overhead')}
       <datalist id="overhead-categories">${categories.map(function(c){ return `<option value="${escapeHtml(c)}">`; }).join("")}</datalist>
@@ -7703,7 +7753,7 @@
 
         <div class="card card-pad">
           <div class="oh-head"><div class="section-title">Записи</div><input type="text" class="oh-search" data-overhead-search value="${escapeHtml(state.overheadSearch||'')}" placeholder="Поиск: статья, сумма, файл…">${editable ? h`<button type="button" class="btn btn-primary" data-action="overhead-add-open"${saving?' disabled':''}>＋ Добавить расход</button>` : ''}</div>
-          ${rows.length===0 ? h`<div class="empty-state"><b>Пока нет записей</b>${editable?'Нажмите «＋ Добавить расход».':''}</div>` : shown.length===0 ? h`<div class="empty-state"><b>Ничего не найдено</b>Проверьте статью, сумму или примечание в поиске.</div>` : h`<div class="oh-list">${shown.map(function(e){
+          ${rows.length===0 ? h`<div class="empty-state"><b>Пока нет записей</b>${editable?'Нажмите «＋ Добавить расход».':''}</div>` : shown.length===0 ? h`<div class="empty-state"><b>Ничего не найдено</b>Проверьте статью, сумму или примечание в поиске.</div>` : h`<div class="oh-list">${ohGrouped(shown, function(e){
             var acc = overheadAccountedKZT(e);
             var vatTxt = e.vat_included===true ? 'с НДС' : (e.vat_included===false ? 'без НДС' : '');
             var taxTxt = e.tax_basis ? taxBasisLabel({tax_basis:e.tax_basis, extra:e.extra}) : '';
@@ -7733,7 +7783,7 @@
                 <button type="button" class="btn btn-ghost btn-sm oh-del" data-action="overhead-expense-delete" data-id="${e.id}">Удалить</button>
               </div>` : '<div></div>'}
             </div>`;
-          }).join("")}</div>`}
+          })}</div>`}
         </div>
       </div>`;
   }
@@ -9669,6 +9719,8 @@
       if(action==="cash-expense-delete"){ e.preventDefault(); deleteCashExpense(id); return; }
       if(action==="overhead-file-open"){ e.preventDefault(); openOverheadFile(actionEl.getAttribute("data-path")); return; }
       if(action==="overhead-file-delete"){ e.preventDefault(); deleteOverheadFile(id, actionEl.getAttribute("data-path")); return; }
+      if(action==="oh-period-auto"){ var pf = actionEl.closest("form"); if(pf){ pf.elements.period.removeAttribute("data-touched"); if(pf.elements.date.value) pf.elements.period.value = pf.elements.date.value.slice(0,7); overheadLiveUpdate(); } return; }
+      if(action==="oh-group-toggle"){ var gk = actionEl.getAttribute("data-key"); state.ohClosed = state.ohClosed || {}; state.ohClosed[gk] = !state.ohClosed[gk]; render(); return; }
       if(action==="overhead-add-open"){ e.preventDefault(); openOverheadModal(null); return; }
       if(action==="overhead-edit-open"){ e.preventDefault(); openOverheadModal(id); return; }
       if(action==="overhead-expense-delete"){ e.preventDefault(); deleteOverheadExpense(id); return; }
@@ -9962,7 +10014,7 @@
     }
     if(e.target.id==="overhead-expense-form"){
       e.preventDefault(); var fdoe=new FormData(e.target);
-      var oeData = {date:fdoe.get("date"), category:fdoe.get("category"), amount:fdoe.get("amount"), currency:fdoe.get("currency"), vat:fdoe.get("vat"), tax:fdoe.get("tax"), tax_value:fdoe.get("tax_value"), tax_currency:fdoe.get("tax_currency"), note:fdoe.get("note")};
+      var oeData = {date:fdoe.get("date"), category:fdoe.get("category"), amount:fdoe.get("amount"), currency:fdoe.get("currency"), vat:fdoe.get("vat"), tax:fdoe.get("tax"), tax_value:fdoe.get("tax_value"), tax_currency:fdoe.get("tax_currency"), period:fdoe.get("period"), note:fdoe.get("note")};
       var oeEditId = e.target.getAttribute("data-edit-id");
       if(oeEditId){ if(saveOverheadEdit(oeEditId, oeData)!==false) closeModal(); return; }
       var oeFiles = Array.from((e.target.elements.files && e.target.elements.files.files) || []);
@@ -9979,6 +10031,9 @@
   });
   document.addEventListener("change", function(e){
     if(!(e.target.form && e.target.form.id==="overhead-expense-form")) return;
+    // месяц учёта: пока не менялся вручную — следует за датой
+    if(e.target.name==="date" && e.target.form.elements.period && !e.target.form.elements.period.hasAttribute("data-touched") && e.target.value) e.target.form.elements.period.value = e.target.value.slice(0,7);
+    if(e.target.name==="period") e.target.setAttribute("data-touched","1");
     overheadLiveUpdate();
     if(e.target.name==="files"){
       var fl = Array.from(e.target.files||[]); var dz = document.getElementById("oh-drop"), tx = document.getElementById("oh-drop-text");
