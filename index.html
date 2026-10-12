@@ -2497,7 +2497,7 @@
       return Promise.all([worker(),worker(),worker(),worker(),worker()]);
     }).then(function(){ return out; });
   }
-  var APP_VERSION_LABEL = "0.4.28";
+  var APP_VERSION_LABEL = "0.4.29";
   /* ============================== РЕЗЕРВНАЯ КОПИЯ ==============================
      0.4.25 (по просьбе Антона): на плане Free у Supabase нет автоматического
      восстановления на любой момент, а всё (заявки, счета, накладные, наличные)
@@ -7000,6 +7000,29 @@
     }
     return { value: base.value + t, state:"ok", original: base.original, currency: base.currency };
   }
+  // 0.4.29 (по просьбе Антона): итоговая сумма в ВАЛЮТЕ записи (BYN/RUB) —
+  // сумма вместе со своим сопутствующим налогом (ФСЗН и т.п.), а не только
+  // сумма без налога: «Своя сумма» налога в другой валюте переводится в валюту
+  // записи через ₸ (курс на 1-е число месяца). null — если считать нечего/нет курса.
+  function overheadOwnCurrencyTotal(oe, acc){
+    acc = acc || overheadAccountedKZT(oe);
+    if(!oe.currency || oe.currency==="KZT" || acc.state!=="ok" || acc.original==null) return null;
+    var ex = oe.extra || {};
+    var own = acc.original;
+    var amtMode = oe.tax_basis==="custom" && typeof ex.custom_tax_amount==="number" && isFinite(ex.custom_tax_amount) && oe.vat_included!==true && !!ex.custom_tax_currency;
+    if(amtMode){
+      var t = ex.custom_tax_amount, tc = ex.custom_tax_currency;
+      if(tc===oe.currency) own += t;
+      else {
+        var day1 = overheadRateDay(oe);
+        var rOwn = nbkRateCache[oe.currency+"|"+day1];
+        var rTax = tc==="KZT" ? { rate:1, quant:1 } : nbkRateCache[tc+"|"+day1];
+        if(!rOwn || typeof rOwn!=="object" || !rTax || typeof rTax!=="object") return null;
+        own += (t * (rTax.rate/rTax.quant)) / (rOwn.rate/rOwn.quant);
+      }
+    }
+    return own;
+  }
   // Значение select «Налог» из полей записи: custom_kind различает «Свой %» и
   // «Своя сумма ₸» (у обоих tax_basis="custom", как у счетов).
   function overheadTaxSelectValue(oe){
@@ -7021,7 +7044,7 @@
   }
   function overheadAccountedLabel(oe){
     var acc = overheadAccountedKZT(oe);
-    if(acc.state==="ok") return fmtKZT2(acc.value) + (acc.currency ? h`<div class="muted" style="font-size:10px;">${fmtKZT(acc.original)} ${acc.currency}</div>` : "");
+    if(acc.state==="ok"){ var ownT = overheadOwnCurrencyTotal(oe, acc); return fmtKZT2(acc.value) + (acc.currency ? h`<div class="muted" style="font-size:10px;">${fmtKZT(ownT!=null?ownT:acc.original)} ${acc.currency}</div>` : ""); }
     if(acc.state==="pending") return h`<span class="muted">курс…</span>`;
     if(acc.state==="error") return h`<span class="muted" title="Не удалось получить курс Нацбанка РК">${fmtKZT(acc.original)} ${acc.currency} (?)</span>`;
     return h`<span class="muted" title="Укажите валюту и «с НДС/Без», чтобы посчитать «Учтено в затратах»">—</span>`;
@@ -7655,7 +7678,7 @@
       var hay = normalizeForMatch((e.category||"")+" "+(e.note||"")+" "+(e.created_by||"")+" "+(Array.isArray(e.files)?e.files:[]).map(function(f){ return f.name||""; }).join(" "));
       if(hay.indexOf(oq)>-1) return true;
       var acc = overheadAccountedKZT(e);
-      return amountQueryMatch(state.overheadSearch, [e.amount, acc.state==="ok"?acc.value:null]);
+      return amountQueryMatch(state.overheadSearch, [e.amount, acc.state==="ok"?acc.value:null, overheadOwnCurrencyTotal(e, acc)]);
     });
     function taxOptions(sel, vatOn){
       return h`<option value="" ${sel===''?'selected':''}>—</option>${vatOn?'':h`<option value="simplified" ${sel==='simplified'?'selected':''}>Упрощ. +20%</option><option value="cash" ${sel==='cash'?'selected':''}>Нал. +30%</option><option value="custom" ${sel==='custom'?'selected':''}>Свой, %</option><option value="custom_amt" ${sel==='custom_amt'?'selected':''}>Своя сумма</option>`}`;
@@ -7685,7 +7708,11 @@
             var vatTxt = e.vat_included===true ? 'с НДС' : (e.vat_included===false ? 'без НДС' : '');
             var taxTxt = e.tax_basis ? taxBasisLabel({tax_basis:e.tax_basis, extra:e.extra}) : '';
             var subParts = [];
-            if(e.currency) subParts.push(fmtKZT(e.amount)+' '+e.currency);
+            var ownTotal = overheadOwnCurrencyTotal(e, acc);
+            if(e.currency){
+              if(ownTotal!=null) subParts.push(fmtKZT(ownTotal)+' '+e.currency+(Math.abs(ownTotal-Number(e.amount||0))>0.004 ? ' с налогом' : ''));
+              else subParts.push(fmtKZT(e.amount)+' '+e.currency);
+            }
             if(vatTxt) subParts.push(vatTxt);
             var sumHtml = acc.state==="ok" ? h`<b>${fmtKZT2(acc.value)} ₸</b>`
               : acc.state==="pending" ? h`<b class="muted">курс…</b>`
