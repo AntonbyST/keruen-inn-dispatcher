@@ -2503,7 +2503,7 @@
       return Promise.all([worker(),worker(),worker(),worker(),worker()]);
     }).then(function(){ return out; });
   }
-  var APP_VERSION_LABEL = "0.4.30";
+  var APP_VERSION_LABEL = "0.4.31";
   /* ============================== РЕЗЕРВНАЯ КОПИЯ ==============================
      0.4.25 (по просьбе Антона): на плане Free у Supabase нет автоматического
      восстановления на любой момент, а всё (заявки, счета, накладные, наличные)
@@ -7689,12 +7689,18 @@
     function fmtSum(n){ return nfmt(Number(n)||0, {minimumFractionDigits:2, maximumFractionDigits:2}); }
     var total = 0, incomplete = 0;
     var byCategory = {};
+    // 0.4.30: «Итого по статьям» — по годам (год берётся из месяца учёта записи)
+    var byYearCat = {}, yearTotals = {}, catLast = {};
     rows.forEach(function(e){
       var acc = overheadAccountedKZT(e);
-      if(acc.state==="ok" && acc.value!=null){ total += acc.value; byCategory[e.category] = (byCategory[e.category]||0) + acc.value; }
-      else { incomplete++; if(!(e.category in byCategory)) byCategory[e.category] = 0; }
+      var mk = overheadMonthKey(e), yy = mk.slice(0,4);
+      var yc = byYearCat[yy] || (byYearCat[yy] = {});
+      if(acc.state==="ok" && acc.value!=null){ total += acc.value; byCategory[e.category] = (byCategory[e.category]||0) + acc.value; yc[e.category] = (yc[e.category]||0) + acc.value; yearTotals[yy] = (yearTotals[yy]||0) + acc.value; }
+      else { incomplete++; if(!(e.category in byCategory)) byCategory[e.category] = 0; if(!(e.category in yc)) yc[e.category] = 0; }
+      var ck = yy+"|"+e.category; if(!catLast[ck] || mk>catLast[ck]) catLast[ck] = mk;
     });
     var categoryTotals = Object.keys(byCategory).sort();
+    var summaryYears = Object.keys(byYearCat).sort().reverse();
     var saving = !!state.overheadSaving;
     var oq = normalizeForMatch(state.overheadSearch||"");
     var shown = !oq ? rows : rows.filter(function(e){
@@ -7743,8 +7749,11 @@
           ${categoryTotals.length===0 ? h`<div class="muted" style="font-size:13px;">Пока нет ни одной записи.</div>` : h`
           <div class="table-wrap"><table>
             <thead><tr><th>Статья</th><th class="num">Сумма, ₸</th></tr></thead>
-            <tbody>${categoryTotals.map(function(c){
-              return h`<tr><td>${escapeHtml(c)}</td><td class="num mono">${fmtSum(byCategory[c])}</td></tr>`;
+            <tbody>${summaryYears.map(function(y){
+              var yClosedS = !!(state.ohClosed && state.ohClosed["s"+y]);
+              var cats = Object.keys(byYearCat[y]).sort(function(a,b){ var la = catLast[y+"|"+a], lb = catLast[y+"|"+b]; return lb<la ? -1 : lb>la ? 1 : a.localeCompare(b); });
+              return h`<tr class="oh-sum-year" data-oh-sum-year="${y}" data-action="oh-group-toggle" data-key="s${y}" style="cursor:pointer;background:var(--surface-2);"><td><b>${yClosedS?'▸':'▾'} ${y} год</b> <span class="muted">· ${cats.length} ${ruPlural(cats.length,["статья","статьи","статей"])}</span></td><td class="num mono"><b>${fmtSum(yearTotals[y]||0)}</b></td></tr>`
+                + (yClosedS ? '' : cats.map(function(c){ return h`<tr><td style="padding-left:26px;">${escapeHtml(c)}</td><td class="num mono">${fmtSum(byYearCat[y][c])}</td></tr>`; }).join(""));
             }).join("")}</tbody>
             <tfoot><tr><td><b>Итого</b></td><td class="num mono"><b>${fmtSum(total)}</b></td></tr></tfoot>
           </table></div>
