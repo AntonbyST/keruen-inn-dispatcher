@@ -676,6 +676,16 @@
 
   .photo-move{ display:block; margin:2px auto 0; background:none; border:0; color:var(--accent); font-size:11px; cursor:pointer; padding:1px 2px; }
   .photo-move:hover{ text-decoration:underline; }
+
+  /* 0.4.39: поля строк выдач/запросов выглядят как обычный текст, рамка — только при наведении/фокусе */
+  table input[data-cash-advance-field], table select[data-cash-advance-field]{ background:transparent !important; border:1px solid transparent !important; box-shadow:none !important; color:inherit; padding:4px 6px; }
+  table select[data-cash-advance-field]{ -webkit-appearance:none; appearance:none; }
+  table input[type="date"][data-cash-advance-field]::-webkit-calendar-picker-indicator{ opacity:0; }
+  table input[data-cash-advance-field]:hover, table select[data-cash-advance-field]:hover{ border-color:var(--line) !important; }
+  table input[data-cash-advance-field]:focus, table select[data-cash-advance-field]:focus{ border-color:var(--accent) !important; background:var(--surface-2) !important; outline:none; }
+  table input[type="date"][data-cash-advance-field]:hover::-webkit-calendar-picker-indicator, table input[type="date"][data-cash-advance-field]:focus::-webkit-calendar-picker-indicator{ opacity:.7; }
+  table select[data-cash-advance-field]:hover, table select[data-cash-advance-field]:focus{ -webkit-appearance:menulist; appearance:auto; }
+  table [data-cash-advance-field]::placeholder{ color:var(--ink-faint); opacity:.6; }
 </style>
 </head>
 <body>
@@ -2531,7 +2541,7 @@
       return Promise.all([worker(),worker(),worker(),worker(),worker()]);
     }).then(function(){ return out; });
   }
-  var APP_VERSION_LABEL = "0.4.38";
+  var APP_VERSION_LABEL = "0.4.40";
   /* ============================== РЕЗЕРВНАЯ КОПИЯ ==============================
      0.4.25 (по просьбе Антона): на плане Free у Supabase нет автоматического
      восстановления на любой момент, а всё (заявки, счета, накладные, наличные)
@@ -7482,7 +7492,7 @@
     function advMonthOpen(key, mk){ var m = state.cashAdvMonths || {}; return m.hasOwnProperty(key) ? !!m[key] : mk===curMonth; }
     var advanceGroups = groupCashByPerson(givenAdv);
     function advDateCell(a){ return editable ? h`<input type="date" data-cash-advance-field="date" data-id="${a.id}" value="${escapeHtml(a.date||'')}" style="width:132px;">` : fmtDateShort(a.date); }
-    function advPersonCell(a){ return editable ? h`<input type="text" list="cash-persons" data-cash-advance-field="person" data-id="${a.id}" value="${escapeHtml(a.person||'')}" style="min-width:120px;">` : escapeHtml(a.person); }
+    function advPersonCell(a){ return editable ? h`<input type="text" list="cash-persons" data-cash-advance-field="person" data-id="${a.id}" value="${escapeHtml(a.person||'')}" style="min-width:160px;">` : escapeHtml(a.person); }
     function advAmountCell(a){ return editable ? h`<input type="text" inputmode="decimal" class="registry-amount-input" data-cash-advance-field="amount" data-id="${a.id}" value="${escapeHtml(fmtSum(a.amount))}" style="width:104px;text-align:right;">` : fmtSum(a.amount); }
     function advHotelCell(a){ var hotel = a.hotel_id ? hotelById(a.hotel_id) : null;
       return editable ? h`<select data-cash-advance-field="hotel_id" data-id="${a.id}" title="Отель указан справочно — на затраты по объектам не влияет" style="max-width:130px;"><option value="">—</option>${state.hotels.filter(function(x){return x.in_service || x.id===a.hotel_id;}).map(function(x){ return h`<option value="${x.id}" ${x.id===a.hotel_id?'selected':''}>№${x.id} ${escapeHtml(x.name)}</option>`; }).join("")}</select>` : (hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'); }
@@ -7498,14 +7508,13 @@
           <div class="cash-req-head"><div class="cash-req-title">Запросы на наличные</div>${pendingAdv.length ? h`<span class="cash-req-count">${pendingAdv.length} ${ruPlural(pendingAdv.length,['ждёт выдачи','ждут выдачи','ждут выдачи'])}</span><span class="cash-req-sum">${fmtSum(pendingAdv.reduce(function(s,a){return s+(Number(a.amount)||0);},0))} ₸</span>` : ''}</div>
           ${pendingAdv.length===0 ? h`<div class="muted" style="font-size:13px;">Нет запросов — все наличные выданы.</div>` : h`
           <div class="table-wrap"><table>
-            <thead><tr><th>Дата</th><th>Кому</th><th class="num">Сумма</th><th>Мотель</th><th>Комментарий</th><th>Учтено в затратах</th><th style="text-align:center;">Выдано</th>${editable?'<th></th>':''}</tr></thead>
+            <thead><tr><th>Дата</th><th>Кому</th><th class="num">Сумма</th><th>Комментарий</th><th>Учтено в затратах</th><th style="text-align:center;">Выдано</th>${editable?'<th></th>':''}</tr></thead>
             <tbody>${pendingAdv.map(function(a){
               var hotel = a.hotel_id ? hotelById(a.hotel_id) : null;
               return h`<tr data-cash-request="${a.id}">
                 <td class="mono muted">${advDateCell(a)}</td>
                 <td>${advPersonCell(a)}</td>
                 <td class="num mono">${advAmountCell(a)}</td>
-                <td class="muted">${advHotelCell(a)}</td>
                 <td class="muted">${advNoteCell(a)}</td>
                 <td style="min-width:160px;">
                         <select data-cash-advance-accounted-basis data-id="${a.id}" ${editable?'':'disabled'}>
@@ -7548,14 +7557,14 @@
           <div class="card card-pad">
             <div class="section-title">Выдачи <span class="muted" style="text-transform:none;letter-spacing:0;font-weight:400;">(выданные)</span></div>
             <div class="table-wrap"><table>
-              <thead><tr><th>Дата</th><th>Кому</th><th class="num">Сумма</th><th>Мотель</th><th>Комментарий</th><th>Учтено в затратах${infoTip("Сколько из выданной суммы считать реальной затратой компании. По умолчанию — «Не учитывать» (0): выдача сама по себе ещё не затрата. Если у прораба наличный/упрощённый расчёт, выберите способ — сумма пересчитается «по-грязному» (напр. нал. 30%: 100 000 ₸ выдачи → 142 857 ₸ учтено). Та же ставка потом применяется и к его расходам при разнесении по заявкам.")}</th><th style="text-align:center;">Выдано</th><th>Чек</th>${editable?'<th></th>':''}</tr></thead>
-              <tbody>${givenAdv.length===0 ? h`<tr><td colspan="${editable?9:8}"><div class="empty-state"><b>Пока нет выданных</b>Здесь появятся запросы после отметки «Выдано».</div></td></tr>` :
+              <thead><tr><th>Дата</th><th>Кому</th><th class="num">Сумма</th><th>Комментарий</th><th>Учтено в затратах${infoTip("Сколько из выданной суммы считать реальной затратой компании. По умолчанию — «Не учитывать» (0): выдача сама по себе ещё не затрата. Если у прораба наличный/упрощённый расчёт, выберите способ — сумма пересчитается «по-грязному» (напр. нал. 30%: 100 000 ₸ выдачи → 142 857 ₸ учтено). Та же ставка потом применяется и к его расходам при разнесении по заявкам.")}</th><th style="text-align:center;">Выдано</th><th>Чек</th>${editable?'<th></th>':''}</tr></thead>
+              <tbody>${givenAdv.length===0 ? h`<tr><td colspan="${editable?8:7}"><div class="empty-state"><b>Пока нет выданных</b>Здесь появятся запросы после отметки «Выдано».</div></td></tr>` :
                 advanceGroups.map(function(g){
                   var groupKey = "adv:"+g.person;
                   var expanded = cashPersonExpanded(groupKey);
                   var sumGiven = g.rows.reduce(function(s,a){ return s+(Number(a.amount)||0); }, 0);
                   var header = h`<tr class="cash-person-divider" data-action="cash-person-toggle" data-key="${escapeHtml(groupKey)}" style="cursor:pointer;">
-                    <td colspan="${editable?9:8}"><div class="oh-grp oh-grp-y" style="margin-top:6px;"><span class="oh-caret">${expanded?'▾':'▸'}</span><b>${escapeHtml(g.person)}</b><span class="muted"> · ${g.rows.length} ${ruPlural(g.rows.length,['выдача','выдачи','выдач'])}</span><span class="oh-grp-sum">${fmtSum(sumGiven)} ₸</span></div></td>
+                    <td colspan="${editable?8:7}"><div class="oh-grp oh-grp-y" style="margin-top:6px;"><span class="oh-caret">${expanded?'▾':'▸'}</span><b>${escapeHtml(g.person)}</b><span class="muted"> · ${g.rows.length} ${ruPlural(g.rows.length,['выдача','выдачи','выдач'])}</span><span class="oh-grp-sum">${fmtSum(sumGiven)} ₸</span></div></td>
                   </tr>`;
                   function advRow(a){
                     var hotel = a.hotel_id ? hotelById(a.hotel_id) : null;
@@ -7563,7 +7572,6 @@
                       <td class="mono muted">${advDateCell(a)}</td>
                       <td>${advPersonCell(a)}</td>
                       <td class="num mono">${advAmountCell(a)}</td>
-                      <td class="muted">${advHotelCell(a)}</td>
                       <td class="muted">${advNoteCell(a)}</td>
                       <td style="min-width:160px;">
                         <select data-cash-advance-accounted-basis data-id="${a.id}" ${editable?'':'disabled'}>
@@ -7589,7 +7597,7 @@
                     var mKey = groupKey+"::"+mk, mOpen = advMonthOpen(mKey, mk);
                     var sumM = rows.reduce(function(s,a){ return s+(Number(a.amount)||0); }, 0);
                     var mh = h`<tr class="cash-expense-month-divider" data-cash-adv-month="${escapeHtml(mKey)}" data-action="cash-adv-month-toggle" data-key="${escapeHtml(mKey)}" data-open="${mOpen?'1':'0'}" style="cursor:pointer;">
-                      <td colspan="${editable?9:8}"><div class="oh-grp oh-grp-m"><span class="oh-caret">${mOpen?'▾':'▸'}</span><b>${escapeHtml(mk==='unknown'?'Дата не указана':monthLabelRu(mk))}</b><span class="muted"> · ${rows.length} ${ruPlural(rows.length,['выдача','выдачи','выдач'])}</span><span class="oh-grp-sum">${fmtSum(sumM)} ₸</span></div></td>
+                      <td colspan="${editable?8:7}"><div class="oh-grp oh-grp-m"><span class="oh-caret">${mOpen?'▾':'▸'}</span><b>${escapeHtml(mk==='unknown'?'Дата не указана':monthLabelRu(mk))}</b><span class="muted"> · ${rows.length} ${ruPlural(rows.length,['выдача','выдачи','выдач'])}</span><span class="oh-grp-sum">${fmtSum(sumM)} ₸</span></div></td>
                     </tr>`;
                     return mh + (mOpen ? rows.map(advRow).join("") : "");
                   }).join("");
@@ -7601,7 +7609,6 @@
               <div class="field"><label>Дата</label><input type="date" name="date" value="${todayIso}" required></div>
               <div class="field"><label>Кому</label><input type="text" name="person" list="cash-persons" placeholder="Имя прораба" required></div>
               <div class="field"><label>Сумма</label><input type="text" inputmode="decimal" class="registry-amount-input" name="amount" placeholder="напр. 100 000" required></div>
-              <div class="field"><label>Мотель</label><select name="hotel_id"><option value="">—</option>${hotelOptions}</select></div>
               <div class="field" style="grid-column:1/-1;"><label>Комментарий (необязательно)</label><input type="text" name="note" placeholder="повод выдачи"></div>
               <button class="btn btn-primary" type="submit">Выдать</button>
             </form>` : ''}
