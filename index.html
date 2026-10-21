@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Диспетчерская Keruen Inn</title>
+<title>Tickit — диспетчерская сервиса</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 120 120%27%3E%3Crect width=%27120%27 height=%27120%27 rx=%2728%27 fill=%27%230E7C90%27/%3E%3Cpath d=%27M30 62L50 82L92 38%27 fill=%27none%27 stroke=%27white%27 stroke-width=%2712%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27/%3E%3Ccircle cx=%2730%27 cy=%2762%27 r=%2711%27 fill=%27white%27/%3E%3C/svg%3E">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
@@ -694,6 +694,13 @@
   .brand-logo .lg-sq{ fill:var(--accent); }
   .brand-logo .lg-tick{ fill:none; stroke:var(--accent-ink); stroke-width:12; stroke-linecap:round; stroke-linejoin:round; }
   .brand-logo .lg-dot{ fill:var(--accent-ink); }
+  /* 0.4.44: шапка «Tickit» (вариант B) */
+  .brand{ gap:9px; padding-left:16px; padding-right:12px; }
+  .brand .brand-logo{ width:28px; height:28px; }
+  .brand .brand-name{ font-size:19px; letter-spacing:-.02em; line-height:1.1; }
+  .brand .brand-sub{ text-transform:none; letter-spacing:0; font-size:12px; color:var(--ink-soft); margin-top:1px; white-space:nowrap; }
+  .auth-logo{ display:flex; align-items:center; gap:10px; font-size:22px; letter-spacing:-.02em; }
+  .auth-logo .brand-logo{ width:32px; height:32px; }
 </style>
 </head>
 <body>
@@ -2550,7 +2557,7 @@
       return Promise.all([worker(),worker(),worker(),worker(),worker()]);
     }).then(function(){ return out; });
   }
-  var APP_VERSION_LABEL = "0.4.43";
+  var APP_VERSION_LABEL = "0.4.44";
   /* ============================== РЕЗЕРВНАЯ КОПИЯ ==============================
      0.4.25 (по просьбе Антона): на плане Free у Supabase нет автоматического
      восстановления на любой момент, а всё (заявки, счета, накладные, наличные)
@@ -4719,7 +4726,7 @@
     var app = document.getElementById("app");
     if(state.authView==="sent"){
       morphInto(app, h`<div class="auth-wrap"><div class="card auth-card">
-        <div class="auth-logo">Диспетчерская Keruen Inn</div>
+        <div class="auth-logo"><svg class="brand-logo" viewBox="0 0 120 120" aria-hidden="true"><rect class="lg-sq" width="120" height="120" rx="28"/><path class="lg-tick" d="M30 62 L50 82 L92 38"/><circle class="lg-dot" cx="30" cy="62" r="11"/></svg>Tickit</div>
         <div class="auth-sub">Служба сервиса</div>
         <div class="auth-ok"><b>Проверьте почту</b><br>Мы отправили ссылку для входа на ${escapeHtml(state.authEmail)}. Откройте её на этом устройстве.</div>
         <button class="btn btn-block" style="margin-top:14px;" id="auth-resend">Отправить ещё раз</button>
@@ -4733,7 +4740,7 @@
       return;
     }
     morphInto(app, h`<div class="auth-wrap"><div class="card auth-card">
-      <div class="auth-logo">Диспетчерская Keruen Inn</div>
+      <div class="auth-logo"><svg class="brand-logo" viewBox="0 0 120 120" aria-hidden="true"><rect class="lg-sq" width="120" height="120" rx="28"/><path class="lg-tick" d="M30 62 L50 82 L92 38"/><circle class="lg-dot" cx="30" cy="62" r="11"/></svg>Tickit</div>
       <div class="auth-sub">Вход по рабочей почте — без пароля</div>
       ${state.authError ? h`<div class="auth-err">${escapeHtml(state.authError)}</div>` : ""}
       <form id="auth-form">
@@ -9383,7 +9390,7 @@
     // в базе) — ему это ограничение применяться не должно (см. navAllowed()).
     if(!isOwner() && state.me.role==="pending"){
       morphInto(document.getElementById("app"), h`<div class="auth-wrap"><div class="card auth-card">
-        <div class="auth-logo">Диспетчерская Keruen Inn</div>
+        <div class="auth-logo"><svg class="brand-logo" viewBox="0 0 120 120" aria-hidden="true"><rect class="lg-sq" width="120" height="120" rx="28"/><path class="lg-tick" d="M30 62 L50 82 L92 38"/><circle class="lg-dot" cx="30" cy="62" r="11"/></svg>Tickit</div>
         <div class="auth-sub">Служба сервиса</div>
         <div class="auth-maintenance"><b>Ожидает назначения роли</b><br>Администратор ещё не открыл вам доступ — обратитесь к нему, либо загляните чуть позже.</div>
         <button class="btn btn-block" style="margin-top:14px;" data-action="sign-out">Выйти</button>
@@ -9396,7 +9403,7 @@
     // только Администратор поставит галочку "Активен" в «Команде».
     if(state.me.role==="customer" && state.me.active===false){
       morphInto(document.getElementById("app"), h`<div class="auth-wrap"><div class="card auth-card">
-        <div class="auth-logo">Диспетчерская Keruen Inn</div>
+        <div class="auth-logo"><svg class="brand-logo" viewBox="0 0 120 120" aria-hidden="true"><rect class="lg-sq" width="120" height="120" rx="28"/><path class="lg-tick" d="M30 62 L50 82 L92 38"/><circle class="lg-dot" cx="30" cy="62" r="11"/></svg>Tickit</div>
         <div class="auth-sub">Служба сервиса</div>
         <div class="auth-maintenance"><b>Ведутся работы на сайте</b><br>Доступ временно закрыт — загляните чуть позже.</div>
         <button class="btn btn-block" style="margin-top:14px;" data-action="sign-out">Выйти</button>
@@ -9463,7 +9470,7 @@
     morphInto(app, h`
       <div class="sidebar-scrim ${state.mobileNavOpen?"open":""}" data-action="close-sidebar"></div>
       <div class="sidebar ${state.mobileNavOpen?"open":""}">
-        <div class="brand"><svg class="brand-logo" viewBox="0 0 120 120" aria-hidden="true"><rect class="lg-sq" width="120" height="120" rx="28"/><path class="lg-tick" d="M30 62 L50 82 L92 38"/><circle class="lg-dot" cx="30" cy="62" r="11"/></svg><div><div class="brand-name">Диспетчерская</div><div class="brand-sub">Keruen Inn · Служба сервиса</div></div></div>
+        <div class="brand"><svg class="brand-logo" viewBox="0 0 120 120" aria-hidden="true"><rect class="lg-sq" width="120" height="120" rx="28"/><path class="lg-tick" d="M30 62 L50 82 L92 38"/><circle class="lg-dot" cx="30" cy="62" r="11"/></svg><div><div class="brand-name">Tickit</div><div class="brand-sub">Диспетчерская сервиса</div></div></div>
         <nav class="nav">${navItems.map(function(x){ return navItem(x[0], x[1], x[2]); }).join("")}</nav>
         <div class="nav-footer">
           <p>Заявки поступают через c-lector.ru — здесь только внутренняя диспетчеризация и наряд-задания. Срок реагирования по зонам — в разделе «Отели».</p>
