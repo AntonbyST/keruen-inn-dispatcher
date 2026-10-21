@@ -664,6 +664,15 @@
   /* 0.4.34: заголовки групп в «Наличных расходах» — как в «Накладных» (.oh-grp) */
   .cash-person-divider td, .cash-expense-month-divider td{ background:transparent; padding:0; border:0; }
   .cash-expense-month-divider .oh-grp-m{ margin:8px 0 2px 6px; }
+
+  /* 0.4.35: «Запросы на наличные» — заметное окно, пока есть невыданные */
+  .cash-requests.has-pending{ border:2px solid var(--accent); background:var(--accent-soft); box-shadow:0 0 0 4px var(--accent-soft), var(--shadow); }
+  .cash-req-head{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:10px; }
+  .cash-req-title{ font-size:17px; font-weight:700; color:var(--ink); }
+  .cash-req-count{ background:var(--accent); color:var(--accent-ink); border-radius:20px; padding:3px 11px; font-size:12.5px; font-weight:700; }
+  .cash-req-sum{ margin-left:auto; font-size:18px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .cash-requests.has-pending tbody tr td{ border-top-color:var(--accent-line); }
+  .cash-requests.has-pending td b{ font-size:14.5px; }
 </style>
 </head>
 <body>
@@ -2519,7 +2528,7 @@
       return Promise.all([worker(),worker(),worker(),worker(),worker()]);
     }).then(function(){ return out; });
   }
-  var APP_VERSION_LABEL = "0.4.34";
+  var APP_VERSION_LABEL = "0.4.35";
   /* ============================== РЕЗЕРВНАЯ КОПИЯ ==============================
      0.4.25 (по просьбе Антона): на плане Free у Supabase нет автоматического
      восстановления на любой момент, а всё (заявки, счета, накладные, наличные)
@@ -7437,11 +7446,11 @@
       <datalist id="cash-persons">${persons.map(function(p){ return `<option value="${escapeHtml(p)}">`; }).join("")}</datalist>
       <datalist id="cash-expense-tickets">${state.tickets.filter(function(t){return t.external_ref;}).map(function(t){ return `<option value="${escapeHtml(t.external_ref)}">`; }).join("")}</datalist>
       <div class="row-gap">
-        <div class="card card-pad cash-requests" data-cash-requests>
-          <div class="section-title">Запросы на наличные${pendingAdv.length ? h` <span class="pill pill-accent">${pendingAdv.length}</span>` : ''}</div>
+        <div class="card card-pad cash-requests${pendingAdv.length?' has-pending':''}" data-cash-requests>
+          <div class="cash-req-head"><div class="cash-req-title">Запросы на наличные</div>${pendingAdv.length ? h`<span class="cash-req-count">${pendingAdv.length} ${ruPlural(pendingAdv.length,['ждёт выдачи','ждут выдачи','ждут выдачи'])}</span><span class="cash-req-sum">${fmtSum(pendingAdv.reduce(function(s,a){return s+(Number(a.amount)||0);},0))} ₸</span>` : ''}</div>
           ${pendingAdv.length===0 ? h`<div class="muted" style="font-size:13px;">Нет запросов — все наличные выданы.</div>` : h`
           <div class="table-wrap"><table>
-            <thead><tr><th>Дата</th><th>Кому</th><th class="num">Сумма</th><th>Мотель</th><th>Комментарий</th><th style="text-align:center;">Выдано</th>${editable?'<th></th>':''}</tr></thead>
+            <thead><tr><th>Дата</th><th>Кому</th><th class="num">Сумма</th><th>Мотель</th><th>Комментарий</th><th>Учтено в затратах</th><th style="text-align:center;">Выдано</th>${editable?'<th></th>':''}</tr></thead>
             <tbody>${pendingAdv.map(function(a){
               var hotel = a.hotel_id ? hotelById(a.hotel_id) : null;
               return h`<tr data-cash-request="${a.id}">
@@ -7450,6 +7459,17 @@
                 <td class="num mono">${fmtSum(a.amount)}</td>
                 <td class="muted">${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
                 <td class="muted">${escapeHtml(a.note||'')}</td>
+                <td style="min-width:160px;">
+                        <select data-cash-advance-accounted-basis data-id="${a.id}" ${editable?'':'disabled'}>
+                          <option value="">Не учитывать</option>
+                          <option value="regular" ${a.accounted_basis==='regular'?'selected':''}>Полная сумма</option>
+                          <option value="simplified" ${a.accounted_basis==='simplified'?'selected':''}>Упрощёнка +20%</option>
+                          <option value="cash" ${a.accounted_basis==='cash'?'selected':''}>Нал. +30%</option>
+                          <option value="custom" ${a.accounted_basis==='custom'?'selected':''}>Свой %</option>
+                        </select>
+                        ${a.accounted_basis==='custom' ? h`<input type="number" data-cash-advance-accounted-custom-pct data-id="${a.id}" value="${a.accounted_custom_pct!=null?a.accounted_custom_pct:''}" placeholder="%" min="0" max="99" step="0.1" style="width:60px;margin-top:4px;" ${editable?'':'disabled'}>` : ''}
+                        ${a.accounted_basis ? h`<div class="mono muted" style="font-size:11.5px;margin-top:2px;">${fmtSum(cashAdvanceAccounted(a))} ₸</div>` : ''}
+                      </td>
                 <td style="text-align:center;"><input type="checkbox" data-action="cash-advance-confirm-toggle" data-id="${a.id}" data-val="1" ${canConfirmCashAdvance()?'':'disabled'} title="${canConfirmCashAdvance()?'Отметить, что деньги выданы — запрос перейдёт в «Выдачи» к этому человеку, в текущий месяц':'Отмечать может только тот, кому выдано право «Наличные расходы»'}"></td>
                 ${editable?h`<td><a href="#" data-action="cash-advance-delete" data-id="${a.id}" style="color:var(--crit);">✕</a></td>`:''}
               </tr>`;
