@@ -648,6 +648,18 @@
      предупреждающего цвета, а не зелёного "успеха" (auth-ok выше). */
   .auth-maintenance{ background:var(--warn-soft); color:var(--warn); border-radius:8px; padding:12px 14px; font-size:13px; }
   .configwarn{ max-width:560px; margin:60px auto; padding:24px 26px; }
+
+  /* 0.4.33: «Исполнители» — три колонки, строка ~30px */
+  .crew-grid{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:0 22px; }
+  .crew-item{ display:flex; align-items:center; gap:8px; height:34px; border-bottom:1px solid var(--line); }
+  .crew-item input{ flex:1; min-width:0; background:transparent; border:1px solid transparent; font-weight:600; padding:3px 6px; height:26px; text-overflow:ellipsis; }
+  .crew-item input:hover{ border-color:var(--line); } .crew-item input:focus{ border-color:var(--accent); background:var(--surface-2); }
+  .crew-item .pill{ padding:1px 8px; }
+  .crew-x{ background:none; border:0; color:var(--crit); cursor:pointer; opacity:0; font-size:12px; padding:2px 4px; }
+  .crew-item:hover .crew-x, .crew-x:focus{ opacity:1; }
+  @media (hover:none){ .crew-x{ opacity:.6; } }
+  @media (max-width:980px){ .crew-grid{ grid-template-columns:repeat(2,minmax(0,1fr)); } }
+  @media (max-width:600px){ .crew-grid{ grid-template-columns:1fr; } }
 </style>
 </head>
 <body>
@@ -799,7 +811,7 @@
     // прикреплённые ими счета, но только для просмотра: сама галочка "Оплачено"
     // рисуется disabled для всех ролей, кроме тех, у кого стоит
     // can_edit_registry (см. canEditRegistry() ниже).
-    specialist: ["dashboard","tickets","team","systemdefects"],
+    specialist: ["dashboard","tickets","team","systemdefects","crews"],
     // "cashexpenses" (0.2.4) добавлен везде, где уже был "registry" — оба живут
     // под одним пунктом меню «Финансы» (см. navItems/navItem ниже), так что
     // право видеть один подраздел даёт право видеть и второй.
@@ -2503,7 +2515,7 @@
       return Promise.all([worker(),worker(),worker(),worker(),worker()]);
     }).then(function(){ return out; });
   }
-  var APP_VERSION_LABEL = "0.4.31";
+  var APP_VERSION_LABEL = "0.4.33";
   /* ============================== РЕЗЕРВНАЯ КОПИЯ ==============================
      0.4.25 (по просьбе Антона): на плане Free у Supabase нет автоматического
      восстановления на любой момент, а всё (заявки, счета, накладные, наличные)
@@ -7690,13 +7702,14 @@
     var total = 0, incomplete = 0;
     var byCategory = {};
     // 0.4.30: «Итого по статьям» — по годам (год берётся из месяца учёта записи)
-    var byYearCat = {}, yearTotals = {}, catLast = {};
+    var byYearCat = {}, yearTotals = {}, catLast = {}, byYM = {}, monthTotals = {};
     rows.forEach(function(e){
       var acc = overheadAccountedKZT(e);
       var mk = overheadMonthKey(e), yy = mk.slice(0,4);
       var yc = byYearCat[yy] || (byYearCat[yy] = {});
-      if(acc.state==="ok" && acc.value!=null){ total += acc.value; byCategory[e.category] = (byCategory[e.category]||0) + acc.value; yc[e.category] = (yc[e.category]||0) + acc.value; yearTotals[yy] = (yearTotals[yy]||0) + acc.value; }
-      else { incomplete++; if(!(e.category in byCategory)) byCategory[e.category] = 0; if(!(e.category in yc)) yc[e.category] = 0; }
+      var ym = byYM[yy] || (byYM[yy] = {}), mc = ym[mk] || (ym[mk] = {});
+      if(acc.state==="ok" && acc.value!=null){ total += acc.value; byCategory[e.category] = (byCategory[e.category]||0) + acc.value; yc[e.category] = (yc[e.category]||0) + acc.value; yearTotals[yy] = (yearTotals[yy]||0) + acc.value; mc[e.category] = (mc[e.category]||0) + acc.value; monthTotals[mk] = (monthTotals[mk]||0) + acc.value; }
+      else { if(!(e.category in mc)) mc[e.category] = 0; incomplete++; if(!(e.category in byCategory)) byCategory[e.category] = 0; if(!(e.category in yc)) yc[e.category] = 0; }
       var ck = yy+"|"+e.category; if(!catLast[ck] || mk>catLast[ck]) catLast[ck] = mk;
     });
     var categoryTotals = Object.keys(byCategory).sort();
@@ -7731,7 +7744,7 @@
       return yKeys.map(function(y){
         var Y = years[y], yClosed = !!closed["y"+y];
         var mHtml = yClosed ? "" : Y.mOrder.sort().reverse().map(function(mk){
-          var M = Y.months[mk], mClosed = !!closed["m"+mk];
+          var M = Y.months[mk], mClosed = oq ? false : closed["m"+mk]!==false;
           M.items.sort(function(a,b){ return String(b.date||"").localeCompare(String(a.date||"")); });
           return '<div class="oh-month" data-oh-month="'+mk+'"><div class="oh-grp oh-grp-m" data-action="oh-group-toggle" data-key="m'+mk+'"><span class="oh-caret">'+(mClosed?'▸':'▾')+'</span><b>'+escapeHtml(monthLabelRu(mk))+'</b><span class="muted"> · '+M.items.length+' '+ruPlural(M.items.length,["запись","записи","записей"])+'</span><span class="oh-grp-sum">'+escapeHtml(fmtSum(M.total))+' ₸</span></div>'
             + (mClosed ? '' : M.items.map(cardFn).join("")) + '</div>';
@@ -7751,9 +7764,14 @@
             <thead><tr><th>Статья</th><th class="num">Сумма, ₸</th></tr></thead>
             <tbody>${summaryYears.map(function(y){
               var yClosedS = !!(state.ohClosed && state.ohClosed["s"+y]);
-              var cats = Object.keys(byYearCat[y]).sort(function(a,b){ var la = catLast[y+"|"+a], lb = catLast[y+"|"+b]; return lb<la ? -1 : lb>la ? 1 : a.localeCompare(b); });
-              return h`<tr class="oh-sum-year" data-oh-sum-year="${y}" data-action="oh-group-toggle" data-key="s${y}" style="cursor:pointer;background:var(--surface-2);"><td><b>${yClosedS?'▸':'▾'} ${y} год</b> <span class="muted">· ${cats.length} ${ruPlural(cats.length,["статья","статьи","статей"])}</span></td><td class="num mono"><b>${fmtSum(yearTotals[y]||0)}</b></td></tr>`
-                + (yClosedS ? '' : cats.map(function(c){ return h`<tr><td style="padding-left:26px;">${escapeHtml(c)}</td><td class="num mono">${fmtSum(byYearCat[y][c])}</td></tr>`; }).join(""));
+              var mKeys = Object.keys(byYM[y]).sort().reverse();
+              return h`<tr class="oh-sum-year" data-oh-sum-year="${y}" data-action="oh-group-toggle" data-key="s${y}" style="cursor:pointer;background:var(--surface-2);"><td><b>${yClosedS?'▸':'▾'} ${y} год</b> <span class="muted">· ${mKeys.length} ${ruPlural(mKeys.length,["месяц","месяца","месяцев"])}</span></td><td class="num mono"><b>${fmtSum(yearTotals[y]||0)}</b></td></tr>`
+                + (yClosedS ? '' : mKeys.map(function(mk){
+                  var mClosedS = !(state.ohClosed && state.ohClosed["sm"+mk]===false);
+                  var cats = Object.keys(byYM[y][mk]).sort(function(a,b){ return (byYM[y][mk][b]-byYM[y][mk][a]) || a.localeCompare(b); });
+                  return h`<tr class="oh-sum-month" data-oh-sum-month="${mk}" data-action="oh-group-toggle" data-key="sm${mk}" style="cursor:pointer;"><td style="padding-left:20px;"><b>${mClosedS?'▸':'▾'} ${escapeHtml(monthLabelRu(mk))}</b> <span class="muted">· ${cats.length} ${ruPlural(cats.length,["статья","статьи","статей"])}</span></td><td class="num mono"><b>${fmtSum(monthTotals[mk]||0)}</b></td></tr>`
+                    + (mClosedS ? '' : cats.map(function(c){ return h`<tr><td style="padding-left:44px;">${escapeHtml(c)}</td><td class="num mono">${fmtSum(byYM[y][mk][c])}</td></tr>`; }).join(""));
+                }).join(""));
             }).join("")}</tbody>
             <tfoot><tr><td><b>Итого</b></td><td class="num mono"><b>${fmtSum(total)}</b></td></tr></tfoot>
           </table></div>
@@ -8012,37 +8030,23 @@
     // просто последняя строка той же таблицы.
     return h`
       <div class="card card-pad">
-        <div class="section-title">Исполнители</div>
+        <div class="section-title">Исполнители · ${state.crews.length}</div>
         <div class="helptext" style="margin-bottom:10px;">Справочник фамилий тех, кого назначают исполнителем в пункте «Бригада» карточки заявки — один человек, а не бригада с постоянным составом (он может переходить от заявки к заявке). Пополняется и отсюда, и автоматически — если в карточке заявки вписать новое имя вручную.</div>
-        <div class="table-wrap"><table>
-          <thead><tr><th>Фамилия И.О.</th><th style="width:120px;">В работе</th><th style="width:1%;"></th></tr></thead>
-          <tbody>
-            ${state.crews.length===0 ? h`<tr><td colspan="3"><div class="empty-state"><b>Исполнителей пока нет</b>Добавьте первого ниже.</div></td></tr>` :
-              state.crews.slice().sort(function(a,b){ return (a.name||"").localeCompare(b.name||"", "ru"); }).map(function(c){
-                var activeCount = crewActiveCount(c.name);
-                return h`<tr>
-                  <td><input type="text" data-crew-rename="${c.id}" value="${escapeHtml(c.name)}" style="width:100%;font-weight:600;"></td>
-                  <td><span class="pill ${activeCount>0?'pill-accent':'pill-neutral'}" title="Активных заявок на этом исполнителе сейчас">${activeCount} в работе</span></td>
-                  <td><button class="btn btn-sm btn-ghost btn-danger" data-action="crew-delete" data-id="${c.id}">Удалить</button></td>
-                </tr>`;
-              }).join("")}
-            <tr class="crew-add-row">
-              <td colspan="3">
-                <form id="crew-form" style="display:flex;gap:8px;align-items:center;margin:0;">
-                  <input type="text" name="name" required placeholder="напр. Веренков А.С." style="flex:1;min-width:160px;">
-                  <button class="btn btn-primary btn-sm" type="submit">Добавить</button>
-                </form>
-              </td>
-            </tr>
-          </tbody>
-        </table></div>
+        ${state.crews.length===0 ? h`<div class="empty-state"><b>Исполнителей пока нет</b>Добавьте первого ниже.</div>` : h`<div class="crew-grid">${state.crews.slice().sort(function(a,b){ return (a.name||"").localeCompare(b.name||"", "ru"); }).map(function(c){
+          var activeCount = crewActiveCount(c.name);
+          return h`<div class="crew-item"><input type="text" data-crew-rename="${c.id}" value="${escapeHtml(c.name)}" title="Нажмите, чтобы переименовать"><span class="pill ${activeCount>0?'pill-accent':'pill-neutral'}" title="Активных заявок на этом исполнителе сейчас">${activeCount}</span><button type="button" class="crew-x" data-action="crew-delete" data-id="${c.id}" title="Удалить исполнителя">✕</button></div>`;
+        }).join("")}</div>`}
+        <form id="crew-form" class="crew-add" style="display:flex;gap:8px;align-items:center;margin:12px 0 0;">
+          <input type="text" name="name" required placeholder="напр. Веренков А.С." style="flex:1;min-width:160px;">
+          <button class="btn btn-primary btn-sm" type="submit">Добавить</button>
+        </form>
       </div>
       <div class="card card-pad" style="margin-top:18px;">
         <div class="section-title">Ответственный техник по объектам</div>
         <div class="helptext" style="margin-bottom:10px;">Тот, кто от VDS выезжает на объект на осмотр, если там что-то произошло — не путать с «Лицом от Заказчика» (контакт со стороны отеля, редактируется в разделе «Отели»).</div>
         <div class="table-wrap"><table>
-          <thead><tr><th>Отель</th><th>Ответственный техник</th><th>Телефон</th></tr></thead>
-          <tbody>${state.hotels.length===0 ? h`<tr><td colspan="3"><div class="empty-state"><b>Отелей пока нет</b>Добавьте их в разделе «Отели».</div></td></tr>` :
+          <thead><tr><th>Отель</th><th>Ответственный техник</th><th>Телефон</th><th style="width:150px;">Оформлен в штат</th></tr></thead>
+          <tbody>${state.hotels.length===0 ? h`<tr><td colspan="4"><div class="empty-state"><b>Отелей пока нет</b>Добавьте их в разделе «Отели».</div></td></tr>` :
             state.hotels.slice().sort(function(a,b){ return a.id-b.id; }).map(function(x){
               return h`<tr>
                 <td><span class="ttl">№${x.id} ${escapeHtml(x.name)}</span></td>
@@ -8051,6 +8055,9 @@
                   <input type="text" data-hotel-field="vds_tech_phone" data-id="${x.id}" value="${escapeHtml(x.vds_tech_phone||'')}" placeholder="+7…" style="min-width:140px;">
                   ${x.vds_tech_phone ? h`<div><a href="tel:${escapeHtml(x.vds_tech_phone.replace(/[^\d+]/g,''))}" style="font-size:11px;">Позвонить</a></div>` : ""}
                 </td>
+                <td>${canSetTechStaff()
+                  ? h`<select data-hotel-field="vds_tech_employed" data-id="${x.id}"><option value="" ${x.vds_tech_employed==null?'selected':''}>—</option><option value="1" ${x.vds_tech_employed===true?'selected':''}>Оформлен</option><option value="0" ${x.vds_tech_employed===false?'selected':''}>Не оформлен</option></select>`
+                  : (x.vds_tech_employed==null ? '<span class="muted">—</span>' : h`<span class="pill ${x.vds_tech_employed?'pill-accent':'pill-neutral'}">${x.vds_tech_employed?'Оформлен':'Не оформлен'}</span>`)}</td>
               </tr>`;
             }).join("")}
           </tbody></table></div>
@@ -8065,9 +8072,15 @@
       lat: (lat!==""&&lat!=null)? Number(lat): null, lng: (lng!==""&&lng!=null)? Number(lng): null
     }).then(function(res){ if(res && res.error) alert("Не удалось добавить отель: "+res.error.message); });
   }
+  // 0.4.32: «Оформлен в штат» у ответственного техника ставят Гл. инженер,
+  // Руководитель, Администратор (и владелец); остальным — только просмотр.
+  function canSetTechStaff(){
+    return !!(isOwner() || (state.me && (state.me.role==="specialist" || state.me.role==="head" || state.me.role==="dispatcher")));
+  }
   function updateHotelField(id, field, val){
     var patch = {};
-    if(field==="zone") patch.zone = val===""? null : Number(val);
+    if(field==="vds_tech_employed"){ if(!canSetTechStaff()) return; patch.vds_tech_employed = val==="" ? null : val==="1"; }
+    else if(field==="zone") patch.zone = val===""? null : Number(val);
     else if(field==="lat" || field==="lng" || field==="rooms" || field==="area_m2") patch[field] = val===""? null : Number(val);
     else patch[field] = val;
     sb.from("hotels").update(patch).eq("id", id).then(function(){});
@@ -9729,7 +9742,7 @@
       if(action==="overhead-file-open"){ e.preventDefault(); openOverheadFile(actionEl.getAttribute("data-path")); return; }
       if(action==="overhead-file-delete"){ e.preventDefault(); deleteOverheadFile(id, actionEl.getAttribute("data-path")); return; }
       if(action==="oh-period-auto"){ var pf = actionEl.closest("form"); if(pf){ pf.elements.period.removeAttribute("data-touched"); if(pf.elements.date.value) pf.elements.period.value = pf.elements.date.value.slice(0,7); overheadLiveUpdate(); } return; }
-      if(action==="oh-group-toggle"){ var gk = actionEl.getAttribute("data-key"); state.ohClosed = state.ohClosed || {}; state.ohClosed[gk] = !state.ohClosed[gk]; render(); return; }
+      if(action==="oh-group-toggle"){ var gk = actionEl.getAttribute("data-key"); state.ohClosed = state.ohClosed || {}; if(/^s?m/.test(gk)){ state.ohClosed[gk] = (state.ohClosed[gk]===false); } else { state.ohClosed[gk] = !state.ohClosed[gk]; } render(); return; }
       if(action==="overhead-add-open"){ e.preventDefault(); openOverheadModal(null); return; }
       if(action==="overhead-edit-open"){ e.preventDefault(); openOverheadModal(id); return; }
       if(action==="overhead-expense-delete"){ e.preventDefault(); deleteOverheadExpense(id); return; }
