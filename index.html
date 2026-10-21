@@ -673,6 +673,9 @@
   .cash-req-sum{ margin-left:auto; font-size:18px; font-weight:700; font-variant-numeric:tabular-nums; }
   .cash-requests.has-pending tbody tr td{ border-top-color:var(--accent-line); }
   .cash-requests.has-pending td b{ font-size:14.5px; }
+
+  .photo-move{ display:block; margin:2px auto 0; background:none; border:0; color:var(--accent); font-size:11px; cursor:pointer; padding:1px 2px; }
+  .photo-move:hover{ text-decoration:underline; }
 </style>
 </head>
 <body>
@@ -2528,7 +2531,7 @@
       return Promise.all([worker(),worker(),worker(),worker(),worker()]);
     }).then(function(){ return out; });
   }
-  var APP_VERSION_LABEL = "0.4.36";
+  var APP_VERSION_LABEL = "0.4.37";
   /* ============================== РЕЗЕРВНАЯ КОПИЯ ==============================
      0.4.25 (по просьбе Антона): на плане Free у Supabase нет автоматического
      восстановления на любой момент, а всё (заявки, счета, накладные, наличные)
@@ -4599,7 +4602,7 @@
   // Фотографии по заявке — раздел "Фото" (замечания, см. category=null у
   // uploadPhoto выше) и отдельная галерея фото-доказательств к Акту
   // (actPhotoGrid ниже) используют одну и ту же вёрстку сетки/миниатюр.
-  function renderPhotoGrid(photos, emptyText){
+  function renderPhotoGrid(photos, emptyText, moveTo){
     if(!photos.length) return h`<div class="muted" style="font-size:12.5px;">${emptyText}</div>`;
     return h`<div class="photo-grid">${photos.map(function(p){
       ensurePhotoUrl(p.file_path);
@@ -4611,22 +4614,44 @@
           <button type="button" class="photo-del" data-action="photo-delete" data-id="${p.id}" data-path="${escapeHtml(p.file_path)}" title="Удалить фото">✕</button>
         </div>
         <div class="photo-date">${escapeHtml(fmtDateShort(p.uploaded_at))}</div>
+        ${moveTo ? h`<button type="button" class="photo-move" data-action="photo-move" data-id="${p.id}" data-cat="${moveTo==='act'?'act':''}" title="${moveTo==='act'?'Перенести это фото в блок «Акт»':'Вернуть это фото в раздел «Фото»'}">${moveTo==='act'?'→ в Акт':'← в Фото'}</button>` : ''}
       </div>`;
     }).join("")}</div>`;
   }
   // Раздел "Фото" — замечания (проблема "до"), category=null. Не влияет на
   // автопереход "Работа выполнена" (см. STATUS_ICON_DEFS/maybeAutoComplete
   // выше) — только информационная галерея.
+  // 0.4.37: фото, имя которого совпадает с файлом акта (t.act_file_name), — это сам акт:
+  // показываем его в блоке «Акт», а не в «Фото» (так он попадал туда, когда файл
+  // акта приходил из c-lector или прикладывался и туда).
+  function isActDupPhoto(t, p){ return p.category==null && !!t.act_file_name && p.file_name===t.act_file_name; }
   function milestonePhotoGrid(t){
-    var photos = (state.photos||[]).filter(function(p){return p.ticket_id===t.id && p.category==null;});
-    return renderPhotoGrid(photos, "Фото пока нет.");
+    var photos = (state.photos||[]).filter(function(p){return p.ticket_id===t.id && p.category==null && !isActDupPhoto(t,p);});
+    return renderPhotoGrid(photos, "Фото пока нет.", "act");
   }
   // Фото-доказательства выполненной работы, прикреплённые к пункту "Акт"
-  // (category="act") — отдельно от замечаний в "Фото" и отдельно от самого
-  // файла акта (t.act_file_path/act_file_name, см. uploadActFile выше).
+  // (category="act" + фото, совпадающее с файлом акта) — отдельно от замечаний в "Фото".
   function actPhotoGrid(t){
-    var photos = (state.photos||[]).filter(function(p){return p.ticket_id===t.id && p.category==="act";});
-    return renderPhotoGrid(photos, "Фото к акту пока нет.");
+    var photos = (state.photos||[]).filter(function(p){return p.ticket_id===t.id && (p.category==="act" || isActDupPhoto(t,p));});
+    return renderPhotoGrid(photos, "Фото к акту пока нет.", "photo");
+  }
+  // Превью самого файла акта, если это картинка (хранится в бакете invoices).
+  var actFileUrlCache = {};
+  function ensureActFileUrl(path){
+    if(actFileUrlCache.hasOwnProperty(path)) return;
+    actFileUrlCache[path] = "pending";
+    sb.storage.from("invoices").createSignedUrl(path, 3600).then(function(res){
+      actFileUrlCache[path] = (res.data && res.data.signedUrl) || null;
+      renderTicketPanel();
+    });
+  }
+  function actFilePreview(t){
+    if(!t.act_file_path || !/\.(jpe?g|png|gif|webp|bmp|avif)$/i.test(t.act_file_name||t.act_file_path)) return "";
+    if((state.photos||[]).some(function(p){ return p.ticket_id===t.id && isActDupPhoto(t,p); })) return ""; // уже показан фото-сеткой ниже
+    ensureActFileUrl(t.act_file_path);
+    var url = actFileUrlCache[t.act_file_path];
+    var inner = (url && url!=="pending") ? h`<img src="${url}" alt="${escapeHtml(t.act_file_name||'акт')}">` : h`<span class="muted" style="font-size:10.5px;">…</span>`;
+    return h`<div class="photo-grid" style="margin-bottom:8px;"><div class="photo-item"><div class="photo-thumb" data-action="act-open" data-path="${escapeHtml(t.act_file_path)}" style="cursor:pointer;" title="Открыть акт">${inner}</div><div class="photo-date">акт</div></div></div>`;
   }
   // Ручная пометка "особое внимание" — например, заявкой заинтересовался
   // руководитель или заказчик. В отличие от 4 иконок хода работ выше, эта
@@ -8721,7 +8746,7 @@
                 else materialsInvoiceIncomplete = true;
               });
               var materialsGrandTotal = materialsInvoiceSum + materialsCashTotal;
-              var actPhotoCount = (state.photos||[]).filter(function(p){return p.ticket_id===t.id && p.category==="act";}).length;
+              var actPhotoCount = (state.photos||[]).filter(function(p){return p.ticket_id===t.id && (p.category==="act" || isActDupPhoto(t,p));}).length;
               // "Бригада"/"Материал" (версия 0.2.2) больше не переключаются кликом
               // по значку — у них теперь свои явные элементы управления в теле
               // пункта ("Назначить"/"Сменить" или галочка "не нужна(-ен)"), значок
@@ -8862,11 +8887,12 @@
                   ${actPhotoCount ? h`<span class="milestone-meta">${actPhotoCount} фото</span>` : ""}
                   ${actHasFile ? "" : milestoneAttachControl({cls:"ms-quick-act", id:t.id, accept:"application/pdf,image/*", multiple:true, title:"Прикрепить акт (PDF) или фото акта/работ — фото останутся в блоке «Акт»"})}`,
                 body: h`
+                  ${actHasFile ? actFilePreview(t) : ""}
                   ${actHasFile ? h`<div class="actions-row" style="margin-bottom:8px;">
                     <button type="button" class="btn btn-sm" data-action="act-open" data-path="${escapeHtml(t.act_file_path||'')}">${escapeHtml(t.act_file_name||'Файл акта')}</button>
                     <button type="button" class="btn btn-sm btn-ghost" data-action="act-clear" data-id="${t.id}">Снять отметку</button>
                   </div>` : (actDone ? h`<div class="helptext" style="margin-bottom:8px;">${actPhotoCount ? "Подтверждён фото-доказательством (ниже), без файла акта." : "Отмечено вручную, без файла."}</div>` : h`<div class="muted" style="font-size:12.5px;margin-bottom:8px;">Акт ещё не прикреплён.</div>`)}
-                  <div class="helptext" style="margin-bottom:6px;">Фото-доказательства выполненной работы (отдельно от замечаний в разделе «Фото» ниже):</div>
+                  <div class="helptext" style="margin-bottom:6px;">Фото к акту и доказательства выполненной работы (остальные фото — в разделе «Фото» ниже; кнопка «→ в Акт» под фото переносит его сюда):</div>
                   ${actPhotoGrid(t)}
                   <label class="btn btn-sm" style="margin-top:8px;position:relative;overflow:hidden;align-self:flex-start;display:inline-flex;width:fit-content;">
                     Прикрепить фото к акту
@@ -9760,6 +9786,12 @@
       if(action==="ticket-delete") return deleteTicket(id);
       if(action==="system-defect-clear") return clearSystemDefectName(id);
       if(action==="photo-open") return openPhotoFile(actionEl.getAttribute("data-path"));
+      if(action==="photo-move"){
+        var pmCat = actionEl.getAttribute("data-cat") || null;
+        var pm = (state.photos||[]).find(function(x){ return String(x.id)===String(id); });
+        if(pm){ pm.category = pmCat; renderTicketPanel(); sb.from("ticket_photos").update({category: pmCat}).eq("id", pm.id).then(function(res){ if(res && res.error){ alert("Не удалось перенести фото: "+res.error.message); } else { addNote(pm.ticket_id, "Фото «"+pm.file_name+"» перенесено "+(pmCat==="act"?"в блок «Акт»":"в раздел «Фото»")+"."); if(pmCat==="act") markActConfirmedByPhoto(pm.ticket_id); } }); }
+        return;
+      }
       if(action==="photo-delete"){ deletePhoto(id, actionEl.getAttribute("data-path")); return; }
       if(action==="sync-state-refresh"){ reloadSyncState(); return; }
       if(action==="backup-open"){ openBackupModal(); return; }
