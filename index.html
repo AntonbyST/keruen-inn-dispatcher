@@ -701,6 +701,13 @@
   .brand .brand-sub{ text-transform:none; letter-spacing:0; font-size:12px; color:var(--ink-soft); margin-top:1px; white-space:nowrap; }
   .auth-logo{ display:flex; align-items:center; gap:10px; font-size:22px; letter-spacing:-.02em; }
   .auth-logo .brand-logo{ width:32px; height:32px; }
+
+  /* 0.4.45: подпись актов в Telegram */
+  .tg-state{ margin-top:6px; }
+  .tg-link{ margin-top:6px; padding:8px; border:1px solid var(--accent-line); background:var(--accent-soft); border-radius:8px; }
+  .tg-link input{ width:100%; font-size:11.5px; margin-bottom:6px; }
+  .act-sign{ margin:4px 0 12px; padding:10px 12px; border:1px solid var(--line); border-radius:10px; background:var(--surface-2); }
+  .act-sign .helptext{ margin-bottom:0; }
 </style>
 </head>
 <body>
@@ -1742,7 +1749,7 @@
     session: null, me: null,           // auth session + own profile row
     authView: "signin", authEmail: "", authError: "",
     tickets: [], profiles: [], parts: [], portfolio: null, invoices: [], photos: [], snapshots: [], crews: [], hotels: [], hotelsLoaded: false,
-    cashAdvances: [], cashExpenses: [], overheadExpenses: [],
+    cashAdvances: [], cashExpenses: [], overheadExpenses: [], actSignRequests: [], tgSignBusy: {}, tgLink: null,
     // «Отчёты» → еженедельный отчёт по СЕРВИСу (0.2.5): ежедневные снимки живых
     // счётчиков по отелям (см. ticket_stats_snapshots) — точки сравнения "N
     // дней назад" для расчёта отчёта. reportPeriodDays — сколько дней назад
@@ -1947,7 +1954,7 @@
     };
   }
   function subscribeAll(){
-    reloadTickets(); reloadProfiles(); reloadParts(); reloadPortfolio(); reloadInvoices(); reloadPhotos(); reloadSnapshots(); reloadCrews(); reloadHotels(); reloadCashAdvances(); reloadCashExpenses(); reloadOverheadExpenses(); reloadStatsSnapshots(); reloadActivityDaily();
+    reloadTickets(); reloadProfiles(); reloadParts(); reloadPortfolio(); reloadInvoices(); reloadPhotos(); reloadSnapshots(); reloadCrews(); reloadHotels(); reloadCashAdvances(); reloadActSignRequests(); reloadCashExpenses(); reloadOverheadExpenses(); reloadStatsSnapshots(); reloadActivityDaily();
     // 0.3.7 (по просьбе Антона, п.4): «Активность» — пульс раз в минуту,
     // запускается один раз при первом вызове subscribeAll() (он вызывается из
     // ОБОИХ путей входа — onAuthStateChange и getSession(), см. ниже — поэтому
@@ -1991,6 +1998,20 @@
     sb.channel("hotels-rt").on("postgres_changes", {event:"*", schema:"public", table:"hotels"}, function(payload){
       rtPatchArray(state.hotels, payload, rtSortBy("id", true));
       maybeSeed(); maybeRecordTodaysStatsSnapshot(); scheduleRender();
+    }).subscribe();
+    // 0.4.45: подпись актов в Telegram — статус запроса обновляется на экране сам;
+    // когда управляющий подписал, бот уже отметил акт подписанным в базе — здесь
+    // только подтягиваем это в память и (у того, кто отправлял) проверяем автозакрытие заявки.
+    sb.channel("act-sign-rt").on("postgres_changes", {event:"*", schema:"public", table:"act_sign_requests"}, function(payload){
+      if(isClientRole()) return;
+      var prev = payload.new && (state.actSignRequests||[]).find(function(r){ return r.id===payload.new.id; });
+      rtPatchArray(state.actSignRequests, payload, rtSortBy("created_at", false));
+      if(payload.new && payload.new.status==="signed" && (!prev || prev.status!=="signed")){
+        patchTicketLocal(payload.new.ticket_id, {act_signed:true});
+        if(payload.new.sent_by===myLabel()) maybeAutoComplete(payload.new.ticket_id);
+        if(state.selectedTicketId===payload.new.ticket_id) loadNotesFor(payload.new.ticket_id);
+      }
+      scheduleRender(); renderTicketPanel();
     }).subscribe();
     sb.channel("cash-advances-rt").on("postgres_changes", {event:"*", schema:"public", table:"cash_advances"}, function(payload){
       rtPatchArray(state.cashAdvances, payload, rtSortBy("date", false));
@@ -2103,6 +2124,10 @@
   }
   function reloadInvoices(){
     sb.from("invoices").select("*").order("uploaded_at", {ascending:false}).then(function(res){ state.invoices = res.data || []; render(); });
+  }
+  function reloadActSignRequests(){
+    if(isClientRole()) return;
+    sb.from("act_sign_requests").select("*").order("created_at", {ascending:false}).then(function(res){ state.actSignRequests = (res && res.data) || []; render(); });
   }
   function reloadCashAdvances(){
     sb.from("cash_advances").select("*").order("date", {ascending:false}).then(function(res){ state.cashAdvances = res.data || []; render(); });
@@ -2557,7 +2582,7 @@
       return Promise.all([worker(),worker(),worker(),worker(),worker()]);
     }).then(function(){ return out; });
   }
-  var APP_VERSION_LABEL = "0.4.44";
+  var APP_VERSION_LABEL = "0.4.45";
   /* ============================== РЕЗЕРВНАЯ КОПИЯ ==============================
      0.4.25 (по просьбе Антона): на плане Free у Supabase нет автоматического
      восстановления на любой момент, а всё (заявки, счета, накладные, наличные)
@@ -4815,6 +4840,139 @@
           </tbody></table></div>`}
         </div>
       </div>`;
+  }
+  /* ============ 0.4.45: подпись актов управляющим через Telegram-бота ============
+     Бот и вся логика подписи — в Edge Function tg-sign (edge-functions/tg-sign.ts);
+     здесь — только интерфейс: подключение управляющего в карточке отеля,
+     кнопка «Отправить на подпись» в блоке «Акт», статус, протокол подписи. */
+  function actSignList(tid){
+    return (state.actSignRequests||[]).filter(function(r){ return r.ticket_id===tid; }).sort(function(a,b){ return String(b.created_at).localeCompare(String(a.created_at)); });
+  }
+  // «Эффективный» статус: ожидающий запрос с истёкшим сроком показываем как истёкший.
+  function actSignStatus(r){
+    if(r.status==="pending" && r.expires_at && new Date(r.expires_at).getTime()<Date.now()) return "expired";
+    return r.status;
+  }
+  function tgSignCall(body){
+    return sb.functions.invoke("tg-sign", {body: body}).then(function(res){
+      if(res && res.error){
+        var ctx = res.error.context;
+        if(ctx && typeof ctx.json==="function") return ctx.json().then(function(j){ return {error: (j && (j.message||j.error)) || res.error.message, code: j && j.error}; }, function(){ return {error: res.error.message}; });
+        return {error: res.error.message};
+      }
+      var d = (res && res.data) || {};
+      return d.error ? {error: d.message||d.error, code: d.error} : d;
+    }, function(err){ return {error: (err && err.message) || String(err)}; });
+  }
+  function actHasEvidence(t){
+    return !!t.act_file_path || (state.photos||[]).some(function(p){ return p.ticket_id===t.id && p.category==="act"; });
+  }
+  function actSignBlock(t){
+    if(isClientRole()) return "";
+    var hotel = hotelById(t.hotel_id);
+    var connected = !!(hotel && hotel.client_tg_chat_id);
+    var list = actSignList(t.id), last = list[0], st = last ? actSignStatus(last) : null;
+    var busy = !!(state.tgSignBusy && state.tgSignBusy[t.id]);
+    var head = h`<div class="helptext" style="margin:12px 0 6px;font-weight:600;color:var(--ink-soft);">Подпись управляющего (Telegram)</div>`;
+    if(!connected){
+      return h`<div class="act-sign" data-act-sign="none">${head}<div class="helptext">Telegram управляющего по этому объекту не подключён. Подключите его в разделе «<a href="#/hotels">Отели</a>» (колонка «Лицо от Заказчика»).</div></div>`;
+    }
+    var who = escapeHtml(hotel.client_tg_name||"управляющий");
+    var statusLine = "";
+    if(last){
+      var changed = (last.act_file_path||"") !== (t.act_file_path||"");
+      if(st==="pending") statusLine = h`<div class="actions-row" style="align-items:center;margin-bottom:6px;"><span class="pill pill-warn">Ждёт подписи</span><span class="muted" style="font-size:12px;">отправлено ${fmtDate(last.created_at)}, ${who}</span><button type="button" class="btn btn-sm btn-ghost" data-action="act-sign-cancel" data-id="${last.id}">Отозвать</button></div>`;
+      else if(st==="signed") statusLine = h`<div class="actions-row" style="align-items:center;margin-bottom:6px;"><span class="pill pill-ok">Подписан</span><span style="font-size:12.5px;">${escapeHtml(last.signer_name||"")}, ${escapeHtml(last.signer_phone||"")} · ${fmtDate(last.decided_at)}</span><button type="button" class="btn btn-sm" data-action="act-sign-protocol" data-id="${last.id}">Протокол подписи</button></div>${changed?h`<div class="helptext" style="color:var(--warn);">⚠ Файл акта изменён после подписи — при необходимости отправьте на подпись заново.</div>`:""}`;
+      else if(st==="rejected") statusLine = h`<div style="margin-bottom:6px;"><span class="pill pill-crit">Отклонён</span> <span style="font-size:12.5px;">${escapeHtml(last.reject_reason||"без причины")}</span></div>`;
+      else statusLine = h`<div style="margin-bottom:6px;"><span class="pill pill-neutral">${st==="cancelled"?"Запрос отозван":"Срок запроса истёк"}</span></div>`;
+    }
+    var canSend = st!=="pending";
+    var evidence = actHasEvidence(t);
+    return h`<div class="act-sign" data-act-sign="${st||'new'}">${head}${statusLine}${canSend ? h`<div class="actions-row"><button type="button" class="btn btn-sm btn-primary" data-action="act-sign-send" data-id="${t.id}" ${(!evidence||busy)?'disabled':''}>${busy?"Отправляю…":(last?"Отправить на подпись снова":"Отправить на подпись в Telegram")}</button></div>${!evidence?h`<div class="helptext">Сначала приложите акт: файл или фото.</div>`:h`<div class="helptext">Управляющий получит акт в Telegram и подпишет его кнопкой. Статус обновится здесь сам.</div>`}` : ""}</div>`;
+  }
+  function sendActSign(tid){
+    var t = state.tickets.find(function(x){return x.id===tid;}); if(!t) return;
+    var hotel = hotelById(t.hotel_id);
+    if(!confirm("Отправить акт на подпись управляющему"+(hotel&&hotel.client_tg_name?(" ("+hotel.client_tg_name+")"):"")+" в Telegram?")) return;
+    state.tgSignBusy = state.tgSignBusy || {}; state.tgSignBusy[tid] = true; renderTicketPanel();
+    tgSignCall({action:"send", ticket_id:tid}).then(function(res){
+      state.tgSignBusy[tid] = false;
+      if(res.error) alert(res.error);
+      reloadActSignRequests(); if(state.selectedTicketId===tid) loadNotesFor(tid);
+      renderTicketPanel();
+    });
+  }
+  function cancelActSign(reqId){
+    var r = (state.actSignRequests||[]).find(function(x){return x.id===reqId;}); if(!r) return;
+    if(!confirm("Отозвать запрос? Кнопки в Telegram у управляющего перестанут работать.")) return;
+    sb.from("act_sign_requests").update({status:"cancelled", decided_at:new Date().toISOString()}).eq("id", reqId).eq("status","pending").then(function(res){
+      if(res && res.error){ alert("Не удалось отозвать: "+res.error.message); return; }
+      r.status = "cancelled"; r.decided_at = new Date().toISOString();
+      addNote(r.ticket_id, "Запрос на подпись акта в Telegram отозван.");
+      renderTicketPanel(); render();
+    });
+  }
+  // Протокол подписи — печатная страница (в браузере «Печать → Сохранить как PDF»)
+  function openActSignProtocol(reqId){
+    var r = (state.actSignRequests||[]).find(function(x){return x.id===reqId;}); if(!r) return;
+    var w = window.open("", "_blank"); if(!w){ alert("Браузер заблокировал окно — разрешите всплывающие окна для этого сайта."); return; }
+    var t = state.tickets.find(function(x){return x.id===r.ticket_id;}) || {};
+    var hotel = hotelById(r.hotel_id) || {};
+    var write = function(consent){
+      var rows = [
+        ["Заявка", t.external_ref ? ("№ "+t.external_ref) : (t.id||"")],
+        ["Объект", hotel.name ? ("№"+hotel.id+" "+hotel.name) : "—"],
+        ["Акт (файл)", r.act_file_name || "фото-доказательства"],
+        ["Отпечаток акта SHA-256", r.act_hash || "—"],
+        ["Отправлен на подпись", fmtDate(r.created_at)+(r.sent_by?(" ("+r.sent_by+")"):"")],
+        ["Подписант", (r.signer_name||"—")],
+        ["Телефон", r.signer_phone||"—"],
+        ["Аккаунт Telegram (ID)", r.signer_tg_user_id!=null?String(r.signer_tg_user_id):"—"],
+        ["Время подписания", fmtDate(r.decided_at)+" (Астана)"],
+        ["Соглашение о подписи", consent ? ("версия "+consent.agreement_version+", принято "+fmtDate(consent.accepted_at)+", отпечаток текста "+String(consent.agreement_hash||"").slice(0,16)+"…") : "—"]
+      ];
+      var html = '<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Протокол подписания акта</title><style>body{font-family:Arial,Helvetica,sans-serif;max-width:720px;margin:32px auto;padding:0 16px;color:#16232E;} h1{font-size:20px;} table{border-collapse:collapse;width:100%;margin-top:16px;} td{border:1px solid #bbb;padding:8px 10px;font-size:14px;vertical-align:top;} td:first-child{width:36%;background:#f3f6f8;font-weight:600;} .st{margin-top:18px;font-size:13px;color:#444;line-height:1.5;word-break:break-all;} @media print{.np{display:none}}</style></head><body><h1>Протокол подписания акта</h1><div>Статус: <b>'+(r.status==="signed"?"подписан":escapeHtml(r.status))+'</b></div><table>'+rows.map(function(x){ return '<tr><td>'+escapeHtml(x[0])+'</td><td>'+escapeHtml(x[1])+'</td></tr>'; }).join("")+'</table><div class="st">Акт подписан простой электронной подписью — нажатием кнопки в Telegram с аккаунта, привязанного к указанному номеру телефона, на основании соглашения об использовании электронной подписи, принятого подписантом в боте. Отпечаток SHA-256 однозначно определяет подписанные файлы.</div><p class="np"><button onclick="window.print()">Печать / сохранить в PDF</button></p></body></html>';
+      w.document.open(); w.document.write(html); w.document.close();
+    };
+    if(r.consent_id){ sb.from("tg_consents").select("*").eq("id", r.consent_id).maybeSingle().then(function(res){ write(res && res.data); }, function(){ write(null); }); }
+    else write(null);
+  }
+
+  // ---- карточка отеля: подключение Telegram управляющего ----
+  function hotelTgBlock(x){
+    if(isClientRole()) return "";
+    var link = state.tgLink && state.tgLink.hotelId===x.id ? state.tgLink : null;
+    var linkHtml = "";
+    if(link){
+      var phone = String(x.client_contact_phone||"").replace(/\D/g,"");
+      var wa = "https://wa.me/"+phone+"?text="+encodeURIComponent("Здравствуйте! Чтобы подписывать акты по объекту «"+x.name+"» в Telegram, откройте ссылку и нажмите «Старт»: "+link.url);
+      linkHtml = h`<div class="tg-link" data-tg-link="${x.id}"><input type="text" readonly value="${escapeHtml(link.url)}" onfocus="this.select()"><div class="actions-row"><button type="button" class="btn btn-sm" data-action="hotel-tg-copy" data-id="${x.id}">Копировать</button><a class="btn btn-sm" href="${escapeHtml(wa)}" target="_blank" rel="noopener">Отправить в WhatsApp</a><button type="button" class="btn btn-sm btn-ghost" data-action="hotel-tg-close">Закрыть</button></div><div class="helptext">Ссылка действует 7 дней. Управляющий открывает её, принимает соглашение, вводит ФИО и отправляет свой номер кнопкой.</div></div>`;
+    }
+    if(x.client_tg_chat_id){
+      return h`<div class="tg-state" data-tg-state="on"><span class="pill pill-ok" title="Подключён ${escapeHtml(fmtDate(x.client_tg_connected_at))}">Telegram ✓</span> <span style="font-size:11px;">${escapeHtml(x.client_tg_name||"")}</span>${x.client_tg_phone_match===false?h`<div class="helptext" style="color:var(--warn);">⚠ Номер в Telegram (${escapeHtml(x.client_tg_phone||"")}) не совпадает с номером в карточке.</div>`:""}<div class="actions-row" style="margin-top:4px;"><button type="button" class="btn btn-sm btn-ghost" data-action="hotel-tg-link" data-id="${x.id}">Новая ссылка</button><button type="button" class="btn btn-sm btn-ghost btn-danger" data-action="hotel-tg-disconnect" data-id="${x.id}">Отключить</button></div>${linkHtml}</div>`;
+    }
+    return h`<div class="tg-state" data-tg-state="off"><button type="button" class="btn btn-sm" data-action="hotel-tg-link" data-id="${x.id}">Подключить Telegram</button><div class="helptext" style="margin-top:2px;">для подписи актов</div>${linkHtml}</div>`;
+  }
+  function createHotelTgLink(hid){
+    tgSignCall({action:"link", hotel_id:Number(hid)}).then(function(res){
+      if(res.error){ alert(res.error); return; }
+      state.tgLink = {hotelId:Number(hid), url:res.url}; render();
+    });
+  }
+  function disconnectHotelTg(hid){
+    var hotel = hotelById(hid); if(!hotel) return;
+    if(!confirm("Отключить Telegram управляющего у объекта «"+hotel.name+"»? Акты нельзя будет отправлять на подпись, пока его не подключат снова.")) return;
+    tgSignCall({action:"disconnect", hotel_id:Number(hid)}).then(function(res){
+      if(res.error){ alert(res.error); return; }
+      ["client_tg_chat_id","client_tg_user_id","client_tg_name","client_tg_phone","client_tg_phone_match","client_tg_connected_at"].forEach(function(k){ hotel[k] = null; });
+      render();
+    });
+  }
+  function copyHotelTgLink(){
+    var url = state.tgLink && state.tgLink.url; if(!url) return;
+    var done = function(){ alert("Ссылка скопирована."); };
+    if(navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(url).then(done, function(){ prompt("Скопируйте ссылку:", url); }); }
+    else prompt("Скопируйте ссылку:", url);
   }
   function viewDashboard(){
     return backupReminderHtml() + viewDashboardMain();
@@ -8235,7 +8393,7 @@
       <input type="number" step="0.0001" data-hotel-field="lng" data-id="${x.id}" value="${x.lng!=null?x.lng:''}" placeholder="долгота" style="width:96px;">
     </div>`;
   }
-  function hotelContactCell(x){
+  function hotelContactCellBase(x){
     var key = x.id+":contact";
     var filled = !!(x.client_contact_name || x.client_contact_position || x.client_contact_phone);
     if(state.hotelEditingKey!==key && filled){
@@ -8254,6 +8412,7 @@
       ${x.client_contact_phone ? h`<a href="tel:${escapeHtml(x.client_contact_phone.replace(/[^\d+]/g,''))}" style="font-size:11px;">Позвонить</a>` : ""}
     </div>`;
   }
+  function hotelContactCell(x){ return h`${hotelContactCellBase(x)}${hotelTgBlock(x)}`; }
   // 0.4.8, п.2: у «Клиента» «Отели» — только просмотр своих объектов, без
   // возможности переименовать/удалить/включить-выключить чужой (или свой)
   // отель и без карточки «Добавить отель». Остальным ролям поведение не
@@ -8938,6 +9097,7 @@
                     <button type="button" class="btn btn-sm" data-action="act-open" data-path="${escapeHtml(t.act_file_path||'')}">${escapeHtml(t.act_file_name||'Файл акта')}</button>
                     <button type="button" class="btn btn-sm btn-ghost" data-action="act-clear" data-id="${t.id}">Снять отметку</button>
                   </div>` : (actDone ? h`<div class="helptext" style="margin-bottom:8px;">${actPhotoCount ? "Подтверждён фото-доказательством (ниже), без файла акта." : "Отмечено вручную, без файла."}</div>` : h`<div class="muted" style="font-size:12.5px;margin-bottom:8px;">Акт ещё не прикреплён.</div>`)}
+                  ${actSignBlock(t)}
                   <div class="helptext" style="margin-bottom:6px;">Фото к акту и доказательства выполненной работы (остальные фото — в разделе «Фото» ниже; кнопка «→ в Акт» под фото переносит его сюда):</div>
                   ${actPhotoGrid(t)}
                   <label class="btn btn-sm" style="margin-top:8px;position:relative;overflow:hidden;align-self:flex-start;display:inline-flex;width:fit-content;">
@@ -9848,6 +10008,13 @@
         hform.reset();
         return;
       }
+      if(action==="hotel-tg-link"){ createHotelTgLink(id); return; }
+      if(action==="hotel-tg-copy"){ copyHotelTgLink(); return; }
+      if(action==="hotel-tg-close"){ state.tgLink = null; render(); return; }
+      if(action==="hotel-tg-disconnect"){ disconnectHotelTg(id); return; }
+      if(action==="act-sign-send"){ sendActSign(id); return; }
+      if(action==="act-sign-cancel"){ cancelActSign(id); return; }
+      if(action==="act-sign-protocol"){ openActSignProtocol(id); return; }
       if(action==="hotel-delete"){ deleteHotel(id); return; }
       if(action==="hotel-toggle-active"){ toggleHotelActive(id, actionEl.getAttribute("data-val")==="1"); return; }
       if(action==="cash-advance-delete"){ e.preventDefault(); deleteCashAdvance(id); return; }
