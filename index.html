@@ -1062,7 +1062,7 @@
     if(!tb) return "";
     if(tb==="custom"){
       var amt = invoiceCustomTaxAmount(iv);
-      if(amt!=null){ var tcur = iv.extra && iv.extra.custom_tax_currency; return "Свой (+"+fmtKZT(amt)+" "+((tcur && tcur!=="KZT") ? tcur : "₸")+")"; }
+      if(amt!=null){ var tcur = (iv.extra && iv.extra.custom_tax_currency) || iv.currency; return "Свой (+"+fmtKZT(amt)+" "+((tcur && tcur!=="KZT") ? tcur : "₸")+")"; }
       var pct = invoiceCustomTaxPct(iv);
       return "Свой ("+(pct!=null?("+"+fmtKZT(pct)+"%"):"не указано")+")";
     }
@@ -2531,7 +2531,7 @@
       return Promise.all([worker(),worker(),worker(),worker(),worker()]);
     }).then(function(){ return out; });
   }
-  var APP_VERSION_LABEL = "0.4.37";
+  var APP_VERSION_LABEL = "0.4.38";
   /* ============================== РЕЗЕРВНАЯ КОПИЯ ==============================
      0.4.25 (по просьбе Антона): на плане Free у Supabase нет автоматического
      восстановления на любой момент, а всё (заявки, счета, накладные, наличные)
@@ -6748,6 +6748,23 @@
     }).then(function(res){ if(res && res.error) alert("Не удалось сохранить выдачу: " + res.error.message); });
     return true;
   }
+  // 0.4.38: строки выдач/запросов редактируются на месте (дата, кому, сумма, отель, комментарий).
+  // Отель в выдаче — справочный: на затраты по объектам не влияет (они разносятся из расходов).
+  function updateCashAdvanceField(id, field, val){
+    if(!canEditCashExpenses()) return;
+    var a = (state.cashAdvances||[]).find(function(x){ return x.id===id; });
+    if(!a) return;
+    var patch = {};
+    if(field==="amount"){ var n = Number(parseAmountInputValue(val)); if(!n || n<=0){ alert("Укажите сумму выдачи."); render(); return; } patch.amount = n; }
+    else if(field==="person"){ var pv = String(val||"").trim(); if(!pv){ alert("Укажите, кому выданы наличные."); render(); return; } patch.person = pv; }
+    else if(field==="hotel_id"){ patch.hotel_id = val ? Number(val) : null; }
+    else if(field==="note"){ patch.note = String(val||"").trim() || null; }
+    else if(field==="date"){ if(!val){ render(); return; } patch.date = val; }
+    else return;
+    Object.keys(patch).forEach(function(k){ a[k] = patch[k]; });
+    sb.from("cash_advances").update(patch).eq("id", id).then(function(res){ if(res && res.error) alert("Не удалось сохранить: "+res.error.message); });
+    render();
+  }
   function deleteCashAdvance(id){
     if(!canEditCashExpenses()) return;
     if(!confirm("Удалить эту запись о выдаче?")) return;
@@ -7464,6 +7481,12 @@
     function advMonthKey(a){ return String(a.confirmed_at || a.date || "").slice(0,7) || "unknown"; }
     function advMonthOpen(key, mk){ var m = state.cashAdvMonths || {}; return m.hasOwnProperty(key) ? !!m[key] : mk===curMonth; }
     var advanceGroups = groupCashByPerson(givenAdv);
+    function advDateCell(a){ return editable ? h`<input type="date" data-cash-advance-field="date" data-id="${a.id}" value="${escapeHtml(a.date||'')}" style="width:132px;">` : fmtDateShort(a.date); }
+    function advPersonCell(a){ return editable ? h`<input type="text" list="cash-persons" data-cash-advance-field="person" data-id="${a.id}" value="${escapeHtml(a.person||'')}" style="min-width:120px;">` : escapeHtml(a.person); }
+    function advAmountCell(a){ return editable ? h`<input type="text" inputmode="decimal" class="registry-amount-input" data-cash-advance-field="amount" data-id="${a.id}" value="${escapeHtml(fmtSum(a.amount))}" style="width:104px;text-align:right;">` : fmtSum(a.amount); }
+    function advHotelCell(a){ var hotel = a.hotel_id ? hotelById(a.hotel_id) : null;
+      return editable ? h`<select data-cash-advance-field="hotel_id" data-id="${a.id}" title="Отель указан справочно — на затраты по объектам не влияет" style="max-width:130px;"><option value="">—</option>${state.hotels.filter(function(x){return x.in_service || x.id===a.hotel_id;}).map(function(x){ return h`<option value="${x.id}" ${x.id===a.hotel_id?'selected':''}>№${x.id} ${escapeHtml(x.name)}</option>`; }).join("")}</select>` : (hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'); }
+    function advNoteCell(a){ return editable ? h`<input type="text" data-cash-advance-field="note" data-id="${a.id}" value="${escapeHtml(a.note||'')}" placeholder="комментарий" style="min-width:150px;width:100%;">` : escapeHtml(a.note||''); }
     var expenseGroups = groupCashByPerson(expenses);
 
     return h`
@@ -7479,11 +7502,11 @@
             <tbody>${pendingAdv.map(function(a){
               var hotel = a.hotel_id ? hotelById(a.hotel_id) : null;
               return h`<tr data-cash-request="${a.id}">
-                <td class="mono muted">${fmtDateShort(a.date)}</td>
-                <td><b>${escapeHtml(a.person)}</b></td>
-                <td class="num mono">${fmtSum(a.amount)}</td>
-                <td class="muted">${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
-                <td class="muted">${escapeHtml(a.note||'')}</td>
+                <td class="mono muted">${advDateCell(a)}</td>
+                <td>${advPersonCell(a)}</td>
+                <td class="num mono">${advAmountCell(a)}</td>
+                <td class="muted">${advHotelCell(a)}</td>
+                <td class="muted">${advNoteCell(a)}</td>
                 <td style="min-width:160px;">
                         <select data-cash-advance-accounted-basis data-id="${a.id}" ${editable?'':'disabled'}>
                           <option value="">Не учитывать</option>
@@ -7537,11 +7560,11 @@
                   function advRow(a){
                     var hotel = a.hotel_id ? hotelById(a.hotel_id) : null;
                     return h`<tr>
-                      <td class="mono muted">${fmtDateShort(a.date)}</td>
-                      <td>${escapeHtml(a.person)}</td>
-                      <td class="num mono">${fmtSum(a.amount)}</td>
-                      <td class="muted">${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
-                      <td class="muted">${escapeHtml(a.note||'')}</td>
+                      <td class="mono muted">${advDateCell(a)}</td>
+                      <td>${advPersonCell(a)}</td>
+                      <td class="num mono">${advAmountCell(a)}</td>
+                      <td class="muted">${advHotelCell(a)}</td>
+                      <td class="muted">${advNoteCell(a)}</td>
                       <td style="min-width:160px;">
                         <select data-cash-advance-accounted-basis data-id="${a.id}" ${editable?'':'disabled'}>
                           <option value="">Не учитывать</option>
@@ -9846,6 +9869,7 @@
     if(e.target.matches("[data-invoice-tax-custom-amt]")){ setInvoiceCustomTaxAmount(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.matches("[data-alloc-percent]")){ setInvoiceAllocPercent(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.matches("[data-alloc-amount]")){ setInvoiceAllocAmount(e.target.getAttribute("data-id"), e.target.value); return; }
+    if(e.target.matches("[data-cash-advance-field]")){ updateCashAdvanceField(e.target.getAttribute("data-id"), e.target.getAttribute("data-cash-advance-field"), e.target.value); return; }
     if(e.target.matches("[data-cash-advance-accounted-basis]")){ setCashAdvanceAccountedBasis(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.matches("[data-cash-advance-accounted-custom-pct]")){ setCashAdvanceAccountedCustomPct(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.matches("[data-cash-expense-category]")){ setCashExpenseCategory(e.target.getAttribute("data-id"), e.target.value); return; }
