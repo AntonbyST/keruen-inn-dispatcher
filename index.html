@@ -660,6 +660,10 @@
   @media (hover:none){ .crew-x{ opacity:.6; } }
   @media (max-width:980px){ .crew-grid{ grid-template-columns:repeat(2,minmax(0,1fr)); } }
   @media (max-width:600px){ .crew-grid{ grid-template-columns:1fr; } }
+
+  /* 0.4.34: заголовки групп в «Наличных расходах» — как в «Накладных» (.oh-grp) */
+  .cash-person-divider td, .cash-expense-month-divider td{ background:transparent; padding:0; border:0; }
+  .cash-expense-month-divider .oh-grp-m{ margin:8px 0 2px 6px; }
 </style>
 </head>
 <body>
@@ -2515,7 +2519,7 @@
       return Promise.all([worker(),worker(),worker(),worker(),worker()]);
     }).then(function(){ return out; });
   }
-  var APP_VERSION_LABEL = "0.4.33";
+  var APP_VERSION_LABEL = "0.4.34";
   /* ============================== РЕЗЕРВНАЯ КОПИЯ ==============================
      0.4.25 (по просьбе Антона): на плане Free у Supabase нет автоматического
      восстановления на любой момент, а всё (заявки, счета, накладные, наличные)
@@ -7418,7 +7422,14 @@
     advances.forEach(function(a){ if(byPerson[a.person]) byPerson[a.person].given += Number(a.amount)||0; });
     expensesAll.forEach(function(e){ if(byPerson[e.person]) byPerson[e.person].spent += Number(e.amount)||0; });
     var hotelOptions = state.hotels.filter(function(x){return x.in_service;}).map(function(x){ return h`<option value="${x.id}">№${x.id} ${escapeHtml(x.name)}</option>`; }).join("");
-    var advanceGroups = groupCashByPerson(advances);
+    // 0.4.34: «Запросы на наличные» (ещё не выдано) — отдельный блок сверху; в «Выдачах» —
+    // только выданное, группа прораб → месяц ВЫДАЧИ (дата отметки «Выдано»).
+    var pendingAdv = advances.filter(function(a){ return !a.confirmed; }).sort(function(a,b){ return (a.date||"").localeCompare(b.date||""); });
+    var givenAdv = advances.filter(function(a){ return !!a.confirmed; });
+    var curMonth = new Date().toISOString().slice(0,7);
+    function advMonthKey(a){ return String(a.confirmed_at || a.date || "").slice(0,7) || "unknown"; }
+    function advMonthOpen(key, mk){ var m = state.cashAdvMonths || {}; return m.hasOwnProperty(key) ? !!m[key] : mk===curMonth; }
+    var advanceGroups = groupCashByPerson(givenAdv);
     var expenseGroups = groupCashByPerson(expenses);
 
     return h`
@@ -7426,6 +7437,27 @@
       <datalist id="cash-persons">${persons.map(function(p){ return `<option value="${escapeHtml(p)}">`; }).join("")}</datalist>
       <datalist id="cash-expense-tickets">${state.tickets.filter(function(t){return t.external_ref;}).map(function(t){ return `<option value="${escapeHtml(t.external_ref)}">`; }).join("")}</datalist>
       <div class="row-gap">
+        <div class="card card-pad cash-requests" data-cash-requests>
+          <div class="section-title">Запросы на наличные${pendingAdv.length ? h` <span class="pill pill-accent">${pendingAdv.length}</span>` : ''}</div>
+          ${pendingAdv.length===0 ? h`<div class="muted" style="font-size:13px;">Нет запросов — все наличные выданы.</div>` : h`
+          <div class="table-wrap"><table>
+            <thead><tr><th>Дата</th><th>Кому</th><th class="num">Сумма</th><th>Мотель</th><th>Комментарий</th><th style="text-align:center;">Выдано</th>${editable?'<th></th>':''}</tr></thead>
+            <tbody>${pendingAdv.map(function(a){
+              var hotel = a.hotel_id ? hotelById(a.hotel_id) : null;
+              return h`<tr data-cash-request="${a.id}">
+                <td class="mono muted">${fmtDateShort(a.date)}</td>
+                <td><b>${escapeHtml(a.person)}</b></td>
+                <td class="num mono">${fmtSum(a.amount)}</td>
+                <td class="muted">${hotel ? ('№'+hotel.id+' '+escapeHtml(hotel.name)) : '—'}</td>
+                <td class="muted">${escapeHtml(a.note||'')}</td>
+                <td style="text-align:center;"><input type="checkbox" data-action="cash-advance-confirm-toggle" data-id="${a.id}" data-val="1" ${canConfirmCashAdvance()?'':'disabled'} title="${canConfirmCashAdvance()?'Отметить, что деньги выданы — запрос перейдёт в «Выдачи» к этому человеку, в текущий месяц':'Отмечать может только тот, кому выдано право «Наличные расходы»'}"></td>
+                ${editable?h`<td><a href="#" data-action="cash-advance-delete" data-id="${a.id}" style="color:var(--crit);">✕</a></td>`:''}
+              </tr>`;
+            }).join("")}</tbody>
+          </table></div>`}
+        </div>
+      </div>
+      <div class="row-gap" style="margin-top:18px;">
         <div class="card card-pad">
           <div class="section-title">Баланс по прорабам</div>
           ${persons.length===0 ? h`<div class="muted" style="font-size:13px;">Пока нет ни одной записи.</div>` : h`
@@ -7446,18 +7478,18 @@
 
         <div class="row-gap">
           <div class="card card-pad">
-            <div class="section-title">Выдачи</div>
+            <div class="section-title">Выдачи <span class="muted" style="text-transform:none;letter-spacing:0;font-weight:400;">(выданные)</span></div>
             <div class="table-wrap"><table>
               <thead><tr><th>Дата</th><th>Кому</th><th class="num">Сумма</th><th>Мотель</th><th>Комментарий</th><th>Учтено в затратах${infoTip("Сколько из выданной суммы считать реальной затратой компании. По умолчанию — «Не учитывать» (0): выдача сама по себе ещё не затрата. Если у прораба наличный/упрощённый расчёт, выберите способ — сумма пересчитается «по-грязному» (напр. нал. 30%: 100 000 ₸ выдачи → 142 857 ₸ учтено). Та же ставка потом применяется и к его расходам при разнесении по заявкам.")}</th><th style="text-align:center;">Выдано</th><th>Чек</th>${editable?'<th></th>':''}</tr></thead>
-              <tbody>${advances.length===0 ? h`<tr><td colspan="${editable?9:8}"><div class="empty-state"><b>Пока нет выдач</b>Выдали наличные — впишите ниже.</div></td></tr>` :
+              <tbody>${givenAdv.length===0 ? h`<tr><td colspan="${editable?9:8}"><div class="empty-state"><b>Пока нет выданных</b>Здесь появятся запросы после отметки «Выдано».</div></td></tr>` :
                 advanceGroups.map(function(g){
                   var groupKey = "adv:"+g.person;
                   var expanded = cashPersonExpanded(groupKey);
                   var sumGiven = g.rows.reduce(function(s,a){ return s+(Number(a.amount)||0); }, 0);
                   var header = h`<tr class="cash-person-divider" data-action="cash-person-toggle" data-key="${escapeHtml(groupKey)}" style="cursor:pointer;">
-                    <td colspan="${editable?9:8}"><button type="button" class="btn btn-ghost btn-sm registry-expand-btn" style="margin-right:6px;" title="${expanded?'Свернуть':'Показать выдачи'}">${expanded?'▾':'▸'}</button><b>${escapeHtml(g.person)}</b> <span class="muted">— ${g.rows.length} ${ruPlural(g.rows.length,['выдача','выдачи','выдач'])}, ${fmtSum(sumGiven)} ₸</span></td>
+                    <td colspan="${editable?9:8}"><div class="oh-grp oh-grp-y" style="margin-top:6px;"><span class="oh-caret">${expanded?'▾':'▸'}</span><b>${escapeHtml(g.person)}</b><span class="muted"> · ${g.rows.length} ${ruPlural(g.rows.length,['выдача','выдачи','выдач'])}</span><span class="oh-grp-sum">${fmtSum(sumGiven)} ₸</span></div></td>
                   </tr>`;
-                  var body = !expanded ? "" : g.rows.map(function(a){
+                  function advRow(a){
                     var hotel = a.hotel_id ? hotelById(a.hotel_id) : null;
                     return h`<tr>
                       <td class="mono muted">${fmtDateShort(a.date)}</td>
@@ -7480,6 +7512,18 @@
                       <td>${a.receipt_path ? h`<a href="#" data-action="cash-receipt-open" data-path="${escapeHtml(a.receipt_path)}" title="${escapeHtml(a.receipt_name||'')}">📎 чек</a>${editable?h` <a href="#" data-action="cash-receipt-delete" data-id="${a.id}" data-path="${escapeHtml(a.receipt_path)}" style="color:var(--crit);" title="Удалить чек">✕</a>`:''}` : (editable ? h`<label class="btn btn-ghost btn-sm" style="cursor:pointer;">Приложить<input type="file" data-cash-receipt-upload="${a.id}" accept="image/*,.pdf" style="display:none;"></label>` : '—')}</td>
                       ${editable?h`<td><a href="#" data-action="cash-advance-delete" data-id="${a.id}" style="color:var(--crit);">✕</a></td>`:''}
                     </tr>`;
+                  }
+                  if(!expanded) return header;
+                  var months = {}, mOrder = [];
+                  g.rows.forEach(function(a){ var mk = advMonthKey(a); if(!months[mk]){ months[mk] = []; mOrder.push(mk); } months[mk].push(a); });
+                  var body = mOrder.sort().reverse().map(function(mk){
+                    var rows = months[mk].sort(function(x,y){ return String(y.confirmed_at||y.date||"").localeCompare(String(x.confirmed_at||x.date||"")); });
+                    var mKey = groupKey+"::"+mk, mOpen = advMonthOpen(mKey, mk);
+                    var sumM = rows.reduce(function(s,a){ return s+(Number(a.amount)||0); }, 0);
+                    var mh = h`<tr class="cash-expense-month-divider" data-cash-adv-month="${escapeHtml(mKey)}" data-action="cash-adv-month-toggle" data-key="${escapeHtml(mKey)}" data-open="${mOpen?'1':'0'}" style="cursor:pointer;">
+                      <td colspan="${editable?9:8}"><div class="oh-grp oh-grp-m"><span class="oh-caret">${mOpen?'▾':'▸'}</span><b>${escapeHtml(mk==='unknown'?'Дата не указана':monthLabelRu(mk))}</b><span class="muted"> · ${rows.length} ${ruPlural(rows.length,['выдача','выдачи','выдач'])}</span><span class="oh-grp-sum">${fmtSum(sumM)} ₸</span></div></td>
+                    </tr>`;
+                    return mh + (mOpen ? rows.map(advRow).join("") : "");
                   }).join("");
                   return header + body;
                 }).join("")}
@@ -7510,7 +7554,7 @@
                   var pExpanded = cashExpensePersonExpanded(g.person);
                   var sumSpent = g.rows.reduce(function(s,e){ return s+(Number(e.amount)||0); }, 0);
                   var header = h`<tr class="cash-person-divider" data-action="cash-expense-person-toggle" data-key="${escapeHtml(g.person)}" style="cursor:pointer;">
-                    <td colspan="${editable?10:9}"><button type="button" class="btn btn-ghost btn-sm registry-expand-btn" style="margin-right:6px;" title="${pExpanded?'Свернуть':'Показать расходы'}">${pExpanded?'▾':'▸'}</button><b>${escapeHtml(g.person)}</b> <span class="muted">— ${g.rows.length} ${ruPlural(g.rows.length,['расход','расхода','расходов'])}, ${fmtSum(sumSpent)} ₸</span></td>
+                    <td colspan="${editable?10:9}"><div class="oh-grp oh-grp-y" style="margin-top:6px;"><span class="oh-caret">${pExpanded?'▾':'▸'}</span><b>${escapeHtml(g.person)}</b><span class="muted"> · ${g.rows.length} ${ruPlural(g.rows.length,['расход','расхода','расходов'])}</span><span class="oh-grp-sum">${fmtSum(sumSpent)} ₸</span></div></td>
                   </tr>`;
                   if(!pExpanded) return header;
                   function cashExpenseRow(e, inGroup){
@@ -7539,7 +7583,7 @@
                     var sumMonth = m.rows.reduce(function(s,e){ return s+(Number(e.amount)||0); }, 0);
                     var monthLabel = m.key==="unknown" ? "Дата не указана" : monthLabelRu(m.key);
                     var monthHeader = h`<tr class="cash-expense-month-divider" data-action="cash-expense-month-toggle" data-key="${escapeHtml(monthKey)}" style="cursor:pointer;">
-                      <td colspan="${editable?10:9}" style="padding-left:28px;"><button type="button" class="btn btn-ghost btn-sm registry-expand-btn" style="margin-right:6px;" title="${mExpanded?'Свернуть месяц':'Показать расходы за месяц'}">${mExpanded?'▾':'▸'}</button>${escapeHtml(monthLabel)} <span class="muted">— ${m.rows.length} ${ruPlural(m.rows.length,['расход','расхода','расходов'])}, ${fmtSum(sumMonth)} ₸</span></td>
+                      <td colspan="${editable?10:9}"><div class="oh-grp oh-grp-m"><span class="oh-caret">${mExpanded?'▾':'▸'}</span><b>${escapeHtml(monthLabel)}</b><span class="muted"> · ${m.rows.length} ${ruPlural(m.rows.length,['расход','расхода','расходов'])}</span><span class="oh-grp-sum">${fmtSum(sumMonth)} ₸</span></div></td>
                     </tr>`;
                     if(!mExpanded) return monthHeader;
                     var items = clusterCashExpenseRows(m.rows).map(function(cl){
@@ -7758,29 +7802,8 @@
       <datalist id="overhead-categories">${categories.map(function(c){ return `<option value="${escapeHtml(c)}">`; }).join("")}</datalist>
       <div class="row-gap">
         <div class="card card-pad">
-          <div class="section-title">Итого по статьям ${infoTip("«Учтено в затратах»: сумма без НДС, с доп. налогом по способу оплаты, в ₸ (RUB/BYN — по курсу Нацбанка РК на 1-е число месяца записи; у «Своей суммы» налога можно выбрать свою валюту) — как в «Реестре платежей», только курс на 1-е число. Записи без валюты и «с НДС/Без» (внесены раньше) считаются как есть, в ₸.")}</div>
-          ${categoryTotals.length===0 ? h`<div class="muted" style="font-size:13px;">Пока нет ни одной записи.</div>` : h`
-          <div class="table-wrap"><table>
-            <thead><tr><th>Статья</th><th class="num">Сумма, ₸</th></tr></thead>
-            <tbody>${summaryYears.map(function(y){
-              var yClosedS = !!(state.ohClosed && state.ohClosed["s"+y]);
-              var mKeys = Object.keys(byYM[y]).sort().reverse();
-              return h`<tr class="oh-sum-year" data-oh-sum-year="${y}" data-action="oh-group-toggle" data-key="s${y}" style="cursor:pointer;background:var(--surface-2);"><td><b>${yClosedS?'▸':'▾'} ${y} год</b> <span class="muted">· ${mKeys.length} ${ruPlural(mKeys.length,["месяц","месяца","месяцев"])}</span></td><td class="num mono"><b>${fmtSum(yearTotals[y]||0)}</b></td></tr>`
-                + (yClosedS ? '' : mKeys.map(function(mk){
-                  var mClosedS = !(state.ohClosed && state.ohClosed["sm"+mk]===false);
-                  var cats = Object.keys(byYM[y][mk]).sort(function(a,b){ return (byYM[y][mk][b]-byYM[y][mk][a]) || a.localeCompare(b); });
-                  return h`<tr class="oh-sum-month" data-oh-sum-month="${mk}" data-action="oh-group-toggle" data-key="sm${mk}" style="cursor:pointer;"><td style="padding-left:20px;"><b>${mClosedS?'▸':'▾'} ${escapeHtml(monthLabelRu(mk))}</b> <span class="muted">· ${cats.length} ${ruPlural(cats.length,["статья","статьи","статей"])}</span></td><td class="num mono"><b>${fmtSum(monthTotals[mk]||0)}</b></td></tr>`
-                    + (mClosedS ? '' : cats.map(function(c){ return h`<tr><td style="padding-left:44px;">${escapeHtml(c)}</td><td class="num mono">${fmtSum(byYM[y][mk][c])}</td></tr>`; }).join(""));
-                }).join(""));
-            }).join("")}</tbody>
-            <tfoot><tr><td><b>Итого</b></td><td class="num mono"><b>${fmtSum(total)}</b></td></tr></tfoot>
-          </table></div>
-          ${incomplete ? h`<div class="cost-summary-warn">⚠ ${incomplete} ${ruPlural(incomplete,["запись","записи","записей"])} без валюты/«с НДС–Без» или без курса — в итог пока не включено.</div>` : ''}`}
-        </div>
-
-        <div class="card card-pad">
-          <div class="oh-head"><div class="section-title">Записи</div><input type="text" class="oh-search" data-overhead-search value="${escapeHtml(state.overheadSearch||'')}" placeholder="Поиск: статья, сумма, файл…">${editable ? h`<button type="button" class="btn btn-primary" data-action="overhead-add-open"${saving?' disabled':''}>＋ Добавить расход</button>` : ''}</div>
-          ${rows.length===0 ? h`<div class="empty-state"><b>Пока нет записей</b>${editable?'Нажмите «＋ Добавить расход».':''}</div>` : shown.length===0 ? h`<div class="empty-state"><b>Ничего не найдено</b>Проверьте статью, сумму или примечание в поиске.</div>` : h`<div class="oh-list">${ohGrouped(shown, function(e){
+          <div class="oh-head"><div class="section-title">Записи ${infoTip("«Учтено в затратах» (крупная сумма в ₸): сумма без НДС, с доп. налогом по способу оплаты; RUB/BYN пересчитываются в ₸ по курсу Нацбанка РК на 1-е число месяца учёта (у «Своей суммы» налога можно выбрать свою валюту) — как в «Реестре платежей». Записи без валюты и «с НДС/Без» (внесены раньше) считаются как есть, в ₸. Итог за месяц и год — в заголовках групп.")}</div><input type="text" class="oh-search" data-overhead-search value="${escapeHtml(state.overheadSearch||'')}" placeholder="Поиск: статья, сумма, файл…">${editable ? h`<button type="button" class="btn btn-primary" data-action="overhead-add-open"${saving?' disabled':''}>＋ Добавить расход</button>` : ''}</div>
+          ${rows.length===0 ? h`<div class="empty-state"><b>Пока нет записей</b>${editable?'Нажмите «＋ Добавить расход».':''}</div>` : shown.length===0 ? h`<div class="empty-state"><b>Ничего не найдено</b>Проверьте статью, сумму или примечание в поиске.</div>` : h`${incomplete ? h`<div class="cost-summary-warn">⚠ ${incomplete} ${ruPlural(incomplete,["запись","записи","записей"])} без валюты/«с НДС–Без» или без курса — в итоги пока не включено.</div>` : ''}<div class="oh-list">${ohGrouped(shown, function(e){
             var acc = overheadAccountedKZT(e);
             var vatTxt = e.vat_included===true ? 'с НДС' : (e.vat_included===false ? 'без НДС' : '');
             var taxTxt = e.tax_basis ? taxBasisLabel({tax_basis:e.tax_basis, extra:e.extra}) : '';
@@ -9599,6 +9622,13 @@
       // умолчанию СВЁРНУТО (см. cashExpensePersonExpanded/cashExpenseMonthExpanded
       // выше), поэтому просто инвертируем текущее значение карты, без сравнения
       // с "!==false", как у cash-person-toggle.
+      if(action==="cash-adv-month-toggle"){
+        var camKey = actionEl.getAttribute("data-key");
+        state.cashAdvMonths = state.cashAdvMonths || {};
+        state.cashAdvMonths[camKey] = actionEl.getAttribute("data-open")!=="1";
+        render();
+        return;
+      }
       if(action==="cash-expense-person-toggle"){
         var cepKey = actionEl.getAttribute("data-key");
         state.cashExpandedExpensePersons = state.cashExpandedExpensePersons || {};
