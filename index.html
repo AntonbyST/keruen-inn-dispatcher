@@ -2582,7 +2582,7 @@
       return Promise.all([worker(),worker(),worker(),worker(),worker()]);
     }).then(function(){ return out; });
   }
-  var APP_VERSION_LABEL = "0.4.45";
+  var APP_VERSION_LABEL = "0.4.46";
   /* ============================== РЕЗЕРВНАЯ КОПИЯ ==============================
      0.4.25 (по просьбе Антона): на плане Free у Supabase нет автоматического
      восстановления на любой момент, а всё (заявки, счета, накладные, наличные)
@@ -6614,8 +6614,8 @@
   // расходы + накладные процентом месяца). Доллары: сумма КАЖДОГО месяца
   // делится на курс USD Нацбанка РК на 1-е число этого месяца (как накладные),
   // потом месяцы складываются.
-  function yearUsdRate(year, mnum){
-    var day1 = year+"-"+String(mnum).padStart(2,"0")+"-01";
+  function yearUsdRate(mk){
+    var day1 = mk+"-01";
     ensureNbkRate("USD", day1);
     var r = nbkRateCache["USD|"+day1];
     if(!r || r==="pending") return { state:"pending" };
@@ -6625,6 +6625,10 @@
   function buildYearReport(year, vatMode){
     vatMode = vatMode==="gross" ? "gross" : "net";
     year = String(year);
+    // 0.4.46: year==="all" — отчёт «За весь период»: все месяцы, где есть расходы
+    // (от первого до последнего, без пропусков), вместо 12 месяцев одного года.
+    var allMode = year==="all";
+    var inPeriod = function(mk){ return allMode || String(mk).slice(0,4)===year; };
     var withOv = !isClientRole();
     var direct = collectReportDirect(vatMode);
     var rates = withOv ? reportOverheadRates(direct, reportOverheadByMonth()) : {};
@@ -6632,21 +6636,29 @@
     // Курс нужен только за месяцы, в которых есть расходы (будущие месяцы и
     // месяцы без расходов не запрашиваем — для будущих дат курса ещё нет).
     var needMonth = {};
-    direct.forEach(function(e){ if(String(e.month).slice(0,4)===year) needMonth[e.month] = true; });
-    Object.keys(ovByMonth).forEach(function(k){ if(k.slice(0,4)===year && ovByMonth[k]>0) needMonth[k] = true; });
+    direct.forEach(function(e){ if(inPeriod(e.month)) needMonth[e.month] = true; });
+    Object.keys(ovByMonth).forEach(function(k){ if(inPeriod(k) && ovByMonth[k]>0) needMonth[k] = true; });
+    var monthKeys = [];
+    if(allMode){
+      var nk = Object.keys(needMonth).sort();
+      if(nk.length){
+        var cy = Number(nk[0].slice(0,4)), cm = Number(nk[0].slice(5)), ey = Number(nk[nk.length-1].slice(0,4)), em = Number(nk[nk.length-1].slice(5));
+        while(cy<ey || (cy===ey && cm<=em)){ monthKeys.push(cy+"-"+String(cm).padStart(2,"0")); cm++; if(cm>12){ cm = 1; cy++; } }
+      }
+    } else { for(var i0=1;i0<=12;i0++) monthKeys.push(year+"-"+String(i0).padStart(2,"0")); }
+    var monthIdx = {}; monthKeys.forEach(function(k, ix){ monthIdx[k] = ix; });
     var usd = []; var usdState = "ok", usdFallback = false;
-    for(var mi=1; mi<=12; mi++){
-      var mk0 = year+"-"+String(mi).padStart(2,"0");
-      var u = needMonth[mk0] ? yearUsdRate(year, mi) : { state:"skip" }; usd.push(u);
+    monthKeys.forEach(function(mk0){
+      var u = needMonth[mk0] ? yearUsdRate(mk0) : { state:"skip" }; usd.push(u);
       if(u.state==="pending" && usdState==="ok") usdState = "pending";
       if(u.state==="error") usdState = "error";
       if(u.fallback) usdFallback = true;
-    }
-    var months = []; for(var i=1;i<=12;i++){ months.push({ key: year+"-"+String(i).padStart(2,"0"), direct:0, overhead:0, total:0, usd:null, rate: usd[i-1].state==="ok" ? usd[i-1].value : null }); }
+    });
+    var months = monthKeys.map(function(mk, ix){ return { key: mk, direct:0, overhead:0, total:0, usd:null, rate: usd[ix].state==="ok" ? usd[ix].value : null }; });
     var byHotel = {};
     direct.forEach(function(e){
-      if(String(e.month).slice(0,4)!==year) return;
-      var mi2 = Number(e.month.slice(5))-1;
+      if(!inPeriod(e.month)) return;
+      var mi2 = monthIdx[e.month];
       var ov = e.kzt*(rates[e.month]||0);
       var b = byHotel[e.hotelId] || (byHotel[e.hotelId] = { materials:0, labor:0, overhead:0, total:0, usd:0, usdOk:true, tickets:{} });
       if(e.cat==="labor") b.labor += e.kzt; else b.materials += e.kzt;
@@ -6666,7 +6678,7 @@
     // Накладные, для которых в месяце нет прямых расходов, объектам не достаются —
     // показываем отдельной строкой, чтобы «Итого» сошлось с реальными накладными года.
     var ovUnalloc = 0;
-    Object.keys(ovByMonth).forEach(function(k){ if(k.slice(0,4)===year && !(rates[k]>0)) ovUnalloc += ovByMonth[k]; });
+    Object.keys(ovByMonth).forEach(function(k){ if(inPeriod(k) && !(rates[k]>0)) ovUnalloc += ovByMonth[k]; });
     return { year: year, rows: rows, months: months, total: tot, usdState: usdState, usdFallback: usdFallback, withOv: withOv, ovUnalloc: ovUnalloc };
   }
   function yearReportToCsv(rep){
@@ -6674,7 +6686,7 @@
     function q(v){ var s = String(v==null?"":v); return /[;"\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s; }
     function line(a){ out.push(a.map(q).join(";")); }
     function n(v){ return Math.round(Number(v)||0); }
-    line(["Отчёт за "+rep.year+" год по объектам"]);
+    line([rep.year==="all" ? "Отчёт за весь период по объектам" : "Отчёт за "+rep.year+" год по объектам"]);
     line(["Объект","Материалы, ₸","Работа, ₸"].concat(rep.withOv?["Накладные, ₸"]:[]).concat(["Итого, ₸","Итого, $"]));
     rep.rows.forEach(function(r){ line([r.hotel.name,n(r.materials),n(r.labor)].concat(rep.withOv?[n(r.overhead)]:[]).concat([n(rep.withOv?r.total:r.total-r.overhead), r.usdOk?n(r.usd):"нет курса"])); });
     var t = rep.total; line(["ИТОГО",n(t.materials),n(t.labor)].concat(rep.withOv?[n(t.overhead)]:[]).concat([n(t.total),rep.usdState==="ok"?n(t.usd):"нет курса"]));
@@ -6683,21 +6695,23 @@
     return "﻿" + out.join("\r\n");
   }
   function downloadYearReportCsv(){
-    var year = state.reportsYear || String(new Date().getFullYear());
+    var year = state.reportsMode==="all" ? "all" : (state.reportsYear || String(new Date().getFullYear()));
     var vatMode = state.reportsVat==="gross" ? "gross" : "net";
     var blob = new Blob([yearReportToCsv(buildYearReport(year, vatMode))], {type:"text/csv;charset=utf-8"});
     var url = URL.createObjectURL(blob); var a = document.createElement("a");
-    a.href = url; a.download = "otchet-za-god-"+year+(vatMode==="gross"?"-s-nds":"-bez-nds")+".csv";
+    a.href = url; a.download = (year==="all" ? "otchet-za-vse-vremya" : "otchet-za-god-"+year)+(vatMode==="gross"?"-s-nds":"-bez-nds")+".csv";
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
   }
   function reportModeSwitchHtml(mode){
-    return '<button class="btn btn-sm '+(mode==="month"?"btn-primary":"")+'" data-action="reports-mode" data-value="month">За месяц</button> <button class="btn btn-sm '+(mode==="year"?"btn-primary":"")+'" data-action="reports-mode" data-value="year" data-report="mode-year">За год</button>';
+    return '<button class="btn btn-sm '+(mode==="month"?"btn-primary":"")+'" data-action="reports-mode" data-value="month">За месяц</button> <button class="btn btn-sm '+(mode==="year"?"btn-primary":"")+'" data-action="reports-mode" data-value="year" data-report="mode-year">За год</button> <button class="btn btn-sm '+(mode==="all"?"btn-primary":"")+'" data-action="reports-mode" data-value="all" data-report="mode-all">За весь период</button>';
   }
   function viewReportsYear(){
-    var year = state.reportsYear || String(new Date().getFullYear());
+    var isAll = state.reportsMode==="all";
+    var year = isAll ? "all" : (state.reportsYear || String(new Date().getFullYear()));
     var vatMode = state.reportsVat==="gross" ? "gross" : "net";
     var rep = buildYearReport(year, vatMode);
+    var periodWord = isAll ? "весь период" : (year+" год");
     function fmt(n){ return nfmt(Number(n)||0, {maximumFractionDigits:0}); }
     var showOv = rep.withOv;
     var vatLabel = vatMode==="gross" ? "с НДС" : "без НДС";
@@ -6706,21 +6720,21 @@
       ${financeTabs('reports')}
       <div class="row-gap">
         <div class="card card-pad">
-          <div class="section-title">Отчёт за год по объектам ${infoTip("Расходы на каждый объект за календарный год: оплаченные счета (по дате оплаты) и наличные расходы, плюс накладные процентом месяца. Доллары: сумма каждого месяца делится на курс USD Нацбанка РК на 1-е число этого месяца, затем месяцы складываются. «Без НДС» / «с НДС» — как в месячном отчёте.")}</div>
+          <div class="section-title">Отчёт ${isAll?"за весь период":"за год"} по объектам ${infoTip("Расходы на каждый объект "+(isAll?"за всё время, где есть расходы":"за календарный год")+": оплаченные счета (по дате оплаты) и наличные расходы, плюс накладные процентом месяца. Доллары: сумма каждого месяца делится на курс USD Нацбанка РК на 1-е число этого месяца, затем месяцы складываются. «Без НДС» / «с НДС» — как в месячном отчёте.")}</div>
           <div class="report-period-row">
-            ${reportModeSwitchHtml("year")}
+            ${reportModeSwitchHtml(isAll?"all":"year")}
             <span style="flex:1;"></span>
-            <button class="btn btn-sm" data-action="reports-year" data-value="${Number(year)-1}">← ${Number(year)-1}</button>
+            ${isAll ? "" : h`<button class="btn btn-sm" data-action="reports-year" data-value="${Number(year)-1}">← ${Number(year)-1}</button>
             <span style="font-weight:600;" data-report="year-label">${escapeHtml(year)}</span>
-            <button class="btn btn-sm" data-action="reports-year" data-value="${Number(year)+1}">${Number(year)+1} →</button>
+            <button class="btn btn-sm" data-action="reports-year" data-value="${Number(year)+1}">${Number(year)+1} →</button>`}
             <button class="btn btn-sm btn-ghost" data-action="reports-year-export">⬇ CSV</button>
             <button class="btn btn-sm ${vatMode==='net'?'btn-primary':''}" data-action="reports-vat" data-value="net">без НДС</button>
             <button class="btn btn-sm ${vatMode==='gross'?'btn-primary':''}" data-action="reports-vat" data-value="gross">с НДС</button>
           </div>
         </div>
         <div class="grid-kpi">
-          <div class="card kpi"><div class="kpi-label">За ${escapeHtml(year)} год, ₸</div><div class="kpi-value accent" data-kpi="year-kzt">${fmt(rep.total.total)}</div><div class="kpi-sub">${vatLabel}${showOv?', с накладными':''}</div></div>
-          <div class="card kpi"><div class="kpi-label">За ${escapeHtml(year)} год, $</div><div class="kpi-value" data-kpi="year-usd">${rep.usdState==="ok" ? fmt(rep.total.usd) : '…'}</div><div class="kpi-sub">${usdNote || 'по курсу НБ РК на 1-е число месяцев'}</div></div>
+          <div class="card kpi"><div class="kpi-label">За ${escapeHtml(periodWord)}, ₸</div><div class="kpi-value accent" data-kpi="year-kzt">${fmt(rep.total.total)}</div><div class="kpi-sub">${vatLabel}${showOv?', с накладными':''}</div></div>
+          <div class="card kpi"><div class="kpi-label">За ${escapeHtml(periodWord)}, $</div><div class="kpi-value" data-kpi="year-usd">${rep.usdState==="ok" ? fmt(rep.total.usd) : '…'}</div><div class="kpi-sub">${usdNote || 'по курсу НБ РК на 1-е число месяцев'}</div></div>
         </div>
         <div class="card card-pad">
           <div class="section-title">По объектам</div>
@@ -6743,7 +6757,7 @@
       </div>`;
   }
   function viewReports(){
-    if(state.reportsMode==='year') return viewReportsYear();
+    if(state.reportsMode==='year' || state.reportsMode==='all') return viewReportsYear();
     var monthKey = state.reportsMonth || new Date().toISOString().slice(0,7);
     var vatMode = state.reportsVat==="gross" ? "gross" : "net";
     var report = buildFinanceReport(monthKey, vatMode);
@@ -9768,7 +9782,7 @@
       if(action==="report-period-preset"){ state.reportPeriodDays = Number(actionEl.getAttribute("data-value")) || 7; render(); return; }
       if(action==="reports-month"){ state.reportsMonth = actionEl.getAttribute("data-value"); render(); return; }
       if(action==="reports-export"){ downloadReportCsv(); return; }
-      if(action==="reports-mode"){ state.reportsMode = actionEl.getAttribute("data-value")==="year" ? "year" : "month"; render(); return; }
+      if(action==="reports-mode"){ var rmv = actionEl.getAttribute("data-value"); state.reportsMode = rmv==="year" ? "year" : (rmv==="all" ? "all" : "month"); render(); return; }
       if(action==="reports-year"){ state.reportsYear = String(Number(actionEl.getAttribute("data-value"))||new Date().getFullYear()); render(); return; }
       if(action==="reports-year-export"){ downloadYearReportCsv(); return; }
       if(action==="reports-vat"){ state.reportsVat = actionEl.getAttribute("data-value")==="gross" ? "gross" : "net"; render(); return; }
