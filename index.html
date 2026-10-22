@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Tickit — диспетчерская сервиса</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 120 120%27%3E%3Crect width=%27120%27 height=%27120%27 rx=%2728%27 fill=%27%230E7C90%27/%3E%3Cpath d=%27M30 62L50 82L92 38%27 fill=%27none%27 stroke=%27white%27 stroke-width=%2712%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27/%3E%3Ccircle cx=%2730%27 cy=%2762%27 r=%2711%27 fill=%27white%27/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 120 120%27%3E%3Crect width=%27120%27 height=%27120%27 rx=%2728%27 fill=%27%2316232E%27/%3E%3Ccircle cx=%2760%27 cy=%2762%27 r=%2738%27 fill=%27none%27 stroke=%27white%27 stroke-width=%2712%27 stroke-linecap=%27round%27 pathLength=%27100%27 stroke-dasharray=%2776 24%27/%3E%3Cpath d=%27M38 64 L55 81 L98 30%27 fill=%27none%27 stroke=%27%233FB5C9%27 stroke-width=%2712%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27/%3E%3C/svg%3E">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
@@ -691,9 +691,8 @@
   /* 0.4.43: маленький логотип в шапке */
   .brand{ display:flex; align-items:center; gap:10px; }
   .brand-logo{ width:30px; height:30px; flex:none; }
-  .brand-logo .lg-sq{ fill:var(--accent); }
-  .brand-logo .lg-tick{ fill:none; stroke:var(--accent-ink); stroke-width:12; stroke-linecap:round; stroke-linejoin:round; }
-  .brand-logo .lg-dot{ fill:var(--accent-ink); }
+  .brand-logo .lg-ring{ fill:none; stroke:var(--ink); stroke-width:12; stroke-linecap:round; stroke-dasharray:76 24; }
+  .brand-logo .lg-tick{ fill:none; stroke:var(--accent); stroke-width:12; stroke-linecap:round; stroke-linejoin:round; }
   /* 0.4.44: шапка «Tickit» (вариант B) */
   .brand{ gap:9px; padding-left:16px; padding-right:12px; }
   .brand .brand-logo{ width:28px; height:28px; }
@@ -2582,7 +2581,7 @@
       return Promise.all([worker(),worker(),worker(),worker(),worker()]);
     }).then(function(){ return out; });
   }
-  var APP_VERSION_LABEL = "0.4.46";
+  var APP_VERSION_LABEL = "0.4.48";
   /* ============================== РЕЗЕРВНАЯ КОПИЯ ==============================
      0.4.25 (по просьбе Антона): на плане Free у Supabase нет автоматического
      восстановления на любой момент, а всё (заявки, счета, накладные, наличные)
@@ -4751,7 +4750,7 @@
     var app = document.getElementById("app");
     if(state.authView==="sent"){
       morphInto(app, h`<div class="auth-wrap"><div class="card auth-card">
-        <div class="auth-logo"><svg class="brand-logo" viewBox="0 0 120 120" aria-hidden="true"><rect class="lg-sq" width="120" height="120" rx="28"/><path class="lg-tick" d="M30 62 L50 82 L92 38"/><circle class="lg-dot" cx="30" cy="62" r="11"/></svg>Tickit</div>
+        <div class="auth-logo"><svg class="brand-logo" viewBox="0 0 120 120" aria-hidden="true"><circle class="lg-ring" cx="60" cy="62" r="38" pathLength="100"/><path class="lg-tick" d="M38 64 L55 81 L98 30"/></svg>Tickit</div>
         <div class="auth-sub">Служба сервиса</div>
         <div class="auth-ok"><b>Проверьте почту</b><br>Мы отправили ссылку для входа на ${escapeHtml(state.authEmail)}. Откройте её на этом устройстве.</div>
         <button class="btn btn-block" style="margin-top:14px;" id="auth-resend">Отправить ещё раз</button>
@@ -4765,7 +4764,7 @@
       return;
     }
     morphInto(app, h`<div class="auth-wrap"><div class="card auth-card">
-      <div class="auth-logo"><svg class="brand-logo" viewBox="0 0 120 120" aria-hidden="true"><rect class="lg-sq" width="120" height="120" rx="28"/><path class="lg-tick" d="M30 62 L50 82 L92 38"/><circle class="lg-dot" cx="30" cy="62" r="11"/></svg>Tickit</div>
+      <div class="auth-logo"><svg class="brand-logo" viewBox="0 0 120 120" aria-hidden="true"><circle class="lg-ring" cx="60" cy="62" r="38" pathLength="100"/><path class="lg-tick" d="M38 64 L55 81 L98 30"/></svg>Tickit</div>
       <div class="auth-sub">Вход по рабочей почте — без пароля</div>
       ${state.authError ? h`<div class="auth-err">${escapeHtml(state.authError)}</div>` : ""}
       <form id="auth-form">
@@ -4931,7 +4930,7 @@
         ["Время подписания", fmtDate(r.decided_at)+" (Астана)"],
         ["Соглашение о подписи", consent ? ("версия "+consent.agreement_version+", принято "+fmtDate(consent.accepted_at)+", отпечаток текста "+String(consent.agreement_hash||"").slice(0,16)+"…") : "—"]
       ];
-      var html = '<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Протокол подписания акта</title><style>body{font-family:Arial,Helvetica,sans-serif;max-width:720px;margin:32px auto;padding:0 16px;color:#16232E;} h1{font-size:20px;} table{border-collapse:collapse;width:100%;margin-top:16px;} td{border:1px solid #bbb;padding:8px 10px;font-size:14px;vertical-align:top;} td:first-child{width:36%;background:#f3f6f8;font-weight:600;} .st{margin-top:18px;font-size:13px;color:#444;line-height:1.5;word-break:break-all;} @media print{.np{display:none}}</style></head><body><h1>Протокол подписания акта</h1><div>Статус: <b>'+(r.status==="signed"?"подписан":escapeHtml(r.status))+'</b></div><table>'+rows.map(function(x){ return '<tr><td>'+escapeHtml(x[0])+'</td><td>'+escapeHtml(x[1])+'</td></tr>'; }).join("")+'</table><div class="st">Акт подписан простой электронной подписью — нажатием кнопки в Telegram с аккаунта, привязанного к указанному номеру телефона, на основании соглашения об использовании электронной подписи, принятого подписантом в боте. Отпечаток SHA-256 однозначно определяет подписанные файлы.</div><p class="np"><button onclick="window.print()">Печать / сохранить в PDF</button></p></body></html>';
+      var html = '<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Протокол подписания акта</title><style>body{font-family:Arial,Helvetica,sans-serif;max-width:720px;margin:32px auto;padding:0 16px;color:#16232E;} h1{font-size:20px;} table{border-collapse:collapse;width:100%;margin-top:16px;} td{border:1px solid #bbb;padding:8px 10px;font-size:14px;vertical-align:top;} td:first-child{width:36%;background:#f3f6f8;font-weight:600;} .st{margin-top:18px;font-size:13px;color:#444;line-height:1.5;word-break:break-all;} @media print{.np{display:none}}</style></head><body><h1>Протокол подписания акта</h1><div>Статус: <b>'+(r.status==="signed"?"подписан":escapeHtml(r.status))+'</b></div><table>'+rows.map(function(x){ return '<tr><td>'+escapeHtml(x[0])+'</td><td>'+escapeHtml(x[1])+'</td></tr>'; }).join("")+'</table><div class="st">Акт подписан простой электронной подписью — нажатием кнопки в Telegram с аккаунта, подключённого подписантом при активации профиля (ФИО и номер телефона указаны им самим), на основании соглашения об использовании электронной подписи, принятого подписантом в боте. Отпечаток SHA-256 однозначно определяет подписанные файлы.</div><p class="np"><button onclick="window.print()">Печать / сохранить в PDF</button></p></body></html>';
       w.document.open(); w.document.write(html); w.document.close();
     };
     if(r.consent_id){ sb.from("tg_consents").select("*").eq("id", r.consent_id).maybeSingle().then(function(res){ write(res && res.data); }, function(){ write(null); }); }
@@ -4946,10 +4945,10 @@
     if(link){
       var phone = String(x.client_contact_phone||"").replace(/\D/g,"");
       var wa = "https://wa.me/"+phone+"?text="+encodeURIComponent("Здравствуйте! Чтобы подписывать акты по объекту «"+x.name+"» в Telegram, откройте ссылку и нажмите «Старт»: "+link.url);
-      linkHtml = h`<div class="tg-link" data-tg-link="${x.id}"><input type="text" readonly value="${escapeHtml(link.url)}" onfocus="this.select()"><div class="actions-row"><button type="button" class="btn btn-sm" data-action="hotel-tg-copy" data-id="${x.id}">Копировать</button><a class="btn btn-sm" href="${escapeHtml(wa)}" target="_blank" rel="noopener">Отправить в WhatsApp</a><button type="button" class="btn btn-sm btn-ghost" data-action="hotel-tg-close">Закрыть</button></div><div class="helptext">Ссылка действует 7 дней. Управляющий открывает её, принимает соглашение, вводит ФИО и отправляет свой номер кнопкой.</div></div>`;
+      linkHtml = h`<div class="tg-link" data-tg-link="${x.id}"><input type="text" readonly value="${escapeHtml(link.url)}" onfocus="this.select()"><div class="actions-row"><button type="button" class="btn btn-sm" data-action="hotel-tg-copy" data-id="${x.id}">Копировать</button><a class="btn btn-sm" href="${escapeHtml(wa)}" target="_blank" rel="noopener">Отправить в WhatsApp</a><button type="button" class="btn btn-sm btn-ghost" data-action="hotel-tg-close">Закрыть</button></div><div class="helptext">Ссылка действует 7 дней. Управляющий открывает её, принимает соглашение, вводит ФИО и пишет свой номер телефона.</div></div>`;
     }
     if(x.client_tg_chat_id){
-      return h`<div class="tg-state" data-tg-state="on"><span class="pill pill-ok" title="Подключён ${escapeHtml(fmtDate(x.client_tg_connected_at))}">Telegram ✓</span> <span style="font-size:11px;">${escapeHtml(x.client_tg_name||"")}</span>${x.client_tg_phone_match===false?h`<div class="helptext" style="color:var(--warn);">⚠ Номер в Telegram (${escapeHtml(x.client_tg_phone||"")}) не совпадает с номером в карточке.</div>`:""}<div class="actions-row" style="margin-top:4px;"><button type="button" class="btn btn-sm btn-ghost" data-action="hotel-tg-link" data-id="${x.id}">Новая ссылка</button><button type="button" class="btn btn-sm btn-ghost btn-danger" data-action="hotel-tg-disconnect" data-id="${x.id}">Отключить</button></div>${linkHtml}</div>`;
+      return h`<div class="tg-state" data-tg-state="on"><span class="pill pill-ok" title="Подключён ${escapeHtml(fmtDate(x.client_tg_connected_at))}">Telegram ✓</span> <span style="font-size:11px;">${escapeHtml(x.client_tg_name||"")}</span>${x.client_tg_phone_match===false?h`<div class="helptext" style="color:var(--warn);">⚠ Указанный им номер (${escapeHtml(x.client_tg_phone||"")}) не совпадает с номером в карточке — проверьте, что подключился нужный человек.</div>`:""}<div class="actions-row" style="margin-top:4px;"><button type="button" class="btn btn-sm btn-ghost" data-action="hotel-tg-link" data-id="${x.id}">Новая ссылка</button><button type="button" class="btn btn-sm btn-ghost btn-danger" data-action="hotel-tg-disconnect" data-id="${x.id}">Отключить</button></div>${linkHtml}</div>`;
     }
     return h`<div class="tg-state" data-tg-state="off"><button type="button" class="btn btn-sm" data-action="hotel-tg-link" data-id="${x.id}">Подключить Telegram</button><div class="helptext" style="margin-top:2px;">для подписи актов</div>${linkHtml}</div>`;
   }
@@ -5556,6 +5555,23 @@
   // копия. `primary` — всегда САМАЯ РАННЯЯ загруженная копия вообще (без
   // учёта фильтра) — только на ней редактируются Сумма/Валюта/НДС/Налог, это
   // и есть данные всего счёта как документа.
+  // 0.4.48: «Учтено в затратах» группы с учётом фильтра. Если часть заявок
+  // общего счёта скрыта фильтром (например, по отелю), показываем только долю
+  // видимых заявок, а не сумму всего счёта.
+  function groupAccountedKZT(group){
+    var full = invoiceAccountedKZT(group.primary);
+    if(!group.hiddenCount) return full;
+    if(full.state!=="ok" || full.value==null) return full;
+    var seen = {}, pctSum = 0, known = false;
+    (group.members||[]).forEach(function(iv){
+      var tid = iv.ticket_id;
+      var pct = invoiceAllocPercent(iv);
+      if(pct==null || seen[tid]) return;
+      seen[tid] = true; known = true; pctSum += pct;
+    });
+    if(!known) return { value:null, state:"missing", shared:true, percent:null };
+    return Object.assign({}, full, { value: full.value*(pctSum/100), full: full.value, percent: pctSum, shared:true });
+  }
   function buildInvoiceGroups(filteredInvoices){
     var seen = {}, groups = [];
     filteredInvoices.forEach(function(iv){
@@ -5628,6 +5644,7 @@
           return r.tk ? h`<a href="#" data-open-ticket="${r.tk.id}" title="Открыть заявку">${r.tk.external_ref?escapeHtml(r.tk.external_ref):'открыть'}</a>` : '—';
         }).join(", ");
     var accKZT = invoiceAccountedKZT(primary);
+    var accShown = groupAccountedKZT(group);
     var groupIds = members.map(function(r){return r.id;}).join(",");
     var allSubmitted = members.every(function(r){return r.submitted_for_payment;});
     var allPaid = members.every(function(r){return r.paid;});
@@ -5661,7 +5678,7 @@
       <td>${registrySelectCell(primary, "currency", editableRegistry)}</td>
       <td>${registrySelectCell(primary, "vat", editableRegistry)}</td>
       <td>${registrySelectCell(primary, "tax", editableRegistry)}</td>
-      <td class="mono" style="text-align:right;" title="${accKZT.currency ? 'Сумма без НДС и с доп. налогом, переведена в KZT по курсу Нацбанка РК'+(primary.paid?' на день оплаты':' на сегодня — пересчитается на день оплаты') : 'Сумма без НДС, скорректированная на доп. налог по способу оплаты'}">${accountedKZTLabel(accKZT)}</td>
+      <td class="mono" style="text-align:right;" title="${accShown.currency ? 'Сумма без НДС и с доп. налогом, переведена в KZT по курсу Нацбанка РК'+(primary.paid?' на день оплаты':' на сегодня — пересчитается на день оплаты') : 'Сумма без НДС, скорректированная на доп. налог по способу оплаты'}">${accountedKZTLabel(accShown)}</td>
       <td style="text-align:center;"><input type="checkbox" data-action="invoice-submitted-toggle" data-id="${groupIds}" data-val="${allSubmitted?'0':'1'}" ${allSubmitted?'checked':''} ${editableRegistry?'':'disabled'} title="${editableRegistry?(isGroup?'Отметить, что счёт передан в бухгалтерию/банк на оплату (для всех заявок сразу)':'Отметить, что счёт передан в бухгалтерию/банк на оплату'):'Редактировать может только Администратор, Руководитель или Финансист'}"></td>
       <td style="text-align:center;white-space:nowrap;"><input type="checkbox" data-action="invoice-paid-toggle" data-id="${groupIds}" data-val="${allPaid?'0':'1'}" ${allPaid?'checked':''} ${editableRegistry?'':'disabled'} title="${editableRegistry?(isGroup?'Отметить оплату счёта (для всех заявок сразу)':'Отметить оплату счёта'):'Редактировать может только Администратор, Руководитель или Финансист'}">${(allPaid && editableRegistry) ? h` <a href="#" data-action="invoice-paid-month-edit" data-id="${groupIds}" style="font-size:11px;" title="Месяц оплаты: ${paidMonthKey(primary)?monthLabelRu(paidMonthKey(primary)):'не определён'}. Нажмите, чтобы указать другой месяц — например, если счёт оплатили раньше, а отметили в системе только сейчас.">✎</a>` : ""}</td>
     </tr>${isGroup && expanded ? registryGroupExpandRows(group, accKZT, editableRegistry) : ""}`;
@@ -5767,7 +5784,7 @@
     var label = key==="unknown" ? "Дата оплаты не указана" : monthLabelRu(key);
     var sum = 0, pendingCount = 0, missingCount = 0;
     items.forEach(function(group){
-      var acc = invoiceAccountedKZT(group.primary);
+      var acc = groupAccountedKZT(group);
       if(acc.state==="pending"){ pendingCount++; return; }
       if(acc.value==null){ missingCount++; return; }
       sum += acc.value;
@@ -5872,7 +5889,7 @@
     // (см. ensureNbkRate/render()).
     var sumPaid = 0, sumDue = 0, missingAmountCount = 0, pendingRateCount = 0;
     groups.forEach(function(group){
-      var acc = invoiceAccountedKZT(group.primary);
+      var acc = groupAccountedKZT(group);
       if(acc.state==="pending"){ pendingRateCount++; return; }
       if(acc.value==null){ missingAmountCount++; return; }
       if(group.primary.paid) sumPaid += acc.value; else sumDue += acc.value;
@@ -9564,7 +9581,7 @@
     // в базе) — ему это ограничение применяться не должно (см. navAllowed()).
     if(!isOwner() && state.me.role==="pending"){
       morphInto(document.getElementById("app"), h`<div class="auth-wrap"><div class="card auth-card">
-        <div class="auth-logo"><svg class="brand-logo" viewBox="0 0 120 120" aria-hidden="true"><rect class="lg-sq" width="120" height="120" rx="28"/><path class="lg-tick" d="M30 62 L50 82 L92 38"/><circle class="lg-dot" cx="30" cy="62" r="11"/></svg>Tickit</div>
+        <div class="auth-logo"><svg class="brand-logo" viewBox="0 0 120 120" aria-hidden="true"><circle class="lg-ring" cx="60" cy="62" r="38" pathLength="100"/><path class="lg-tick" d="M38 64 L55 81 L98 30"/></svg>Tickit</div>
         <div class="auth-sub">Служба сервиса</div>
         <div class="auth-maintenance"><b>Ожидает назначения роли</b><br>Администратор ещё не открыл вам доступ — обратитесь к нему, либо загляните чуть позже.</div>
         <button class="btn btn-block" style="margin-top:14px;" data-action="sign-out">Выйти</button>
@@ -9577,7 +9594,7 @@
     // только Администратор поставит галочку "Активен" в «Команде».
     if(state.me.role==="customer" && state.me.active===false){
       morphInto(document.getElementById("app"), h`<div class="auth-wrap"><div class="card auth-card">
-        <div class="auth-logo"><svg class="brand-logo" viewBox="0 0 120 120" aria-hidden="true"><rect class="lg-sq" width="120" height="120" rx="28"/><path class="lg-tick" d="M30 62 L50 82 L92 38"/><circle class="lg-dot" cx="30" cy="62" r="11"/></svg>Tickit</div>
+        <div class="auth-logo"><svg class="brand-logo" viewBox="0 0 120 120" aria-hidden="true"><circle class="lg-ring" cx="60" cy="62" r="38" pathLength="100"/><path class="lg-tick" d="M38 64 L55 81 L98 30"/></svg>Tickit</div>
         <div class="auth-sub">Служба сервиса</div>
         <div class="auth-maintenance"><b>Ведутся работы на сайте</b><br>Доступ временно закрыт — загляните чуть позже.</div>
         <button class="btn btn-block" style="margin-top:14px;" data-action="sign-out">Выйти</button>
@@ -9644,7 +9661,7 @@
     morphInto(app, h`
       <div class="sidebar-scrim ${state.mobileNavOpen?"open":""}" data-action="close-sidebar"></div>
       <div class="sidebar ${state.mobileNavOpen?"open":""}">
-        <div class="brand"><svg class="brand-logo" viewBox="0 0 120 120" aria-hidden="true"><rect class="lg-sq" width="120" height="120" rx="28"/><path class="lg-tick" d="M30 62 L50 82 L92 38"/><circle class="lg-dot" cx="30" cy="62" r="11"/></svg><div><div class="brand-name">Tickit</div><div class="brand-sub">Диспетчерская сервиса</div></div></div>
+        <div class="brand"><svg class="brand-logo" viewBox="0 0 120 120" aria-hidden="true"><circle class="lg-ring" cx="60" cy="62" r="38" pathLength="100"/><path class="lg-tick" d="M38 64 L55 81 L98 30"/></svg><div><div class="brand-name">Tickit</div><div class="brand-sub">Диспетчерская сервиса</div></div></div>
         <nav class="nav">${navItems.map(function(x){ return navItem(x[0], x[1], x[2]); }).join("")}</nav>
         <div class="nav-footer">
           <p>Заявки поступают через c-lector.ru — здесь только внутренняя диспетчеризация и наряд-задания. Срок реагирования по зонам — в разделе «Отели».</p>
