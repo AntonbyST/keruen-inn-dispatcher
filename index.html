@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Tickit — диспетчерская сервиса</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 120 120%27%3E%3Crect width=%27120%27 height=%27120%27 rx=%2728%27 fill=%27%2316232E%27/%3E%3Ccircle cx=%2760%27 cy=%2762%27 r=%2738%27 fill=%27none%27 stroke=%27white%27 stroke-width=%2712%27 stroke-linecap=%27round%27 pathLength=%27100%27 stroke-dasharray=%2776 24%27/%3E%3Cpath d=%27M38 64 L55 81 L98 30%27 fill=%27none%27 stroke=%27%233FB5C9%27 stroke-width=%2712%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 120 120%27%3E%3Crect width=%27120%27 height=%27120%27 rx=%2728%27 fill=%27%23111%27/%3E%3Cg transform=%27translate(60 60) scale(.30) translate(-841 -584)%27%3E%3Cpath fill=%27white%27 d=%27M977 585 A146 146 0 1 1 831 439 L831 503 A82 82 0 1 0 913 585 Z%27/%3E%3Cpath fill=%27%235ECFCF%27 d=%27M797 537 L831 570 L964 437 L997 470 L831 637 L763 571 Z%27/%3E%3C/g%3E%3C/svg%3E">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
@@ -691,8 +691,8 @@
   /* 0.4.43: маленький логотип в шапке */
   .brand{ display:flex; align-items:center; gap:10px; }
   .brand-logo{ width:30px; height:30px; flex:none; }
-  .brand-logo .lg-ring{ fill:none; stroke:var(--ink); stroke-width:12; stroke-linecap:round; stroke-dasharray:76 24; }
-  .brand-logo .lg-tick{ fill:none; stroke:var(--accent); stroke-width:12; stroke-linecap:round; stroke-linejoin:round; }
+  .brand-logo .lg-ring{ fill:var(--ink); }
+  .brand-logo .lg-tick{ fill:var(--accent); }
   /* 0.4.44: шапка «Tickit» (вариант B) */
   .brand{ gap:9px; padding-left:16px; padding-right:12px; }
   .brand .brand-logo{ width:28px; height:28px; }
@@ -4750,7 +4750,7 @@
     var app = document.getElementById("app");
     if(state.authView==="sent"){
       morphInto(app, h`<div class="auth-wrap"><div class="card auth-card">
-        <div class="auth-logo"><svg class="brand-logo" viewBox="0 0 120 120" aria-hidden="true"><circle class="lg-ring" cx="60" cy="62" r="38" pathLength="100"/><path class="lg-tick" d="M38 64 L55 81 L98 30"/></svg>Tickit</div>
+        <div class="auth-logo"><svg class="brand-logo" viewBox="683 426 316 316" aria-hidden="true"><path class="lg-ring" d="M977 585 A146 146 0 1 1 831 439 L831 503 A82 82 0 1 0 913 585 Z"/><path class="lg-tick" d="M797 537 L831 570 L964 437 L997 470 L831 637 L763 571 Z"/></svg>Tickit</div>
         <div class="auth-sub">Служба сервиса</div>
         <div class="auth-ok"><b>Проверьте почту</b><br>Мы отправили ссылку для входа на ${escapeHtml(state.authEmail)}. Откройте её на этом устройстве.</div>
         <button class="btn btn-block" style="margin-top:14px;" id="auth-resend">Отправить ещё раз</button>
@@ -4764,7 +4764,7 @@
       return;
     }
     morphInto(app, h`<div class="auth-wrap"><div class="card auth-card">
-      <div class="auth-logo"><svg class="brand-logo" viewBox="0 0 120 120" aria-hidden="true"><circle class="lg-ring" cx="60" cy="62" r="38" pathLength="100"/><path class="lg-tick" d="M38 64 L55 81 L98 30"/></svg>Tickit</div>
+      <div class="auth-logo"><svg class="brand-logo" viewBox="683 426 316 316" aria-hidden="true"><path class="lg-ring" d="M977 585 A146 146 0 1 1 831 439 L831 503 A82 82 0 1 0 913 585 Z"/><path class="lg-tick" d="M797 537 L831 570 L964 437 L997 470 L831 637 L763 571 Z"/></svg>Tickit</div>
       <div class="auth-sub">Вход по рабочей почте — без пароля</div>
       ${state.authError ? h`<div class="auth-err">${escapeHtml(state.authError)}</div>` : ""}
       <form id="auth-form">
@@ -9581,7 +9581,7 @@
     // в базе) — ему это ограничение применяться не должно (см. navAllowed()).
     if(!isOwner() && state.me.role==="pending"){
       morphInto(document.getElementById("app"), h`<div class="auth-wrap"><div class="card auth-card">
-        <div class="auth-logo"><svg class="brand-logo" viewBox="0 0 120 120" aria-hidden="true"><circle class="lg-ring" cx="60" cy="62" r="38" pathLength="100"/><path class="lg-tick" d="M38 64 L55 81 L98 30"/></svg>Tickit</div>
+        <div class="auth-logo"><svg class="brand-logo" viewBox="683 426 316 316" aria-hidden="true"><path class="lg-ring" d="M977 585 A146 146 0 1 1 831 439 L831 503 A82 82 0 1 0 913 585 Z"/><path class="lg-tick" d="M797 537 L831 570 L964 437 L997 470 L831 637 L763 571 Z"/></svg>Tickit</div>
         <div class="auth-sub">Служба сервиса</div>
         <div class="auth-maintenance"><b>Ожидает назначения роли</b><br>Администратор ещё не открыл вам доступ — обратитесь к нему, либо загляните чуть позже.</div>
         <button class="btn btn-block" style="margin-top:14px;" data-action="sign-out">Выйти</button>
@@ -9594,7 +9594,7 @@
     // только Администратор поставит галочку "Активен" в «Команде».
     if(state.me.role==="customer" && state.me.active===false){
       morphInto(document.getElementById("app"), h`<div class="auth-wrap"><div class="card auth-card">
-        <div class="auth-logo"><svg class="brand-logo" viewBox="0 0 120 120" aria-hidden="true"><circle class="lg-ring" cx="60" cy="62" r="38" pathLength="100"/><path class="lg-tick" d="M38 64 L55 81 L98 30"/></svg>Tickit</div>
+        <div class="auth-logo"><svg class="brand-logo" viewBox="683 426 316 316" aria-hidden="true"><path class="lg-ring" d="M977 585 A146 146 0 1 1 831 439 L831 503 A82 82 0 1 0 913 585 Z"/><path class="lg-tick" d="M797 537 L831 570 L964 437 L997 470 L831 637 L763 571 Z"/></svg>Tickit</div>
         <div class="auth-sub">Служба сервиса</div>
         <div class="auth-maintenance"><b>Ведутся работы на сайте</b><br>Доступ временно закрыт — загляните чуть позже.</div>
         <button class="btn btn-block" style="margin-top:14px;" data-action="sign-out">Выйти</button>
@@ -9661,7 +9661,7 @@
     morphInto(app, h`
       <div class="sidebar-scrim ${state.mobileNavOpen?"open":""}" data-action="close-sidebar"></div>
       <div class="sidebar ${state.mobileNavOpen?"open":""}">
-        <div class="brand"><svg class="brand-logo" viewBox="0 0 120 120" aria-hidden="true"><circle class="lg-ring" cx="60" cy="62" r="38" pathLength="100"/><path class="lg-tick" d="M38 64 L55 81 L98 30"/></svg><div><div class="brand-name">Tickit</div><div class="brand-sub">Диспетчерская сервиса</div></div></div>
+        <div class="brand"><svg class="brand-logo" viewBox="683 426 316 316" aria-hidden="true"><path class="lg-ring" d="M977 585 A146 146 0 1 1 831 439 L831 503 A82 82 0 1 0 913 585 Z"/><path class="lg-tick" d="M797 537 L831 570 L964 437 L997 470 L831 637 L763 571 Z"/></svg><div><div class="brand-name">Tickit</div><div class="brand-sub">Диспетчерская сервиса</div></div></div>
         <nav class="nav">${navItems.map(function(x){ return navItem(x[0], x[1], x[2]); }).join("")}</nav>
         <div class="nav-footer">
           <p>Заявки поступают через c-lector.ru — здесь только внутренняя диспетчеризация и наряд-задания. Срок реагирования по зонам — в разделе «Отели».</p>
