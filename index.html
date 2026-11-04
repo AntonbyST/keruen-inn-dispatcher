@@ -365,6 +365,13 @@
   .finance-tab{ padding:9px 16px; font-size:13.5px; font-weight:600; color:var(--ink-soft); border-bottom:2px solid transparent; margin-bottom:-1px; }
   .finance-tab.active{ color:var(--accent); border-bottom-color:var(--accent); }
   .finance-tab:hover{ color:var(--ink); }
+  .finance-tab-req{ color:var(--accent); background:var(--accent-soft); border-radius:8px 8px 0 0; }
+  .finance-tab-badge{ display:inline-block; min-width:18px; padding:0 6px; border-radius:20px; background:var(--accent); color:var(--accent-ink); font-size:11.5px; font-weight:700; text-align:center; line-height:18px; margin-left:4px; }
+  .req-block{ border:1px solid var(--accent-line); }
+  .req-head{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .req-total{ margin-left:auto; font-weight:700; }
+  .oh-chip.ok{ background:var(--ok-soft); border-color:var(--ok); color:var(--ok); }
+  .btn.oh-pay{ background:var(--accent-soft); border-color:var(--accent-line); color:var(--accent); }
   .cash-balance-row.negative td{ color:var(--crit); font-weight:600; }
 
   /* ---------- отчёт по СЕРВИСу на дашборде (0.2.6/0.2.7) ---------- */
@@ -937,6 +944,9 @@
     // самих ограничений на тестах, которые временно переключают роль именно на
     // аккаунте владельца (см. test_standalone.js).
     if(view==="team" && isOwner()) return true;
+    // 0.4.50: «Текущие запросы» — отдельного права нет: вкладка видна тем, кому открыт хотя бы один из
+    // разделов «Реестр платежей» / «Наличные расходы» / «Накладные расходы» (внутри — только их блоки).
+    if(view==="requests") return navAllowed("registry") || navAllowed("cashexpenses") || navAllowed("overhead");
     // 0.4.4: extra_views теперь ЕДИНСТВЕННЫЙ источник истины (раньше — добавка
     // сверх ROLE_NAV[role], с отдельным хардкодом для "activity"). Роль сама
     // по себе больше ничего не открывает напрямую — она лишь подставляет
@@ -2597,7 +2607,7 @@
       return Promise.all([worker(),worker(),worker(),worker(),worker()]);
     }).then(function(){ return out; });
   }
-  var APP_VERSION_LABEL = "0.4.49";
+  var APP_VERSION_LABEL = "0.4.50";
   /* ============================== РЕЗЕРВНАЯ КОПИЯ ==============================
      0.4.25 (по просьбе Антона): на плане Free у Supabase нет автоматического
      восстановления на любой момент, а всё (заявки, счета, накладные, наличные)
@@ -4318,10 +4328,12 @@
     // "overhead" теперь можно выдать/не выдать отдельной галочкой в «Правах»
     // (см. PERMISSION_VIEWS), роль может иметь доступ к «Финансам», но не к
     // этой конкретной вкладке.
-    var tabs = [["registry","Реестр платежей"], ["cashexpenses","Наличные расходы"], ["overhead","Накладные расходы"], ["reports","Отчёты"]]
+    var tabs = [["requests","Текущие запросы"], ["registry","Реестр платежей"], ["cashexpenses","Наличные расходы"], ["overhead","Накладные расходы"], ["reports","Отчёты"]]
       .filter(function(t){ return navAllowed(t[0]); });
     return h`<div class="finance-tabs">${tabs.map(function(t){
-      return h`<a href="#/${t[0]}" class="finance-tab ${active===t[0]?'active':''}">${t[1]}</a>`;
+      var badge = "";
+      if(t[0]==="requests"){ var pn = pendingRequestsCount(); badge = pn ? h` <span class="finance-tab-badge">${pn}</span>` : ""; }
+      return h`<a href="#/${t[0]}" class="finance-tab ${t[0]==='requests'?'finance-tab-req':''} ${active===t[0]?'active':''}">${t[1]}${badge}</a>`;
     }).join("")}</div>`;
   }
   // 0.2.17: тот же приём вкладок, что и у «Финансы», — теперь для «Заявок»,
@@ -8122,10 +8134,13 @@
                 ${e.note ? h`<div class="oh-note">${escapeHtml(e.note)}</div>` : ''}
               </div>
               <div class="oh-sum">${sumHtml}<small>${escapeHtml(subParts.join(' · '))}</small></div>
-              <div class="oh-chips">${e.currency?h`<span class="oh-chip accent">${escapeHtml(e.currency)}</span>`:''}${vatTxt?h`<span class="oh-chip">${vatTxt==='с НДС'?'С НДС':'Без НДС'}</span>`:''}${taxTxt?h`<span class="oh-chip">${escapeHtml(taxTxt)}</span>`:''}${incompleteChip}${(Array.isArray(e.files)?e.files:[]).map(function(f){ return h`<span class="oh-chip">📎 <a href="#" data-action="overhead-file-open" data-path="${escapeHtml(f.path)}" title="${escapeHtml(f.name||'')}">${escapeHtml(String(f.name||'файл'))}</a>${editable?h`<a href="#" data-action="overhead-file-delete" data-id="${e.id}" data-path="${escapeHtml(f.path)}" style="color:var(--crit);" title="Удалить файл">✕</a>`:''}</span>`; }).join("")}</div>
+              <div class="oh-chips">${e.paid ? h`<span class="oh-chip ok" title="${e.paid_at?'Оплачено '+fmtDateShort(String(e.paid_at).slice(0,10)):''}">✓ Оплачено</span>` : e.payment_requested ? h`<span class="oh-chip accent">Ждёт оплаты</span>` : ''}${e.currency?h`<span class="oh-chip accent">${escapeHtml(e.currency)}</span>`:''}${vatTxt?h`<span class="oh-chip">${vatTxt==='с НДС'?'С НДС':'Без НДС'}</span>`:''}${taxTxt?h`<span class="oh-chip">${escapeHtml(taxTxt)}</span>`:''}${incompleteChip}${(Array.isArray(e.files)?e.files:[]).map(function(f){ return h`<span class="oh-chip">📎 <a href="#" data-action="overhead-file-open" data-path="${escapeHtml(f.path)}" title="${escapeHtml(f.name||'')}">${escapeHtml(String(f.name||'файл'))}</a>${editable?h`<a href="#" data-action="overhead-file-delete" data-id="${e.id}" data-path="${escapeHtml(f.path)}" style="color:var(--crit);" title="Удалить файл">✕</a>`:''}</span>`; }).join("")}</div>
               ${editable ? h`<div class="oh-acts">
                 <button type="button" class="btn btn-ghost btn-sm" data-action="overhead-edit-open" data-id="${e.id}">Изменить</button>
                 <label class="btn btn-ghost btn-sm" style="cursor:pointer;margin:0;">＋ файл<input type="file" multiple data-overhead-file-upload="${e.id}" style="display:none;"></label>
+                ${e.paid ? h`<button type="button" class="btn btn-ghost btn-sm" data-action="overhead-paid-toggle" data-id="${e.id}" data-val="0" title="Снять отметку «оплачено» — запись вернётся в «Текущие запросы»">Снять оплату</button>`
+                  : e.payment_requested ? h`<button type="button" class="btn btn-ghost btn-sm" data-action="overhead-request-toggle" data-id="${e.id}" data-val="0" title="Убрать из «Текущих запросов»">Отозвать запрос</button>`
+                  : h`<button type="button" class="btn btn-sm oh-pay" data-action="overhead-request-toggle" data-id="${e.id}" data-val="1" title="Отправить платёж финансисту — он появится во вкладке «Текущие запросы»">В оплату</button>`}
                 <button type="button" class="btn btn-ghost btn-sm oh-del" data-action="overhead-expense-delete" data-id="${e.id}">Удалить</button>
               </div>` : '<div></div>'}
             </div>`;
@@ -8480,6 +8495,138 @@
           }).join("")}
         </tbody></table></div>
     </div>`;
+  }
+  /* ============================== ТЕКУЩИЕ ЗАПРОСЫ (0.4.50) ==============================
+     Одна страница для финансиста: всё, что ждёт оплаты/выдачи, из трёх разделов —
+     «Реестр платежей» (счета с галочкой «подано»), «Наличные расходы» (запросы на
+     наличные) и «Накладные расходы» (записи, отправленные кнопкой «В оплату»).
+     Галочка здесь вызывает те же действия, что и в самих разделах, поэтому отметка
+     сразу видна и там. */
+  function overheadReqStatus(e){ return e && e.paid ? "paid" : (e && e.payment_requested ? "requested" : ""); }
+  function pendingInvoiceGroups(){
+    var all = (state.invoices||[]).filter(function(iv){ return iv.in_registry; });
+    return buildInvoiceGroups(all).filter(function(g){
+      var ms = invoiceGroupMembers(g.primary);
+      return ms.some(function(x){ return x.submitted_for_payment; }) && !ms.every(function(x){ return x.paid; });
+    });
+  }
+  function pendingCashAdvances(){
+    return (state.cashAdvances||[]).filter(function(a){ return !a.confirmed; }).sort(function(a,b){ return (a.date||"").localeCompare(b.date||""); });
+  }
+  function pendingOverheadRequests(){
+    return (state.overheadExpenses||[]).filter(function(e){ return e.payment_requested && !e.paid; })
+      .sort(function(a,b){ return String(a.payment_requested_at||a.date||"").localeCompare(String(b.payment_requested_at||b.date||"")); });
+  }
+  function pendingRequestsCount(){
+    var n = 0;
+    if(navAllowed("registry")) n += pendingInvoiceGroups().length;
+    if(navAllowed("cashexpenses")) n += pendingCashAdvances().length;
+    if(navAllowed("overhead")) n += pendingOverheadRequests().length;
+    return n;
+  }
+  function setOverheadPayRequested(id, val){
+    if(!canEditRegistry()){ alert("Отправлять накладные расходы в оплату может только Администратор, Руководитель или Финансист."); return; }
+    var e = (state.overheadExpenses||[]).find(function(x){ return x.id===id; });
+    if(!e) return;
+    var patch = { payment_requested: !!val, payment_requested_at: val ? new Date().toISOString() : null };
+    if(val) { patch.paid = false; patch.paid_at = null; }
+    Object.assign(e, patch);
+    render();
+    sb.from("overhead_expenses").update(patch).eq("id", id).then(function(res){
+      if(res && res.error) alert("Не удалось сохранить: " + res.error.message);
+    });
+  }
+  function setOverheadPaid(id, val){
+    if(!canEditRegistry()){ alert("Отмечать оплату накладных расходов может только Администратор, Руководитель или Финансист."); return; }
+    var e = (state.overheadExpenses||[]).find(function(x){ return x.id===id; });
+    if(!e) return;
+    var patch = { paid: !!val, paid_at: val ? new Date().toISOString() : null };
+    if(val && !e.payment_requested){ patch.payment_requested = true; patch.payment_requested_at = new Date().toISOString(); }
+    Object.assign(e, patch);
+    render();
+    sb.from("overhead_expenses").update(patch).eq("id", id).then(function(res){
+      if(res && res.error) alert("Не удалось сохранить: " + res.error.message);
+    });
+  }
+  function viewRequests(){
+    var canReg = navAllowed("registry"), canCash = navAllowed("cashexpenses"), canOh = navAllowed("overhead");
+    var editReg = canEditRegistry(), editCash = canConfirmCashAdvance();
+    function sumLbl(n){ return nfmt(Number(n)||0, {minimumFractionDigits:2, maximumFractionDigits:2}) + " ₸"; }
+    function block(title, hint, count, total, bodyHtml, key){
+      return h`<div class="card card-pad req-block" data-req-block="${key}">
+        <div class="req-head"><div class="section-title" style="margin:0;">${title}</div>${count ? h`<span class="cash-req-count">${count}</span>` : ''}<span class="muted" style="font-size:12.5px;">${hint}</span>${count ? h`<span class="req-total mono">${total}</span>` : ''}</div>
+        ${count===0 ? h`<div class="muted" style="font-size:13px;margin-top:8px;">Нет запросов.</div>` : bodyHtml}
+      </div>`;
+    }
+    // --- реестр платежей ---
+    var invGroups = canReg ? pendingInvoiceGroups() : [];
+    var invTotal = 0, invMissing = 0;
+    invGroups.forEach(function(g){ var a = invoiceAccountedKZT(g.primary); if(a.value!=null) invTotal += a.value; else invMissing++; });
+    var invHtml = h`<div class="table-wrap"><table>
+      <thead><tr><th>№ заявки</th><th>Отель</th><th>Счёт</th><th class="num">Учтено в затратах</th><th>Подано</th><th style="text-align:center;">Оплачено</th></tr></thead>
+      <tbody>${invGroups.map(function(g){
+        var ms = invoiceGroupMembers(g.primary);
+        var seen = {}, refs = [], hotels = {};
+        ms.forEach(function(m){
+          var tk = (state.tickets||[]).find(function(x){ return x.id===m.ticket_id; });
+          if(!tk || seen[tk.id]) return; seen[tk.id] = true;
+          refs.push(tk.external_ref || tk.id);
+          var ht = hotelById(tk.hotel_id); if(ht) hotels[ht.id] = ht;
+        });
+        var hk = Object.keys(hotels);
+        var hotelTxt = hk.length===1 ? "№"+hotels[hk[0]].id+" "+hotels[hk[0]].name : hk.length>1 ? "Разные ("+hk.length+")" : "—";
+        var subm = ms.map(function(m){ return m.submitted_for_payment_at; }).filter(Boolean).sort()[0];
+        var ids = ms.map(function(m){ return m.id; }).join(",");
+        var acc = invoiceAccountedKZT(g.primary);
+        return h`<tr>
+          <td class="mono">${escapeHtml(refs.slice(0,6).join(", "))}${refs.length>6?' …':''}</td>
+          <td>${escapeHtml(hotelTxt)}</td>
+          <td><button class="btn btn-sm registry-file-btn" data-action="invoice-open" data-path="${escapeHtml(g.primary.file_path)}" title="${escapeHtml(g.primary.file_name||'')}">${escapeHtml((g.primary.file_name||'счёт').slice(0,28))}</button></td>
+          <td class="num mono">${accountedKZTLabel(acc)}</td>
+          <td class="muted">${subm ? fmtDateShort(String(subm).slice(0,10)) : '—'}</td>
+          <td style="text-align:center;"><input type="checkbox" data-action="invoice-paid-toggle" data-id="${ids}" data-val="1" ${editReg?'':'disabled'} title="${editReg?'Отметить оплату — отметка появится и в «Реестре платежей»':'Отмечать оплату может только Администратор, Руководитель или Финансист'}"></td>
+        </tr>`;
+      }).join("")}</tbody></table></div>`;
+    // --- наличные ---
+    var advs = canCash ? pendingCashAdvances() : [];
+    var advTotal = advs.reduce(function(s,a){ return s + (Number(a.amount)||0); }, 0);
+    var advHtml = h`<div class="table-wrap"><table>
+      <thead><tr><th>Дата</th><th>Кому</th><th class="num">Сумма</th><th>Комментарий</th><th style="text-align:center;">Выдано</th></tr></thead>
+      <tbody>${advs.map(function(a){
+        return h`<tr>
+          <td class="mono muted">${fmtDateShort(a.date)}</td><td>${escapeHtml(a.person||'')}</td>
+          <td class="num mono">${nfmt(Number(a.amount)||0, {maximumFractionDigits:2})}</td>
+          <td class="muted">${escapeHtml(a.note||'')}</td>
+          <td style="text-align:center;"><input type="checkbox" data-action="cash-advance-confirm-toggle" data-id="${a.id}" data-val="1" ${editCash?'':'disabled'} title="${editCash?'Отметить «Выдано» — отметка появится и в «Наличных расходах»':'Нет права «Наличные расходы»'}"></td>
+        </tr>`;
+      }).join("")}</tbody></table></div>`;
+    // --- накладные ---
+    var ohs = canOh ? pendingOverheadRequests() : [];
+    var ohTotal = 0;
+    ohs.forEach(function(e){ var a = overheadAccountedKZT(e); if(a.state==="ok" && a.value!=null) ohTotal += a.value; });
+    var ohHtml = h`<div class="table-wrap"><table>
+      <thead><tr><th>Дата</th><th>Статья</th><th>Комментарий</th><th class="num">Учтено в затратах</th><th>Запрошено</th><th style="text-align:center;">Оплачено</th>${editReg?'<th></th>':''}</tr></thead>
+      <tbody>${ohs.map(function(e){
+        var a = overheadAccountedKZT(e);
+        var sum = a.state==="ok" ? fmtKZT2(a.value)+" ₸" : '<span class="muted">—</span>';
+        return h`<tr data-req-oh="${e.id}">
+          <td class="mono muted">${fmtDateShort(e.date)}</td><td><b>${escapeHtml(e.category||'')}</b></td>
+          <td class="muted">${escapeHtml(e.note||'')}</td><td class="num mono">${sum}</td>
+          <td class="muted">${e.payment_requested_at ? fmtDateShort(String(e.payment_requested_at).slice(0,10)) : '—'}</td>
+          <td style="text-align:center;"><input type="checkbox" data-action="overhead-paid-toggle" data-id="${e.id}" data-val="1" ${editReg?'':'disabled'} title="${editReg?'Отметить оплату — отметка появится и в «Накладных расходах»':'Отмечать оплату может только Администратор, Руководитель или Финансист'}"></td>
+          ${editReg ? h`<td><a href="#" data-action="overhead-request-toggle" data-id="${e.id}" data-val="0" class="muted" title="Убрать из текущих запросов">отозвать</a></td>` : ''}
+        </tr>`;
+      }).join("")}</tbody></table></div>`;
+    var total = invGroups.length + advs.length + ohs.length;
+    return h`
+      ${financeTabs('requests')}
+      <div class="row-gap">
+        <div class="helptext" style="margin-bottom:4px;">Здесь всё, что ждёт оплаты. Поставьте галочку — она сразу появится и в самом разделе (реестр, наличные, накладные), а запрос исчезнет отсюда. Счета попадают сюда по галочке «подано» в реестре, накладные — по кнопке «В оплату».</div>
+        ${total===0 ? h`<div class="empty-state"><b>Текущих запросов нет</b>Всё оплачено.</div>` : ''}
+        ${canReg ? block("Реестр платежей", "счета, поданные в оплату", invGroups.length, sumLbl(invTotal)+(invMissing?" + "+invMissing+" без суммы":""), invHtml, "registry") : ''}
+        ${canCash ? block("Наличные", "запросы на выдачу наличных", advs.length, sumLbl(advTotal), advHtml, "cash") : ''}
+        ${canOh ? block("Накладные расходы", "отправлено кнопкой «В оплату»", ohs.length, sumLbl(ohTotal), ohHtml, "overhead") : ''}
+      </div>`;
   }
   function viewHotels(){
     if(isClientRole()) return viewHotelsClient();
@@ -9646,8 +9793,8 @@
       return;
     }
     if(!navAllowed(state.route.view)){ state.route = {view: firstAllowedView(), id:null}; }
-    var titleMap = {dashboard:"Дашборд", tickets:"Заявки", team:"Команда", parts:"Склад ЗИП", "import":"Заявки · Импорт из c-lector", registry:"Финансы · Реестр платежей", cashexpenses:"Финансы · Наличные расходы", overhead:"Финансы · Накладные расходы", crews:"Исполнители", hotels:"Отели", systemdefects:"Системный брак", activity:"Активность"};
-    var body = state.route.view==="tickets"?viewTickets(): state.route.view==="team"?viewTeam(): state.route.view==="parts"?viewParts(): state.route.view==="import"?viewImport(): state.route.view==="registry"?viewRegistry(): state.route.view==="cashexpenses"?viewCashExpenses(): state.route.view==="overhead"?viewOverhead(): state.route.view==="reports"?viewReports(): state.route.view==="crews"?viewCrews(): state.route.view==="hotels"?viewHotels(): state.route.view==="systemdefects"?viewSystemDefects(): state.route.view==="activity"?viewActivity(): viewDashboard();
+    var titleMap = {dashboard:"Дашборд", tickets:"Заявки", team:"Команда", parts:"Склад ЗИП", "import":"Заявки · Импорт из c-lector", registry:"Финансы · Реестр платежей", requests:"Финансы · Текущие запросы", cashexpenses:"Финансы · Наличные расходы", overhead:"Финансы · Накладные расходы", crews:"Исполнители", hotels:"Отели", systemdefects:"Системный брак", activity:"Активность"};
+    var body = state.route.view==="tickets"?viewTickets(): state.route.view==="team"?viewTeam(): state.route.view==="parts"?viewParts(): state.route.view==="import"?viewImport(): state.route.view==="requests"?viewRequests(): state.route.view==="registry"?viewRegistry(): state.route.view==="cashexpenses"?viewCashExpenses(): state.route.view==="overhead"?viewOverhead(): state.route.view==="reports"?viewReports(): state.route.view==="crews"?viewCrews(): state.route.view==="hotels"?viewHotels(): state.route.view==="systemdefects"?viewSystemDefects(): state.route.view==="activity"?viewActivity(): viewDashboard();
 
     // 0.2.17: «Импорт из c-lector» больше не отдельный пункт меню — он почти
     // всё подтягивает автоматически, отдельного раздела для него не нужно.
@@ -9669,7 +9816,7 @@
     var navItems = [
       ["dashboard","Дашборд"], ["tickets","Заявки",["import"]],
       ["systemdefects","Системный брак"],
-      ["team","Команда",["activity"]], ["crews","Исполнители"], ["parts","Склад ЗИП"], ["registry","Финансы",["cashexpenses","overhead"]], ["hotels","Отели"]
+      ["team","Команда",["activity"]], ["crews","Исполнители"], ["parts","Склад ЗИП"], ["registry","Финансы",["requests","cashexpenses","overhead"]], ["hotels","Отели"]
     ].filter(function(x){ return navAllowed(x[0]); });
     // 0.3.9: затемнение позади выезжающего на телефоне сайдбара — рендерится
     // всегда (как и сам сайдбар), видимость целиком на CSS (.sidebar-scrim.open,
@@ -10089,6 +10236,8 @@
       if(action==="oh-group-toggle"){ var gk = actionEl.getAttribute("data-key"); state.ohClosed = state.ohClosed || {}; if(/^s?m/.test(gk)){ state.ohClosed[gk] = (state.ohClosed[gk]===false); } else { state.ohClosed[gk] = !state.ohClosed[gk]; } render(); return; }
       if(action==="overhead-add-open"){ e.preventDefault(); openOverheadModal(null); return; }
       if(action==="overhead-edit-open"){ e.preventDefault(); openOverheadModal(id); return; }
+      if(action==="overhead-paid-toggle"){ setOverheadPaid(id, actionEl.getAttribute("data-val")==="1"); return; }
+      if(action==="overhead-request-toggle"){ e.preventDefault(); setOverheadPayRequested(id, actionEl.getAttribute("data-val")==="1"); return; }
       if(action==="overhead-expense-delete"){ e.preventDefault(); deleteOverheadExpense(id); return; }
       if(action==="cash-advance-confirm-toggle"){ setCashAdvanceConfirmed(id, actionEl.getAttribute("data-val")==="1"); return; }
       if(action==="cash-receipt-open"){ e.preventDefault(); openCashReceiptFile(actionEl.getAttribute("data-path")); return; }
