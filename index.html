@@ -2617,7 +2617,7 @@
       return Promise.all([worker(),worker(),worker(),worker(),worker()]);
     }).then(function(){ return out; });
   }
-  var APP_VERSION_LABEL = "0.4.51";
+  var APP_VERSION_LABEL = "0.4.52";
   /* ============================== РЕЗЕРВНАЯ КОПИЯ ==============================
      0.4.25 (по просьбе Антона): на плане Free у Supabase нет автоматического
      восстановления на любой момент, а всё (заявки, счета, накладные, наличные)
@@ -8576,41 +8576,28 @@
     var invGroups = canReg ? pendingInvoiceGroups() : [];
     var invTotal = 0, invMissing = 0;
     invGroups.forEach(function(g){ var a = invoiceAccountedKZT(g.primary); if(a.value!=null) invTotal += a.value; else invMissing++; });
-    var invHtml = h`<div class="table-wrap"><table>
-      <thead><tr><th>№ заявки</th><th>Отель</th><th>Счёт</th><th class="num">Учтено в затратах</th><th>Подано</th><th style="text-align:center;">Оплачено</th></tr></thead>
-      <tbody>${invGroups.map(function(g){
-        var ms = invoiceGroupMembers(g.primary);
-        var seen = {}, refs = [], hotels = {};
-        ms.forEach(function(m){
-          var tk = (state.tickets||[]).find(function(x){ return x.id===m.ticket_id; });
-          if(!tk || seen[tk.id]) return; seen[tk.id] = true;
-          refs.push(tk.external_ref || tk.id);
-          var ht = hotelById(tk.hotel_id); if(ht) hotels[ht.id] = ht;
-        });
-        var hk = Object.keys(hotels);
-        var hotelTxt = hk.length===1 ? "№"+hotels[hk[0]].id+" "+hotels[hk[0]].name : hk.length>1 ? "Разные ("+hk.length+")" : "—";
-        var subm = ms.map(function(m){ return m.submitted_for_payment_at; }).filter(Boolean).sort()[0];
-        var ids = ms.map(function(m){ return m.id; }).join(",");
-        var acc = invoiceAccountedKZT(g.primary);
-        return h`<tr>
-          <td class="mono">${escapeHtml(refs.slice(0,6).join(", "))}${refs.length>6?' …':''}</td>
-          <td>${escapeHtml(hotelTxt)}</td>
-          <td><button class="btn btn-sm registry-file-btn" data-action="invoice-open" data-path="${escapeHtml(g.primary.file_path)}" title="${escapeHtml(g.primary.file_name||'')}">${escapeHtml((g.primary.file_name||'счёт').slice(0,28))}</button></td>
-          <td class="num mono">${accountedKZTLabel(acc)}</td>
-          <td class="muted">${subm ? fmtDateShort(String(subm).slice(0,10)) : '—'}</td>
-          <td style="text-align:center;"><input type="checkbox" data-action="invoice-paid-toggle" data-id="${ids}" data-val="1" ${editReg?'':'disabled'} title="${editReg?'Отметить оплату — отметка появится и в «Реестре платежей»':'Отмечать оплату может только Администратор, Руководитель или Финансист'}"></td>
-        </tr>`;
-      }).join("")}</tbody></table></div>`;
+    // 0.4.52: тот же вид, что и в «Реестре платежей» — те же колонки (сумма, валюта, НДС, налог, учтено),
+    // раскрытие общего счёта по заявкам/объектам и те же галочки «подано»/«оплачено».
+    var expandedGroups = state.registryExpandedGroups || {};
+    var invRowNum = 0;
+    var invHtml = h`<div class="table-wrap"><table class="registry-table">
+      <colgroup><col style="width:28px"><col style="width:60px"><col style="width:110px"><col style="width:56px"><col style="width:70px"><col style="width:56px"><col style="width:50px"><col style="width:76px"><col style="width:96px"><col style="width:60px"><col style="width:56px"></colgroup>
+      <thead><tr>${REGISTRY_COLUMN_LABELS.map(function(lbl){ return h`<th>${lbl}</th>`; }).join("")}</tr></thead>
+      <tbody>${invGroups.map(function(g){ invRowNum++; return registryGroupRow(g, invRowNum, editReg, !!expandedGroups[g.key]); }).join("")}</tbody></table></div>`;
     // --- наличные ---
     var advs = canCash ? pendingCashAdvances() : [];
     var advTotal = advs.reduce(function(s,a){ return s + (Number(a.amount)||0); }, 0);
+    var CASH_BASIS = { regular:"Полная сумма", simplified:"Упрощёнка +20%", cash:"Нал. +30%", custom:"Свой %" };
     var advHtml = h`<div class="table-wrap"><table>
-      <thead><tr><th>Дата</th><th>Кому</th><th class="num">Сумма</th><th>Комментарий</th><th style="text-align:center;">Выдано</th></tr></thead>
+      <thead><tr><th>Дата</th><th>Кому</th><th class="num">Сумма</th><th>Комментарий</th><th>Налог</th><th class="num">Учтено в затратах</th><th style="text-align:center;">Выдано</th></tr></thead>
       <tbody>${advs.map(function(a){
+        var basis = a.accounted_basis ? (a.accounted_basis==='custom' && a.accounted_custom_pct!=null ? 'Свой (+'+a.accounted_custom_pct+'%)' : (CASH_BASIS[a.accounted_basis]||a.accounted_basis)) : 'Не учитывать';
+        var accTxt = a.accounted_basis ? nfmt(Number(cashAdvanceAccounted(a))||0, {minimumFractionDigits:2, maximumFractionDigits:2})+' ₸' : '—';
         return h`<tr>
           <td class="mono muted">${fmtDateShort(a.date)}</td><td>${escapeHtml(a.person||'')}</td>
           <td class="num mono">${nfmt(Number(a.amount)||0, {maximumFractionDigits:2})}</td>
           <td class="muted">${escapeHtml(a.note||'')}</td>
+          <td class="muted">${escapeHtml(basis)}</td><td class="num mono">${accTxt}</td>
           <td style="text-align:center;"><input type="checkbox" data-action="cash-advance-confirm-toggle" data-id="${a.id}" data-val="1" ${editCash?'':'disabled'} title="${editCash?'Отметить «Выдано» — отметка появится и в «Наличных расходах»':'Нет права «Наличные расходы»'}"></td>
         </tr>`;
       }).join("")}</tbody></table></div>`;
@@ -8619,13 +8606,17 @@
     var ohTotal = 0;
     ohs.forEach(function(e){ var a = overheadAccountedKZT(e); if(a.state==="ok" && a.value!=null) ohTotal += a.value; });
     var ohHtml = h`<div class="table-wrap"><table>
-      <thead><tr><th>Дата</th><th>Статья</th><th>Комментарий</th><th class="num">Учтено в затратах</th><th>Запрошено</th><th style="text-align:center;">Оплачено</th>${editReg?'<th></th>':''}</tr></thead>
+      <thead><tr><th>Дата</th><th>Статья</th><th>Комментарий</th><th class="num">Сумма</th><th>Валюта</th><th>НДС</th><th>Налог</th><th class="num">Учтено в затратах</th><th>Запрошено</th><th style="text-align:center;">Оплачено</th>${editReg?'<th></th>':''}</tr></thead>
       <tbody>${ohs.map(function(e){
         var a = overheadAccountedKZT(e);
         var sum = a.state==="ok" ? fmtKZT2(a.value)+" ₸" : '<span class="muted">—</span>';
+        var vatTxt = e.vat_included===true ? 'С НДС' : (e.vat_included===false ? 'Без НДС' : '—');
+        var taxTxt = e.tax_basis ? taxBasisLabel({tax_basis:e.tax_basis, extra:e.extra, currency:e.currency}) : '—';
         return h`<tr data-req-oh="${e.id}">
           <td class="mono muted">${fmtDateShort(e.date)}</td><td><b>${escapeHtml(e.category||'')}</b></td>
-          <td class="muted">${escapeHtml(e.note||'')}</td><td class="num mono">${sum}</td>
+          <td class="muted">${escapeHtml(e.note||'')}</td>
+          <td class="num mono">${fmtKZT(e.amount)}</td><td>${escapeHtml(e.currency||'KZT')}</td><td>${vatTxt}</td><td>${escapeHtml(taxTxt)}</td>
+          <td class="num mono">${sum}</td>
           <td class="muted">${e.payment_requested_at ? fmtDateShort(String(e.payment_requested_at).slice(0,10)) : '—'}</td>
           <td style="text-align:center;"><input type="checkbox" data-action="overhead-paid-toggle" data-id="${e.id}" data-val="1" ${editReg?'':'disabled'} title="${editReg?'Отметить оплату — отметка появится и в «Накладных расходах»':'Отмечать оплату может только Администратор, Руководитель или Финансист'}"></td>
           ${editReg ? h`<td><a href="#" data-action="overhead-request-toggle" data-id="${e.id}" data-val="0" class="muted" title="Убрать из текущих запросов">отозвать</a></td>` : ''}
