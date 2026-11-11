@@ -2647,7 +2647,7 @@
       return Promise.all([worker(),worker(),worker(),worker(),worker()]);
     }).then(function(){ return out; });
   }
-  var APP_VERSION_LABEL = "0.4.53";
+  var APP_VERSION_LABEL = "0.4.54";
   /* ============================== РЕЗЕРВНАЯ КОПИЯ ==============================
      0.4.25 (по просьбе Антона): на плане Free у Supabase нет автоматического
      восстановления на любой момент, а всё (заявки, счета, накладные, наличные)
@@ -3160,8 +3160,7 @@
   }
   function setInvoiceVatIncluded(invoiceId, val){
     if(!canEditRegistry()){ alert("Указывать, включён ли НДС в сумму, может только Администратор, Руководитель или Финансист."); return; }
-    var vatIncluded = (val==="with" || val==="custom") ? true : (val==="without" ? false : null);
-    var vatCustom = val==="custom";
+    var vatIncluded = val==="with" ? true : (val==="without" ? false : null);
     var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
     // 0.2.15 (по просьбе Антона): если сумма "с НДС", доп. налог в "Налоге"
     // теперь ставится автоматически прочерком (0%) и поле недоступно для
@@ -3173,34 +3172,85 @@
     // 0.4.53: «Свой НДС» хранится в extra; любой другой выбор стирает «свой»
     var exVat = Object.assign({}, (iv && iv.extra) || {});
     var hadCustom = exVat.vat_custom===true;
-    if(vatCustom){ exVat.vat_custom = true; update.extra = exVat; }
-    else if(hadCustom || exVat.custom_vat_amount!=null || exVat.custom_vat_pct!=null){ delete exVat.vat_custom; delete exVat.custom_vat_amount; delete exVat.custom_vat_pct; update.extra = exVat; }
+    if(hadCustom || exVat.custom_vat_amount!=null || exVat.custom_vat_pct!=null){ delete exVat.vat_custom; delete exVat.custom_vat_amount; delete exVat.custom_vat_pct; update.extra = exVat; }
     if(iv){ iv.vat_included = vatIncluded; if(resetTaxBasis) iv.tax_basis = null; if(update.extra) iv.extra = update.extra; }
-    var vatKey = invoiceId+":vat";
-    if(vatCustom) state.registryEditingFieldKey = vatKey;
-    else if(state.registryEditingFieldKey===vatKey) state.registryEditingFieldKey = null;
+    if(state.registryEditingFieldKey===(invoiceId+":vat")) state.registryEditingFieldKey = null;
     render();
-    if(vatCustom){ var vi = document.querySelector('.registry-tax-custom-input[data-invoice-vat-custom-amt][data-id="'+invoiceId+'"]'); if(vi){ vi.focus(); vi.select(); } }
     sb.from("invoices").update(update).eq("id", invoiceId).then(function(){
       if(iv) addNote(iv.ticket_id, "Указано по счёту «"+iv.file_name+"»: сумма "+(vatIncluded===true?"с НДС":(vatIncluded===false?"без НДС":"—"))+(resetTaxBasis?" (доп. налог сброшен — при «с НДС» ставится автоматически прочерком)":"")+".");
     });
   }
-  // 0.4.53: «Свой НДС» — сумма НДС из счёта (в валюте счёта) или одна ставка в %;
-  // взаимоисключающе, тем же приёмом, что «свой» доп. налог ниже.
-  function setInvoiceCustomVat(invoiceId, kind, val){
+  // 0.4.53/0.4.54: «Свой НДС» — окно с понятными подписями (вместо мелких полей в ячейке).
+  // Сумма НДС из счёта («в т.ч. НДС», в валюте счёта) ИЛИ одна ставка в % — заполняется одно из двух.
+  function openCustomVatModal(invoiceId){
+    var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
+    if(!iv) return;
+    if(!canEditRegistry()){ alert("Указывать НДС может только Администратор, Руководитель или Финансист."); return; }
+    var cur = iv.currency || "";
+    var curAmt = invoiceVatCustom(iv) ? invoiceCustomVatAmount(iv) : null;
+    var curPct = invoiceVatCustom(iv) ? invoiceCustomVatPct(iv) : null;
+    var total = Number(iv.amount);
+    openModal(h`
+      <div class="modal" data-stop style="width:460px;">
+        <div class="modal-head"><h2>НДС счёта</h2><button class="btn btn-ghost" data-close-modal>✕</button></div>
+        <form id="custom-vat-form">
+          <div class="modal-body">
+            <div class="helptext" style="margin:0 0 12px;font-size:13px;">Счёт «${escapeHtml(iv.file_name||'')}»: сумма <b>${iv.amount!=null?fmtKZT(iv.amount):'не указана'} ${escapeHtml(cur)}</b> — с НДС. Если в счёте позиции с разной ставкой (обычной и пониженной), впишите итоговую сумму НДС из счёта.</div>
+            <div class="field"><label>Сумма НДС из счёта${cur?', '+escapeHtml(cur):''}</label>
+              <input type="text" inputmode="decimal" name="amt" class="registry-tax-custom-input" style="width:100%;" value="${curAmt!=null?formatAmountInputValue(String(curAmt)):''}" placeholder="например 120 000">
+              <div class="helptext">Строка «в т.ч. НДС» / «Всего НДС» в счёте.</div></div>
+            <div class="muted" style="text-align:center;margin:6px 0;font-size:12px;">— или —</div>
+            <div class="field"><label>Одна ставка НДС на весь счёт, %</label>
+              <input type="text" inputmode="decimal" name="pct" class="registry-tax-custom-input" style="width:100%;" value="${curPct!=null?formatAmountInputValue(String(curPct)):''}" placeholder="например 10">
+              <div class="helptext">Если у всех позиций одинаковая нестандартная ставка.</div></div>
+            <div id="custom-vat-preview" class="mono" style="margin-top:12px;font-size:13px;"></div>
+          </div>
+          <div class="modal-foot">${invoiceVatCustom(iv) ? h`<button type="button" class="btn btn-ghost" id="custom-vat-reset" style="margin-right:auto;" title="Вернуть обычный расчёт: НДС по ставке валюты счёта">Обычный НДС</button>` : ''}<button type="button" class="btn" data-close-modal>Отмена</button><button type="submit" class="btn btn-primary">Сохранить</button></div>
+        </form>
+      </div>`);
+    var form = document.getElementById("custom-vat-form");
+    var rst = document.getElementById("custom-vat-reset");
+    if(rst) rst.addEventListener("click", function(){ setInvoiceVatIncluded(invoiceId, "with"); closeModal(); });
+    function vals(){
+      var a = parseAmountInputValue(form.elements.amt.value), p = parseAmountInputValue(form.elements.pct.value);
+      return { amt: a==="" ? null : Number(a), pct: p==="" ? null : Number(p) };
+    }
+    function preview(){
+      var v = vals(), box = document.getElementById("custom-vat-preview"), noVat = null;
+      if(v.amt!=null && !isNaN(v.amt) && total>0) noVat = total - v.amt;
+      else if(v.pct!=null && !isNaN(v.pct) && total>0) noVat = total/(1+v.pct/100);
+      if(noVat==null || noVat<=0){ box.textContent = ""; return; }
+      box.textContent = "Без НДС: "+fmtKZT2(noVat)+" "+cur+" · НДС "+fmtKZT2(total-noVat)+" ("+(((total/noVat)-1)*100).toFixed(1).replace(".",",")+"% от суммы без НДС)";
+    }
+    form.addEventListener("input", function(e){
+      // при вводе в одно поле второе очищаем — это два способа задать одно и то же
+      if(e.target.name==="amt" && e.target.value) form.elements.pct.value = "";
+      if(e.target.name==="pct" && e.target.value) form.elements.amt.value = "";
+      preview();
+    });
+    preview();
+    form.addEventListener("submit", function(e){
+      e.preventDefault();
+      var v = vals();
+      if((v.amt==null || isNaN(v.amt)) && (v.pct==null || isNaN(v.pct))){ alert("Укажите сумму НДС из счёта или ставку в процентах."); return; }
+      if(v.amt!=null && !isNaN(v.amt) && (v.amt<0 || (total>0 && v.amt>=total))){ alert("Сумма НДС должна быть меньше суммы счёта."); return; }
+      if(v.amt==null && v.pct!=null && (isNaN(v.pct) || v.pct<0 || v.pct>100)){ alert("Ставка НДС — от 0 до 100 %."); return; }
+      saveCustomVat(invoiceId, v.amt!=null && !isNaN(v.amt) ? v.amt : null, v.amt!=null && !isNaN(v.amt) ? null : v.pct);
+      closeModal();
+    });
+    var first = form.elements.amt; if(first){ first.focus(); }
+  }
+  function saveCustomVat(invoiceId, amt, pct){
     if(!canEditRegistry()) return;
     var iv = (state.invoices||[]).find(function(x){ return x.id===invoiceId; });
     if(!iv) return;
-    var raw = parseAmountInputValue(val);
-    var num = raw==="" ? null : Number(raw);
-    if(num!=null && (isNaN(num) || num<0)){ render(); return; }
     var extra = Object.assign({}, iv.extra||{});
-    if(kind==="pct"){ if(num==null) delete extra.custom_vat_pct; else { extra.custom_vat_pct = num; delete extra.custom_vat_amount; } }
-    else { if(num==null) delete extra.custom_vat_amount; else { extra.custom_vat_amount = num; delete extra.custom_vat_pct; } }
-    iv.extra = extra;
-    if(num!=null && state.registryEditingFieldKey===(invoiceId+":vat")) state.registryEditingFieldKey = null;
+    extra.vat_custom = true; delete extra.custom_vat_amount; delete extra.custom_vat_pct;
+    if(amt!=null) extra.custom_vat_amount = amt; else if(pct!=null) extra.custom_vat_pct = pct;
+    iv.vat_included = true; iv.tax_basis = null; iv.extra = extra;
+    if(state.registryEditingFieldKey===(invoiceId+":vat")) state.registryEditingFieldKey = null;
     render();
-    sb.from("invoices").update({extra:extra}).eq("id", invoiceId).then(function(){
+    sb.from("invoices").update({vat_included:true, tax_basis:null, extra:extra}).eq("id", invoiceId).then(function(){
       addNote(iv.ticket_id, "Указан свой НДС по счёту «"+iv.file_name+"»: "+invoiceVatLabel(iv)+".");
     });
   }
@@ -5582,17 +5632,12 @@
     }
     if(kind==="vat"){
       var vCustom = invoiceVatCustom(iv);
-      var vPct = vCustom ? h`<input type="text" inputmode="decimal" class="registry-tax-custom-input" data-invoice-vat-custom-pct data-id="${iv.id}" data-registry-edit-focus="${key}" value="${invoiceCustomVatPct(iv)!=null?formatAmountInputValue(String(invoiceCustomVatPct(iv))):''}" placeholder="%" title="Одна ставка НДС в процентах" ${disabled?'disabled':''}>` : "";
-      var vAmt = vCustom ? h`<input type="text" inputmode="decimal" class="registry-tax-custom-input" data-invoice-vat-custom-amt data-id="${iv.id}" data-registry-edit-focus="${key}" value="${invoiceCustomVatAmount(iv)!=null?formatAmountInputValue(String(invoiceCustomVatAmount(iv))):''}" placeholder="сумма НДС" title="Сумма НДС из счёта («в т.ч. НДС»), в валюте счёта — когда в счёте позиции с разной ставкой" ${disabled?'disabled':''}>` : "";
-      return h`<div class="registry-tax-edit-group" data-registry-edit-focus-group="${key}" style="display:flex;flex-direction:column;gap:3px;">
-        <select data-invoice-vat data-id="${iv.id}" data-registry-edit-focus="${key}" ${disabled?'disabled':''} title="${title}">
-          <option value="">—</option>
-          <option value="with" ${(iv.vat_included===true && !vCustom)?'selected':''}>С НДС</option>
-          <option value="without" ${iv.vat_included===false?'selected':''}>Без</option>
-          <option value="custom" ${vCustom?'selected':''}>Свой НДС…</option>
-        </select>
-        ${vCustom ? h`<div style="display:flex;gap:3px;align-items:center;">${vAmt}<span style="color:var(--muted);font-size:11px;">или</span>${vPct}</div>` : ""}
-      </div>`;
+      return h`<select data-invoice-vat data-id="${iv.id}" data-registry-edit-focus="${key}" ${disabled?'disabled':''} title="${title}">
+        <option value="">—</option>
+        <option value="with" ${(iv.vat_included===true && !vCustom)?'selected':''}>С НДС</option>
+        <option value="without" ${iv.vat_included===false?'selected':''}>Без</option>
+        <option value="custom" ${vCustom?'selected':''}>Свой НДС…</option>
+      </select>`;
     }
     var vatOn = iv.vat_included===true;
     // 0.3.6 (по просьбе Антона, п.5): "Свой…" — доп. налог не только 20%
@@ -5647,6 +5692,9 @@
       title = forceDisabled ? "При «с НДС» доп. налог не применяется — ставится автоматически прочерком" : "Способ оплаты — влияет на доп. налог в «Учтено в затратах»";
     }
     var roleTitle = editableRegistry ? title : "Редактировать может только Администратор, Руководитель или Финансист";
+    if(kind==="vat" && value==="custom" && editableRegistry){
+      return h`<button type="button" class="hotel-field-display" data-action="invoice-vat-custom-open" data-id="${iv.id}" title="Нажмите, чтобы изменить НДС счёта">${escapeHtml(label)}</button>`;
+    }
     if(editableRegistry && !forceDisabled && state.registryEditingFieldKey!==key && value){
       return h`<button type="button" class="hotel-field-display" data-action="registry-field-edit" data-key="${key}" title="${roleTitle}">${escapeHtml(label)}</button>`;
     }
@@ -10172,6 +10220,7 @@
         if(newAmountInput){ newAmountInput.focus(); newAmountInput.select(); }
         return;
       }
+      if(action==="invoice-vat-custom-open"){ e.preventDefault(); openCustomVatModal(id); return; }
       if(action==="registry-field-edit"){
         if(!canEditRegistry()) return;
         var registryKey = actionEl.getAttribute("data-key");
@@ -10337,9 +10386,10 @@
     if(e.target.matches("[data-hotel-field]")){ updateHotelField(e.target.getAttribute("data-id"), e.target.getAttribute("data-hotel-field"), e.target.value); return; }
     if(e.target.matches("[data-invoice-amount]")){ setInvoiceAmount(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.matches("[data-invoice-currency]")){ setInvoiceCurrency(e.target.getAttribute("data-id"), e.target.value); return; }
-    if(e.target.matches("[data-invoice-vat]")){ setInvoiceVatIncluded(e.target.getAttribute("data-id"), e.target.value); return; }
-    if(e.target.matches("[data-invoice-vat-custom-pct]")){ setInvoiceCustomVat(e.target.getAttribute("data-id"), "pct", e.target.value); return; }
-    if(e.target.matches("[data-invoice-vat-custom-amt]")){ setInvoiceCustomVat(e.target.getAttribute("data-id"), "amt", e.target.value); return; }
+    if(e.target.matches("[data-invoice-vat]")){
+      if(e.target.value==="custom"){ var vid = e.target.getAttribute("data-id"); state.registryEditingFieldKey = null; render(); openCustomVatModal(vid); return; }
+      setInvoiceVatIncluded(e.target.getAttribute("data-id"), e.target.value); return;
+    }
     if(e.target.matches("[data-invoice-tax-basis]")){ setInvoiceTaxBasis(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.matches("[data-invoice-tax-custom-pct]")){ setInvoiceCustomTaxPct(e.target.getAttribute("data-id"), e.target.value); return; }
     if(e.target.matches("[data-invoice-tax-custom-amt]")){ setInvoiceCustomTaxAmount(e.target.getAttribute("data-id"), e.target.value); return; }
