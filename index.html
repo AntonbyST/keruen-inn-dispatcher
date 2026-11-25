@@ -2626,14 +2626,17 @@
   var STORAGE_BUCKETS = ["invoices","ticket-photos","cash-receipts"];
   function listBucketFiles(bucket){
     var out = [];
-    function listPrefix(prefix){
-      return sb.storage.from(bucket).list(prefix, {limit:1000}).then(function(res){
+    function listPrefix(prefix, offset){
+      offset = offset || 0;
+      return sb.storage.from(bucket).list(prefix, {limit:1000, offset:offset}).then(function(res){
+        if(res && res.error) throw new Error(bucket+": "+(res.error.message||res.error));
         var items = (res && res.data) || [];
         var folders = [];
         items.forEach(function(it){
           if(it.id==null && !(it.metadata)) folders.push(it.name);
           else out.push({bucket:bucket, path:(prefix?prefix+"/":"")+it.name, size:(it.metadata&&it.metadata.size)||0, type:(it.metadata&&it.metadata.mimetype)||""});
         });
+        if(items.length>=1000) return listPrefix(prefix, offset+1000).then(function(more){ return folders.concat(more); });
         return folders;
       });
     }
@@ -2644,10 +2647,12 @@
         var f = folders[i++];
         return listPrefix(f).then(worker);
       }
-      return Promise.all([worker(),worker(),worker(),worker(),worker()]);
+      var ws = []; for(var k=0;k<12;k++) ws.push(worker());
+      return Promise.all(ws);
     }).then(function(){ return out; });
   }
-  var APP_VERSION_LABEL = "0.4.54";
+
+  var APP_VERSION_LABEL = "0.4.55";
   /* ============================== РЕЗЕРВНАЯ КОПИЯ ==============================
      0.4.25 (по просьбе Антона): на плане Free у Supabase нет автоматического
      восстановления на любой момент, а всё (заявки, счета, накладные, наличные)
@@ -2690,7 +2695,7 @@
     var all = Promise.all(STORAGE_BUCKETS.map(listBucketFiles)).then(function(lists){
       return [].concat.apply([], lists).map(function(f){ return { bucket:f.bucket, path:f.path, size:f.size }; });
     });
-    var timeout = new Promise(function(_, rej){ setTimeout(function(){ rej(new Error("список файлов не получен за 25 секунд (таблицы сохранены)")); }, 25000); });
+    var timeout = new Promise(function(_, rej){ setTimeout(function(){ rej(new Error("список файлов не получен за 3 минуты (таблицы сохранены)")); }, 180000); });
     return Promise.race([all, timeout]);
   }
   function backupCollect(onProgress){
